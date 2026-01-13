@@ -5,6 +5,10 @@ ezdxf>=1.0.0
 svgpathtools>=1.6.0
 pyyaml>=6.0
 matplotlib>=3.7.0
+scipy>=1.10.0
+
+# Optimization
+optuna>=3.4.0
 
 # Web UI
 streamlit>=1.28.0

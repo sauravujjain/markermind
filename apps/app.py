@@ -45,6 +45,10 @@ from nesting_engine.core import (
 )
 from nesting_engine.engine import SpyrrowEngine, SpyrrowConfig, check_spyrrow_available
 from nesting_engine.io import DXFParser, load_pieces_from_dxf, DXFParseResult
+from nesting_engine.io import (
+    load_aama_pattern, grade_to_nesting_pieces, AAMAGrader,
+    AAMAPiece, GradingRules
+)
 
 
 # Page configuration
@@ -608,64 +612,216 @@ def main():
         st.session_state.piece_type_config = {}
     if 'bundle_pieces' not in st.session_state:
         st.session_state.bundle_pieces = []
+    if 'aama_grader' not in st.session_state:
+        st.session_state.aama_grader = None
+    if 'aama_available_sizes' not in st.session_state:
+        st.session_state.aama_available_sizes = []
     
     # Tabs
     tab1, tab2, tab3 = st.tabs(["📁 Upload", "🔧 Configure", "📊 Results"])
     
     # ==================== TAB 1: UPLOAD ====================
     with tab1:
-        st.header("Upload DXF Files")
-        
-        uploaded_files = st.file_uploader(
-            "Upload DXF pattern files",
-            type=['dxf'],
-            accept_multiple_files=True
+        st.header("Upload Pattern Files")
+
+        # Pattern type selector
+        pattern_type = st.radio(
+            "Pattern Type",
+            ["Standard DXF", "AAMA/ASTM Graded (DXF + RUL)"],
+            horizontal=True,
+            help="Standard DXF: Pre-sized patterns. AAMA: Base pattern + grading rules for size generation."
         )
-        
-        if uploaded_files:
-            all_pieces = []
-            all_results = []
-            
-            for uploaded_file in uploaded_files:
-                with tempfile.NamedTemporaryFile(delete=False, suffix='.dxf') as tmp:
-                    tmp.write(uploaded_file.getbuffer())
-                    tmp_path = tmp.name
-                
+
+        if pattern_type == "Standard DXF":
+            # Original DXF upload flow
+            uploaded_files = st.file_uploader(
+                "Upload DXF pattern files",
+                type=['dxf'],
+                accept_multiple_files=True,
+                key="standard_dxf"
+            )
+
+            if uploaded_files:
+                all_pieces = []
+                all_results = []
+
+                for uploaded_file in uploaded_files:
+                    with tempfile.NamedTemporaryFile(delete=False, suffix='.dxf') as tmp:
+                        tmp.write(uploaded_file.getbuffer())
+                        tmp_path = tmp.name
+
+                    try:
+                        pieces, result = load_pieces_from_dxf(
+                            tmp_path,
+                            rotations=allowed_rotations,
+                            allow_flip=True
+                        )
+                        all_pieces.extend(pieces)
+                        all_results.append(result)
+
+                        with st.expander(f"📄 {uploaded_file.name}", expanded=True):
+                            col1, col2, col3 = st.columns(3)
+                            col1.metric("Pieces", len(pieces))
+                            if result.unit:
+                                col2.metric("Units", result.unit.value)
+                            if result.marker_info and 'utilization_percent' in result.marker_info:
+                                col3.metric("Original Utilization",
+                                           f"{result.marker_info['utilization_percent']:.1f}%")
+                            for err in result.errors:
+                                st.error(err)
+                            for warn in result.warnings:
+                                st.warning(warn)
+                    finally:
+                        os.unlink(tmp_path)
+
+                st.session_state.pieces = all_pieces
+                st.session_state.parse_result = all_results[0] if all_results else None
+                st.session_state.aama_grader = None  # Clear AAMA state
+                st.session_state.aama_available_sizes = []
+
+                grouped = group_pieces_by_type(all_pieces)
+                for ptype in grouped.keys():
+                    if ptype not in st.session_state.piece_type_config:
+                        st.session_state.piece_type_config[ptype] = {'demand': 1, 'flipped': False}
+
+                available_sizes = set(p.identifier.size for p in all_pieces if p.identifier.size)
+                st.success(f"✅ Loaded {len(all_pieces)} pieces from {len(uploaded_files)} file(s)")
+                st.info(f"📏 Detected sizes: {', '.join(sorted(available_sizes))}")
+
+        else:
+            # AAMA/ASTM Graded pattern flow
+            st.markdown("**Upload AAMA/ASTM pattern files:**")
+            st.caption("AAMA format: DXF contains base size pattern with grade points, RUL contains grading rules for generating all sizes.")
+
+            col_dxf, col_rul = st.columns(2)
+
+            with col_dxf:
+                dxf_file = st.file_uploader(
+                    "DXF file (base pattern)",
+                    type=['dxf'],
+                    key="aama_dxf"
+                )
+
+            with col_rul:
+                rul_file = st.file_uploader(
+                    "RUL file (grading rules)",
+                    type=['rul'],
+                    key="aama_rul"
+                )
+
+            if dxf_file and rul_file:
+                # Save uploaded files temporarily
+                with tempfile.NamedTemporaryFile(delete=False, suffix='.dxf') as tmp_dxf:
+                    tmp_dxf.write(dxf_file.getbuffer())
+                    dxf_path = tmp_dxf.name
+
+                with tempfile.NamedTemporaryFile(delete=False, suffix='.rul') as tmp_rul:
+                    tmp_rul.write(rul_file.getbuffer())
+                    rul_path = tmp_rul.name
+
                 try:
-                    pieces, result = load_pieces_from_dxf(
-                        tmp_path,
-                        rotations=allowed_rotations,
-                        allow_flip=True
-                    )
-                    all_pieces.extend(pieces)
-                    all_results.append(result)
-                    
-                    with st.expander(f"📄 {uploaded_file.name}", expanded=True):
+                    # Load AAMA pattern
+                    aama_pieces, rules = load_aama_pattern(dxf_path, rul_path)
+                    grader = AAMAGrader(aama_pieces, rules)
+
+                    st.session_state.aama_grader = grader
+                    st.session_state.aama_available_sizes = rules.header.size_list
+
+                    # Show pattern info
+                    with st.expander("📊 Pattern Information", expanded=True):
                         col1, col2, col3 = st.columns(3)
-                        col1.metric("Pieces", len(pieces))
-                        if result.unit:
-                            col2.metric("Units", result.unit.value)
-                        if result.marker_info and 'utilization_percent' in result.marker_info:
-                            col3.metric("Original Utilization", 
-                                       f"{result.marker_info['utilization_percent']:.1f}%")
-                        for err in result.errors:
-                            st.error(err)
-                        for warn in result.warnings:
-                            st.warning(warn)
+                        col1.metric("Pieces", len(aama_pieces))
+                        col2.metric("Available Sizes", len(rules.header.size_list))
+                        col3.metric("Sample Size", rules.header.sample_size)
+
+                        st.markdown(f"**Size range:** {' → '.join(rules.header.size_list)}")
+                        st.markdown(f"**Units:** {rules.header.units}")
+                        st.markdown(f"**Grading Rules:** {rules.num_rules}")
+
+                        # Show piece summary
+                        st.markdown("---")
+                        st.markdown("**Pieces in pattern:**")
+                        piece_info = []
+                        for p in aama_pieces[:10]:
+                            piece_info.append({
+                                "Name": p.name,
+                                "Vertices": p.num_vertices,
+                                "Grade Points": p.num_grade_points,
+                                "Material": p.material or "-"
+                            })
+                        st.dataframe(piece_info, use_container_width=True)
+                        if len(aama_pieces) > 10:
+                            st.caption(f"... and {len(aama_pieces) - 10} more pieces")
+
+                    # Size selection for grading
+                    st.markdown("---")
+                    st.subheader("🎯 Select Sizes to Generate")
+                    st.caption("Choose which sizes to generate from the grading rules")
+
+                    # All sizes selector
+                    selected_sizes = st.multiselect(
+                        "Select sizes",
+                        options=rules.header.size_list,
+                        default=[rules.header.sample_size],
+                        key="aama_size_select"
+                    )
+
+                    # Quick buttons
+                    btn_col1, btn_col2, btn_col3 = st.columns(3)
+                    with btn_col1:
+                        if st.button("Select All", use_container_width=True, key="aama_all"):
+                            selected_sizes = rules.header.size_list
+                            st.rerun()
+                    with btn_col2:
+                        if st.button("Select Sample Only", use_container_width=True, key="aama_sample"):
+                            selected_sizes = [rules.header.sample_size]
+                            st.rerun()
+                    with btn_col3:
+                        if st.button("Clear", use_container_width=True, key="aama_clear"):
+                            selected_sizes = []
+                            st.rerun()
+
+                    if selected_sizes:
+                        # Generate pieces for selected sizes
+                        if st.button("🔄 Generate Pieces", type="primary", use_container_width=True):
+                            with st.spinner(f"Generating pieces for {len(selected_sizes)} sizes..."):
+                                nesting_pieces = grade_to_nesting_pieces(
+                                    dxf_path,
+                                    rul_path,
+                                    target_sizes=selected_sizes,
+                                    rotations=allowed_rotations,
+                                    allow_flip=True
+                                )
+
+                            st.session_state.pieces = nesting_pieces
+                            st.session_state.parse_result = None
+
+                            # Configure piece types
+                            grouped = group_pieces_by_type(nesting_pieces)
+                            for ptype in grouped.keys():
+                                if ptype not in st.session_state.piece_type_config:
+                                    st.session_state.piece_type_config[ptype] = {'demand': 1, 'flipped': False}
+
+                            # Update size quantities to 1 for generated sizes
+                            for size in selected_sizes:
+                                st.session_state.size_quantities[size] = 1
+
+                            st.success(f"✅ Generated {len(nesting_pieces)} pieces for sizes: {', '.join(selected_sizes)}")
+                            st.info("👉 Go to the **Configure** tab to set quantities and run nesting")
+                    else:
+                        st.warning("⚠️ Please select at least one size to generate")
+
+                except Exception as e:
+                    st.error(f"❌ Error loading AAMA files: {str(e)}")
+                    import traceback
+                    with st.expander("Error details"):
+                        st.code(traceback.format_exc())
                 finally:
-                    os.unlink(tmp_path)
-            
-            st.session_state.pieces = all_pieces
-            st.session_state.parse_result = all_results[0] if all_results else None
-            
-            grouped = group_pieces_by_type(all_pieces)
-            for ptype in grouped.keys():
-                if ptype not in st.session_state.piece_type_config:
-                    st.session_state.piece_type_config[ptype] = {'demand': 1, 'flipped': False}
-            
-            available_sizes = set(p.identifier.size for p in all_pieces if p.identifier.size)
-            st.success(f"✅ Loaded {len(all_pieces)} pieces from {len(uploaded_files)} file(s)")
-            st.info(f"📏 Detected sizes: {', '.join(sorted(available_sizes))}")
+                    os.unlink(dxf_path)
+                    os.unlink(rul_path)
+
+            elif dxf_file or rul_file:
+                st.info("📁 Please upload both DXF and RUL files")
     
     # ==================== TAB 2: CONFIGURE ====================
     with tab2:
@@ -931,22 +1087,42 @@ def main():
                     
                     fig = plot_solution_with_bundles(solution, bundle_pieces, show_labels)
                     st.pyplot(fig)
+
+                    # Save PNG before closing figure
+                    png_buf = io.BytesIO()
+                    fig.savefig(png_buf, format='png', dpi=150, bbox_inches='tight',
+                               facecolor='white', edgecolor='none')
+                    png_buf.seek(0)
                     plt.close()
-                    
+
                     # Export
                     st.subheader("📥 Export")
-                    exp1, exp2 = st.columns(2)
-                    
+                    exp1, exp2, exp3 = st.columns(3)
+
                     with exp1:
                         svg_content = export_to_svg(solution, bundle_pieces)
                         st.download_button("⬇️ Download SVG", data=svg_content,
                                           file_name="nesting_result.svg", mime="image/svg+xml",
                                           use_container_width=True)
-                    
+
                     with exp2:
                         dxf_content = export_to_dxf(solution, bundle_pieces)
                         st.download_button("⬇️ Download DXF", data=dxf_content,
                                           file_name="nesting_result.dxf", mime="application/dxf",
+                                          use_container_width=True)
+
+                    with exp3:
+                        # PNG Export with size ratio in filename
+                        size_parts = []
+                        for size in STANDARD_SIZES:
+                            qty = st.session_state.size_quantities.get(size, 0)
+                            if qty > 0:
+                                size_parts.append(f"{size}{qty}")
+                        ratio_str = "_".join(size_parts) if size_parts else "marker"
+                        png_filename = f"nest_{ratio_str}_{solution.utilization_percent:.0f}pct.png"
+
+                        st.download_button("📷 Download PNG", data=png_buf.getvalue(),
+                                          file_name=png_filename, mime="image/png",
                                           use_container_width=True)
                     
                     # Placement details
