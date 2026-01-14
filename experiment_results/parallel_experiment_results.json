@@ -1,0 +1,1209 @@
+{
+  "metadata": {
+    "timestamp": "2026-01-09T17:36:35.628340",
+    "dxf_file": "data/24_2506_7_S-AN1000.DXF",
+    "sizes": [
+      "XS",
+      "S",
+      "M",
+      "L",
+      "XL",
+      "XXL"
+    ],
+    "time_limit_seconds": 30,
+    "num_combinations": 100,
+    "num_workers": 6,
+    "random_seed": 42,
+    "min_garments": 1,
+    "max_garments": 6,
+    "container_width_mm": 1524.0,
+    "piece_config": {
+      "BK": {
+        "demand": 1,
+        "flip": false
+      },
+      "FRT": {
+        "demand": 1,
+        "flip": false
+      },
+      "SL": {
+        "demand": 2,
+        "flip": true
+      }
+    },
+    "total_experiment_time_seconds": 545.745519399643
+  },
+  "summary": {
+    "best_utilization": 81.1973478854189,
+    "worst_utilization": 65.03808193366103,
+    "average_utilization": 76.92428715178636,
+    "top10_average": 80.65843801109625,
+    "top20_average": 80.37529989906395
+  },
+  "results": [
+    {
+      "rank": 1,
+      "sizes": {
+        "XS": 2,
+        "L": 1,
+        "XL": 1,
+        "XXL": 1
+      },
+      "total_garments": 5,
+      "utilization": 81.1973478854189,
+      "strip_length": 5430.748046875,
+      "duration_seconds": 31.77858328819275
+    },
+    {
+      "rank": 2,
+      "sizes": {
+        "S": 1,
+        "M": 1,
+        "L": 1,
+        "XL": 3
+      },
+      "total_garments": 6,
+      "utilization": 80.86841042276635,
+      "strip_length": 6770.134765625,
+      "duration_seconds": 30.464576721191406
+    },
+    {
+      "rank": 3,
+      "sizes": {
+        "XS": 2,
+        "L": 1,
+        "XL": 1,
+        "XXL": 1
+      },
+      "total_garments": 5,
+      "utilization": 80.80279196336176,
+      "strip_length": 5457.26611328125,
+      "duration_seconds": 32.15986657142639
+    },
+    {
+      "rank": 4,
+      "sizes": {
+        "S": 1,
+        "M": 1,
+        "L": 2,
+        "XL": 2
+      },
+      "total_garments": 6,
+      "utilization": 80.66018921229366,
+      "strip_length": 6687.35400390625,
+      "duration_seconds": 31.84985375404358
+    },
+    {
+      "rank": 5,
+      "sizes": {
+        "M": 1,
+        "L": 1,
+        "XL": 2
+      },
+      "total_garments": 4,
+      "utilization": 80.65621906004901,
+      "strip_length": 4601.416015625,
+      "duration_seconds": 31.725477695465088
+    },
+    {
+      "rank": 6,
+      "sizes": {
+        "XS": 1,
+        "S": 1,
+        "L": 2,
+        "XL": 1,
+        "XXL": 1
+      },
+      "total_garments": 6,
+      "utilization": 80.64875215215116,
+      "strip_length": 6656.90234375,
+      "duration_seconds": 31.78682255744934
+    },
+    {
+      "rank": 7,
+      "sizes": {
+        "XS": 2,
+        "XXL": 3
+      },
+      "total_garments": 5,
+      "utilization": 80.62194807239216,
+      "strip_length": 5776.4482421875,
+      "duration_seconds": 31.826619386672974
+    },
+    {
+      "rank": 8,
+      "sizes": {
+        "XS": 1,
+        "S": 1,
+        "XL": 1,
+        "XXL": 2
+      },
+      "total_garments": 5,
+      "utilization": 80.38861310273417,
+      "strip_length": 5755.9013671875,
+      "duration_seconds": 32.88772130012512
+    },
+    {
+      "rank": 9,
+      "sizes": {
+        "S": 1,
+        "L": 1,
+        "XL": 1,
+        "XXL": 3
+      },
+      "total_garments": 6,
+      "utilization": 80.37057462632453,
+      "strip_length": 7315.11962890625,
+      "duration_seconds": 31.76884150505066
+    },
+    {
+      "rank": 10,
+      "sizes": {
+        "XS": 2,
+        "M": 1,
+        "L": 1,
+        "XL": 1
+      },
+      "total_garments": 5,
+      "utilization": 80.3695336134708,
+      "strip_length": 5190.91455078125,
+      "duration_seconds": 32.92742729187012
+    },
+    {
+      "rank": 11,
+      "sizes": {
+        "S": 1,
+        "XL": 1,
+        "XXL": 2
+      },
+      "total_garments": 4,
+      "utilization": 80.3493190694628,
+      "strip_length": 4858.125,
+      "duration_seconds": 31.862446784973145
+    },
+    {
+      "rank": 12,
+      "sizes": {
+        "XS": 1,
+        "S": 1,
+        "XL": 1,
+        "XXL": 3
+      },
+      "total_garments": 6,
+      "utilization": 80.34621159433748,
+      "strip_length": 7090.6123046875,
+      "duration_seconds": 32.3501033782959
+    },
+    {
+      "rank": 13,
+      "sizes": {
+        "XS": 1,
+        "S": 1,
+        "L": 1,
+        "XL": 2
+      },
+      "total_garments": 5,
+      "utilization": 80.34163980496923,
+      "strip_length": 5451.2548828125,
+      "duration_seconds": 32.31867814064026
+    },
+    {
+      "rank": 14,
+      "sizes": {
+        "M": 1,
+        "L": 1,
+        "XXL": 2
+      },
+      "total_garments": 4,
+      "utilization": 80.02611080978201,
+      "strip_length": 4845.82080078125,
+      "duration_seconds": 32.76404166221619
+    },
+    {
+      "rank": 15,
+      "sizes": {
+        "S": 1,
+        "M": 1,
+        "L": 2,
+        "XXL": 2
+      },
+      "total_garments": 6,
+      "utilization": 80.02203543192824,
+      "strip_length": 6948.86865234375,
+      "duration_seconds": 32.09970211982727
+    },
+    {
+      "rank": 16,
+      "sizes": {
+        "XS": 1,
+        "S": 2,
+        "L": 1,
+        "XL": 2
+      },
+      "total_garments": 6,
+      "utilization": 80.0000769166281,
+      "strip_length": 6445.67822265625,
+      "duration_seconds": 32.428075075149536
+    },
+    {
+      "rank": 17,
+      "sizes": {
+        "XS": 2,
+        "M": 1,
+        "L": 1,
+        "XXL": 2
+      },
+      "total_garments": 6,
+      "utilization": 79.99680194589847,
+      "strip_length": 6656.7158203125,
+      "duration_seconds": 32.6082763671875
+    },
+    {
+      "rank": 18,
+      "sizes": {
+        "XS": 1,
+        "S": 1,
+        "M": 1,
+        "XL": 2,
+        "XXL": 1
+      },
+      "total_garments": 6,
+      "utilization": 79.9580807711393,
+      "strip_length": 6723.56298828125,
+      "duration_seconds": 31.797314405441284
+    },
+    {
+      "rank": 19,
+      "sizes": {
+        "XS": 3,
+        "M": 1,
+        "XL": 1,
+        "XXL": 1
+      },
+      "total_garments": 6,
+      "utilization": 79.95256247375342,
+      "strip_length": 6328.37451171875,
+      "duration_seconds": 31.717942714691162
+    },
+    {
+      "rank": 20,
+      "sizes": {
+        "XS": 1,
+        "S": 1,
+        "M": 1,
+        "XL": 2,
+        "XXL": 1
+      },
+      "total_garments": 6,
+      "utilization": 79.92877905241726,
+      "strip_length": 6726.02783203125,
+      "duration_seconds": 31.45068049430847
+    },
+    {
+      "rank": 21,
+      "sizes": {
+        "XS": 1,
+        "S": 1,
+        "L": 1,
+        "XXL": 1
+      },
+      "total_garments": 4,
+      "utilization": 79.89459212797145,
+      "strip_length": 4351.0732421875,
+      "duration_seconds": 31.936065912246704
+    },
+    {
+      "rank": 22,
+      "sizes": {
+        "XS": 2
+      },
+      "total_garments": 2,
+      "utilization": 79.87376552720957,
+      "strip_length": 1811.9063720703125,
+      "duration_seconds": 32.35201954841614
+    },
+    {
+      "rank": 23,
+      "sizes": {
+        "S": 1,
+        "M": 1,
+        "L": 1
+      },
+      "total_garments": 3,
+      "utilization": 79.8436976099845,
+      "strip_length": 3149.833740234375,
+      "duration_seconds": 32.60041666030884
+    },
+    {
+      "rank": 24,
+      "sizes": {
+        "XS": 2,
+        "XL": 2
+      },
+      "total_garments": 4,
+      "utilization": 79.82883193402674,
+      "strip_length": 4284.845703125,
+      "duration_seconds": 33.17230725288391
+    },
+    {
+      "rank": 25,
+      "sizes": {
+        "S": 1,
+        "M": 2,
+        "XL": 1,
+        "XXL": 2
+      },
+      "total_garments": 6,
+      "utilization": 79.76387724424721,
+      "strip_length": 6980.5400390625,
+      "duration_seconds": 31.757493257522583
+    },
+    {
+      "rank": 26,
+      "sizes": {
+        "S": 2,
+        "M": 3,
+        "L": 1
+      },
+      "total_garments": 6,
+      "utilization": 79.53545462766121,
+      "strip_length": 6231.6142578125,
+      "duration_seconds": 31.669967651367188
+    },
+    {
+      "rank": 27,
+      "sizes": {
+        "XS": 1,
+        "XL": 2
+      },
+      "total_garments": 3,
+      "utilization": 79.53035746299764,
+      "strip_length": 3391.0615234375,
+      "duration_seconds": 31.651748418807983
+    },
+    {
+      "rank": 28,
+      "sizes": {
+        "S": 2,
+        "XL": 1,
+        "XXL": 1
+      },
+      "total_garments": 4,
+      "utilization": 79.51749190886731,
+      "strip_length": 4540.4365234375,
+      "duration_seconds": 32.034650802612305
+    },
+    {
+      "rank": 29,
+      "sizes": {
+        "XS": 2,
+        "L": 1,
+        "XL": 2,
+        "XXL": 1
+      },
+      "total_garments": 6,
+      "utilization": 79.4981183228484,
+      "strip_length": 6787.9287109375,
+      "duration_seconds": 32.31107306480408
+    },
+    {
+      "rank": 30,
+      "sizes": {
+        "S": 2,
+        "M": 2,
+        "XL": 2
+      },
+      "total_garments": 6,
+      "utilization": 79.39949202640673,
+      "strip_length": 6538.6103515625,
+      "duration_seconds": 31.44513726234436
+    },
+    {
+      "rank": 31,
+      "sizes": {
+        "S": 1,
+        "L": 3,
+        "XL": 1
+      },
+      "total_garments": 5,
+      "utilization": 79.33870451163587,
+      "strip_length": 5647.84228515625,
+      "duration_seconds": 33.02534580230713
+    },
+    {
+      "rank": 32,
+      "sizes": {
+        "M": 1,
+        "L": 4,
+        "XXL": 1
+      },
+      "total_garments": 6,
+      "utilization": 79.31209011738288,
+      "strip_length": 6966.5615234375,
+      "duration_seconds": 32.066373348236084
+    },
+    {
+      "rank": 33,
+      "sizes": {
+        "XS": 2,
+        "S": 2,
+        "L": 1,
+        "XL": 1
+      },
+      "total_garments": 6,
+      "utilization": 79.24886115438201,
+      "strip_length": 6174.8701171875,
+      "duration_seconds": 31.647464752197266
+    },
+    {
+      "rank": 34,
+      "sizes": {
+        "XS": 3,
+        "S": 1,
+        "XL": 1
+      },
+      "total_garments": 5,
+      "utilization": 79.18675198336871,
+      "strip_length": 4968.54443359375,
+      "duration_seconds": 31.424731969833374
+    },
+    {
+      "rank": 35,
+      "sizes": {
+        "XS": 3,
+        "S": 1,
+        "M": 1,
+        "XXL": 1
+      },
+      "total_garments": 6,
+      "utilization": 78.99228311185549,
+      "strip_length": 6139.79638671875,
+      "duration_seconds": 31.380945920944214
+    },
+    {
+      "rank": 36,
+      "sizes": {
+        "M": 1,
+        "XL": 2,
+        "XXL": 2
+      },
+      "total_garments": 5,
+      "utilization": 78.86169803560024,
+      "strip_length": 6271.03173828125,
+      "duration_seconds": 31.70752501487732
+    },
+    {
+      "rank": 37,
+      "sizes": {
+        "M": 1,
+        "L": 1,
+        "XL": 3,
+        "XXL": 1
+      },
+      "total_garments": 6,
+      "utilization": 78.74068161412625,
+      "strip_length": 7325.2216796875,
+      "duration_seconds": 32.3078396320343
+    },
+    {
+      "rank": 38,
+      "sizes": {
+        "M": 2,
+        "L": 2
+      },
+      "total_garments": 4,
+      "utilization": 78.63251597086,
+      "strip_length": 4420.62353515625,
+      "duration_seconds": 33.90446138381958
+    },
+    {
+      "rank": 39,
+      "sizes": {
+        "XS": 2,
+        "S": 2,
+        "M": 1,
+        "XXL": 1
+      },
+      "total_garments": 6,
+      "utilization": 78.46778420955074,
+      "strip_length": 6248.763671875,
+      "duration_seconds": 32.47192978858948
+    },
+    {
+      "rank": 40,
+      "sizes": {
+        "XL": 2,
+        "XXL": 1
+      },
+      "total_garments": 3,
+      "utilization": 78.37243522891315,
+      "strip_length": 3883.066162109375,
+      "duration_seconds": 31.25248622894287
+    },
+    {
+      "rank": 41,
+      "sizes": {
+        "XS": 2,
+        "L": 1
+      },
+      "total_garments": 3,
+      "utilization": 78.35493027179659,
+      "strip_length": 3003.030029296875,
+      "duration_seconds": 33.70584726333618
+    },
+    {
+      "rank": 42,
+      "sizes": {
+        "XS": 2,
+        "M": 1,
+        "XXL": 1
+      },
+      "total_garments": 4,
+      "utilization": 78.34470038383166,
+      "strip_length": 4275.2431640625,
+      "duration_seconds": 32.00700354576111
+    },
+    {
+      "rank": 43,
+      "sizes": {
+        "S": 1,
+        "M": 2,
+        "XL": 2
+      },
+      "total_garments": 5,
+      "utilization": 78.33575781895388,
+      "strip_length": 5635.6171875,
+      "duration_seconds": 32.65494394302368
+    },
+    {
+      "rank": 44,
+      "sizes": {
+        "XS": 1,
+        "M": 3,
+        "XXL": 1
+      },
+      "total_garments": 5,
+      "utilization": 78.1755945704988,
+      "strip_length": 5488.0126953125,
+      "duration_seconds": 32.093897342681885
+    },
+    {
+      "rank": 45,
+      "sizes": {
+        "XS": 1,
+        "M": 2,
+        "XL": 1
+      },
+      "total_garments": 4,
+      "utilization": 78.16927779284303,
+      "strip_length": 4317.2333984375,
+      "duration_seconds": 33.56272792816162
+    },
+    {
+      "rank": 46,
+      "sizes": {
+        "XS": 1,
+        "XXL": 1
+      },
+      "total_garments": 2,
+      "utilization": 78.16060684548232,
+      "strip_length": 2294.72119140625,
+      "duration_seconds": 31.65378212928772
+    },
+    {
+      "rank": 47,
+      "sizes": {
+        "XXL": 1
+      },
+      "total_garments": 1,
+      "utilization": 78.15062233182205,
+      "strip_length": 1369.0858154296875,
+      "duration_seconds": 31.272621631622314
+    },
+    {
+      "rank": 48,
+      "sizes": {
+        "XXL": 1
+      },
+      "total_garments": 1,
+      "utilization": 78.14954926545315,
+      "strip_length": 1369.1046142578125,
+      "duration_seconds": 31.68845820426941
+    },
+    {
+      "rank": 49,
+      "sizes": {
+        "XXL": 1
+      },
+      "total_garments": 1,
+      "utilization": 78.14842048718027,
+      "strip_length": 1369.1243896484375,
+      "duration_seconds": 32.19498372077942
+    },
+    {
+      "rank": 50,
+      "sizes": {
+        "XXL": 1
+      },
+      "total_garments": 1,
+      "utilization": 78.1475147010372,
+      "strip_length": 1369.1402587890625,
+      "duration_seconds": 31.495051383972168
+    },
+    {
+      "rank": 51,
+      "sizes": {
+        "XXL": 1
+      },
+      "total_garments": 1,
+      "utilization": 78.14718026223049,
+      "strip_length": 1369.1461181640625,
+      "duration_seconds": 32.68657469749451
+    },
+    {
+      "rank": 52,
+      "sizes": {
+        "XS": 2,
+        "M": 2,
+        "L": 1,
+        "XXL": 1
+      },
+      "total_garments": 6,
+      "utilization": 78.12641447357521,
+      "strip_length": 6511.818359375,
+      "duration_seconds": 32.589837074279785
+    },
+    {
+      "rank": 53,
+      "sizes": {
+        "S": 2,
+        "L": 2,
+        "XXL": 1
+      },
+      "total_garments": 5,
+      "utilization": 78.08578314802676,
+      "strip_length": 5680.10888671875,
+      "duration_seconds": 32.1993248462677
+    },
+    {
+      "rank": 54,
+      "sizes": {
+        "XL": 1,
+        "XXL": 2
+      },
+      "total_garments": 3,
+      "utilization": 78.01124627832606,
+      "strip_length": 4007.820068359375,
+      "duration_seconds": 31.46914553642273
+    },
+    {
+      "rank": 55,
+      "sizes": {
+        "XS": 1,
+        "S": 1,
+        "M": 1,
+        "XL": 1
+      },
+      "total_garments": 4,
+      "utilization": 77.99038263037976,
+      "strip_length": 4256.205078125,
+      "duration_seconds": 32.42864203453064
+    },
+    {
+      "rank": 56,
+      "sizes": {
+        "XS": 1,
+        "S": 1,
+        "L": 1,
+        "XL": 1
+      },
+      "total_garments": 4,
+      "utilization": 77.98386069600755,
+      "strip_length": 4350.86865234375,
+      "duration_seconds": 32.996227979660034
+    },
+    {
+      "rank": 57,
+      "sizes": {
+        "S": 2,
+        "M": 1,
+        "L": 1,
+        "XL": 1
+      },
+      "total_garments": 5,
+      "utilization": 77.89438221056383,
+      "strip_length": 5492.71435546875,
+      "duration_seconds": 33.40006899833679
+    },
+    {
+      "rank": 58,
+      "sizes": {
+        "L": 1,
+        "XXL": 1
+      },
+      "total_garments": 2,
+      "utilization": 77.87139891887496,
+      "strip_length": 2537.174560546875,
+      "duration_seconds": 31.40921401977539
+    },
+    {
+      "rank": 59,
+      "sizes": {
+        "M": 1,
+        "L": 1,
+        "XXL": 1
+      },
+      "total_garments": 3,
+      "utilization": 77.84514532631727,
+      "strip_length": 3607.12646484375,
+      "duration_seconds": 32.39780783653259
+    },
+    {
+      "rank": 60,
+      "sizes": {
+        "XS": 1,
+        "S": 2,
+        "XL": 1
+      },
+      "total_garments": 4,
+      "utilization": 77.78259942176713,
+      "strip_length": 4196.4541015625,
+      "duration_seconds": 32.15141177177429
+    },
+    {
+      "rank": 61,
+      "sizes": {
+        "XS": 1,
+        "L": 1,
+        "XXL": 1
+      },
+      "total_garments": 3,
+      "utilization": 77.7659679682108,
+      "strip_length": 3471.122802734375,
+      "duration_seconds": 32.058191776275635
+    },
+    {
+      "rank": 62,
+      "sizes": {
+        "XS": 2,
+        "S": 2,
+        "L": 1
+      },
+      "total_garments": 5,
+      "utilization": 77.72434523136141,
+      "strip_length": 5026.5615234375,
+      "duration_seconds": 32.6386559009552
+    },
+    {
+      "rank": 63,
+      "sizes": {
+        "S": 2,
+        "M": 2,
+        "XL": 1
+      },
+      "total_garments": 5,
+      "utilization": 77.65585353395865,
+      "strip_length": 5414.8798828125,
+      "duration_seconds": 32.51090431213379
+    },
+    {
+      "rank": 64,
+      "sizes": {
+        "XS": 1,
+        "S": 1,
+        "M": 2,
+        "XXL": 1
+      },
+      "total_garments": 5,
+      "utilization": 77.59274639185311,
+      "strip_length": 5457.94189453125,
+      "duration_seconds": 33.301551818847656
+    },
+    {
+      "rank": 65,
+      "sizes": {
+        "XS": 1,
+        "S": 1,
+        "M": 1
+      },
+      "total_garments": 3,
+      "utilization": 77.31597196164621,
+      "strip_length": 3017.201171875,
+      "duration_seconds": 31.781338453292847
+    },
+    {
+      "rank": 66,
+      "sizes": {
+        "M": 1,
+        "XXL": 1
+      },
+      "total_garments": 2,
+      "utilization": 77.25585779533776,
+      "strip_length": 2462.193359375,
+      "duration_seconds": 32.18415951728821
+    },
+    {
+      "rank": 67,
+      "sizes": {
+        "M": 1,
+        "XXL": 1
+      },
+      "total_garments": 2,
+      "utilization": 77.2532150607178,
+      "strip_length": 2462.277587890625,
+      "duration_seconds": 31.960882663726807
+    },
+    {
+      "rank": 68,
+      "sizes": {
+        "M": 1,
+        "XXL": 1
+      },
+      "total_garments": 2,
+      "utilization": 77.25010529154862,
+      "strip_length": 2462.376708984375,
+      "duration_seconds": 32.26498746871948
+    },
+    {
+      "rank": 69,
+      "sizes": {
+        "M": 1,
+        "XXL": 1
+      },
+      "total_garments": 2,
+      "utilization": 77.2489870613756,
+      "strip_length": 2462.412353515625,
+      "duration_seconds": 31.27330493927002
+    },
+    {
+      "rank": 70,
+      "sizes": {
+        "M": 1,
+        "XXL": 1
+      },
+      "total_garments": 2,
+      "utilization": 77.24431535397663,
+      "strip_length": 2462.561279296875,
+      "duration_seconds": 31.589358806610107
+    },
+    {
+      "rank": 71,
+      "sizes": {
+        "S": 2,
+        "M": 2,
+        "L": 1,
+        "XXL": 1
+      },
+      "total_garments": 6,
+      "utilization": 77.22950562670005,
+      "strip_length": 6725.4765625,
+      "duration_seconds": 33.04864430427551
+    },
+    {
+      "rank": 72,
+      "sizes": {
+        "S": 2,
+        "M": 1,
+        "L": 1
+      },
+      "total_garments": 4,
+      "utilization": 77.20605393047107,
+      "strip_length": 4263.73779296875,
+      "duration_seconds": 32.829288721084595
+    },
+    {
+      "rank": 73,
+      "sizes": {
+        "XL": 2
+      },
+      "total_garments": 2,
+      "utilization": 77.15975573390699,
+      "strip_length": 2557.427001953125,
+      "duration_seconds": 33.12982892990112
+    },
+    {
+      "rank": 74,
+      "sizes": {
+        "XS": 1,
+        "S": 1,
+        "L": 2
+      },
+      "total_garments": 4,
+      "utilization": 76.9803761948614,
+      "strip_length": 4302.53466796875,
+      "duration_seconds": 31.64278769493103
+    },
+    {
+      "rank": 75,
+      "sizes": {
+        "XS": 2,
+        "M": 2
+      },
+      "total_garments": 4,
+      "utilization": 76.83817572329386,
+      "strip_length": 4049.70166015625,
+      "duration_seconds": 32.660369634628296
+    },
+    {
+      "rank": 76,
+      "sizes": {
+        "XS": 1,
+        "XL": 1
+      },
+      "total_garments": 2,
+      "utilization": 76.45301588850674,
+      "strip_length": 2237.0224609375,
+      "duration_seconds": 32.17372536659241
+    },
+    {
+      "rank": 77,
+      "sizes": {
+        "XL": 1
+      },
+      "total_garments": 1,
+      "utilization": 76.26073525532425,
+      "strip_length": 1293.7879638671875,
+      "duration_seconds": 32.083824634552
+    },
+    {
+      "rank": 78,
+      "sizes": {
+        "XL": 1
+      },
+      "total_garments": 1,
+      "utilization": 76.2570514478932,
+      "strip_length": 1293.8504638671875,
+      "duration_seconds": 32.27853178977966
+    },
+    {
+      "rank": 79,
+      "sizes": {
+        "XL": 1
+      },
+      "total_garments": 1,
+      "utilization": 76.2561521348948,
+      "strip_length": 1293.86572265625,
+      "duration_seconds": 32.07822346687317
+    },
+    {
+      "rank": 80,
+      "sizes": {
+        "S": 3,
+        "M": 1
+      },
+      "total_garments": 4,
+      "utilization": 76.01734766491448,
+      "strip_length": 4160.8916015625,
+      "duration_seconds": 32.192893981933594
+    },
+    {
+      "rank": 81,
+      "sizes": {
+        "XS": 1,
+        "M": 1
+      },
+      "total_garments": 2,
+      "utilization": 75.94602077957235,
+      "strip_length": 2048.63720703125,
+      "duration_seconds": 33.75588917732239
+    },
+    {
+      "rank": 82,
+      "sizes": {
+        "XS": 3,
+        "S": 1
+      },
+      "total_garments": 4,
+      "utilization": 75.64827635296706,
+      "strip_length": 3896.687255859375,
+      "duration_seconds": 30.173691511154175
+    },
+    {
+      "rank": 83,
+      "sizes": {
+        "S": 1,
+        "XL": 1
+      },
+      "total_garments": 2,
+      "utilization": 74.46270153052626,
+      "strip_length": 2368.396728515625,
+      "duration_seconds": 31.469343662261963
+    },
+    {
+      "rank": 84,
+      "sizes": {
+        "S": 1,
+        "XL": 1
+      },
+      "total_garments": 2,
+      "utilization": 74.45393678382487,
+      "strip_length": 2368.675537109375,
+      "duration_seconds": 32.41511654853821
+    },
+    {
+      "rank": 85,
+      "sizes": {
+        "S": 1,
+        "XL": 1
+      },
+      "total_garments": 2,
+      "utilization": 74.44687736756703,
+      "strip_length": 2368.900146484375,
+      "duration_seconds": 30.431506395339966
+    },
+    {
+      "rank": 86,
+      "sizes": {
+        "XS": 1,
+        "L": 1
+      },
+      "total_garments": 2,
+      "utilization": 74.15875813882255,
+      "strip_length": 2197.182373046875,
+      "duration_seconds": 31.396554946899414
+    },
+    {
+      "rank": 87,
+      "sizes": {
+        "XS": 1,
+        "L": 1
+      },
+      "total_garments": 2,
+      "utilization": 72.26351150654196,
+      "strip_length": 2254.8076171875,
+      "duration_seconds": 31.54877734184265
+    },
+    {
+      "rank": 88,
+      "sizes": {
+        "M": 2
+      },
+      "total_garments": 2,
+      "utilization": 72.14003038251721,
+      "strip_length": 2307.2890625,
+      "duration_seconds": 32.10556983947754
+    },
+    {
+      "rank": 89,
+      "sizes": {
+        "S": 1,
+        "M": 1
+      },
+      "total_garments": 2,
+      "utilization": 71.62647857836697,
+      "strip_length": 2246.5986328125,
+      "duration_seconds": 30.904062747955322
+    },
+    {
+      "rank": 90,
+      "sizes": {
+        "S": 1,
+        "M": 1
+      },
+      "total_garments": 2,
+      "utilization": 71.62647857836697,
+      "strip_length": 2246.5986328125,
+      "duration_seconds": 31.495428800582886
+    },
+    {
+      "rank": 91,
+      "sizes": {
+        "M": 1
+      },
+      "total_garments": 1,
+      "utilization": 68.2615279121103,
+      "strip_length": 1219.192626953125,
+      "duration_seconds": 32.17532920837402
+    },
+    {
+      "rank": 92,
+      "sizes": {
+        "S": 1
+      },
+      "total_garments": 1,
+      "utilization": 66.50877285750212,
+      "strip_length": 1168.1466064453125,
+      "duration_seconds": 32.40317344665527
+    },
+    {
+      "rank": 93,
+      "sizes": {
+        "S": 1
+      },
+      "total_garments": 1,
+      "utilization": 66.50569410157199,
+      "strip_length": 1168.20068359375,
+      "duration_seconds": 32.10489273071289
+    },
+    {
+      "rank": 94,
+      "sizes": {
+        "S": 1
+      },
+      "total_garments": 1,
+      "utilization": 66.50253224489934,
+      "strip_length": 1168.2562255859375,
+      "duration_seconds": 31.380154848098755
+    },
+    {
+      "rank": 95,
+      "sizes": {
+        "S": 1
+      },
+      "total_garments": 1,
+      "utilization": 66.50032259827849,
+      "strip_length": 1168.2950439453125,
+      "duration_seconds": 32.11558938026428
+    },
+    {
+      "rank": 96,
+      "sizes": {
+        "XS": 1
+      },
+      "total_garments": 1,
+      "utilization": 65.03808193366103,
+      "strip_length": 1112.6080322265625,
+      "duration_seconds": 32.34657144546509
+    },
+    {
+      "rank": 97,
+      "sizes": {
+        "XS": 1
+      },
+      "total_garments": 1,
+      "utilization": 65.03808193366103,
+      "strip_length": 1112.6080322265625,
+      "duration_seconds": 31.818177700042725
+    },
+    {
+      "rank": 98,
+      "sizes": {
+        "XS": 1
+      },
+      "total_garments": 1,
+      "utilization": 65.03808193366103,
+      "strip_length": 1112.6080322265625,
+      "duration_seconds": 31.765230894088745
+    },
+    {
+      "rank": 99,
+      "sizes": {
+        "XS": 1
+      },
+      "total_garments": 1,
+      "utilization": 65.03808193366103,
+      "strip_length": 1112.6080322265625,
+      "duration_seconds": 31.795695781707764
+    },
+    {
+      "rank": 100,
+      "sizes": {
+        "XS": 1
+      },
+      "total_garments": 1,
+      "utilization": 65.03808193366103,
+      "strip_length": 1112.6080322265625,
+      "duration_seconds": 32.000948905944824
+    }
+  ]
+}

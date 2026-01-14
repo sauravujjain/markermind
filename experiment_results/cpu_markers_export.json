@@ -1,0 +1,358 @@
+{
+  "timestamp": "2026-01-11T14:58:21.583843",
+  "dxf_source": "data/24_2506_7_S-AN1000.DXF",
+  "output_dir": "experiment_results/cpu_markers_dxf",
+  "random_seed": 42,
+  "num_combinations": 30,
+  "results": [
+    {
+      "combo_id": 0,
+      "size_mix": {
+        "XS": 2,
+        "S": 2,
+        "M": 1,
+        "XXL": 1
+      },
+      "utilization": 78.71568927487573,
+      "strip_length": 6229.083984375,
+      "filepath": "experiment_results/cpu_markers_dxf/marker_00_M1_S2_XS2_XXL1.dxf",
+      "error": ""
+    },
+    {
+      "combo_id": 1,
+      "size_mix": {
+        "XS": 1,
+        "XXL": 1
+      },
+      "utilization": 78.17512872971115,
+      "strip_length": 2294.294921875,
+      "filepath": "experiment_results/cpu_markers_dxf/marker_01_XS1_XXL1.dxf",
+      "error": ""
+    },
+    {
+      "combo_id": 2,
+      "size_mix": {
+        "XS": 2,
+        "L": 1,
+        "XL": 2,
+        "XXL": 1
+      },
+      "utilization": 79.49569942918257,
+      "strip_length": 6788.13525390625,
+      "filepath": "experiment_results/cpu_markers_dxf/marker_02_L1_XL2_XS2_XXL1.dxf",
+      "error": ""
+    },
+    {
+      "combo_id": 3,
+      "size_mix": {
+        "XS": 1
+      },
+      "utilization": 65.04295597085876,
+      "strip_length": 1112.524658203125,
+      "filepath": "experiment_results/cpu_markers_dxf/marker_03_XS1.dxf",
+      "error": ""
+    },
+    {
+      "combo_id": 4,
+      "size_mix": {
+        "S": 1,
+        "XL": 1
+      },
+      "utilization": 74.46422137252857,
+      "strip_length": 2368.348388671875,
+      "filepath": "experiment_results/cpu_markers_dxf/marker_04_S1_XL1.dxf",
+      "error": ""
+    },
+    {
+      "combo_id": 5,
+      "size_mix": {
+        "XS": 1,
+        "S": 1,
+        "XL": 1,
+        "XXL": 2
+      },
+      "utilization": 80.43422719214442,
+      "strip_length": 5752.63720703125,
+      "filepath": "experiment_results/cpu_markers_dxf/marker_05_S1_XL1_XS1_XXL2.dxf",
+      "error": ""
+    },
+    {
+      "combo_id": 6,
+      "size_mix": {
+        "S": 1,
+        "M": 1,
+        "L": 2,
+        "XL": 2
+      },
+      "utilization": 81.38123341210436,
+      "strip_length": 6628.103515625,
+      "filepath": "experiment_results/cpu_markers_dxf/marker_06_L2_M1_S1_XL2.dxf",
+      "error": ""
+    },
+    {
+      "combo_id": 7,
+      "size_mix": {
+        "S": 1
+      },
+      "utilization": 66.51037142108069,
+      "strip_length": 1168.1185302734375,
+      "filepath": "experiment_results/cpu_markers_dxf/marker_07_S1.dxf",
+      "error": ""
+    },
+    {
+      "combo_id": 8,
+      "size_mix": {
+        "S": 2,
+        "M": 3,
+        "L": 1
+      },
+      "utilization": 79.66271051613911,
+      "strip_length": 6221.65966796875,
+      "filepath": "experiment_results/cpu_markers_dxf/marker_08_L1_M3_S2.dxf",
+      "error": ""
+    },
+    {
+      "combo_id": 9,
+      "size_mix": {
+        "XS": 1
+      },
+      "utilization": 65.03808193366103,
+      "strip_length": 1112.6080322265625,
+      "filepath": "experiment_results/cpu_markers_dxf/marker_09_XS1.dxf",
+      "error": ""
+    },
+    {
+      "combo_id": 10,
+      "size_mix": {
+        "XS": 1,
+        "M": 2,
+        "XL": 1
+      },
+      "utilization": 78.18301025349183,
+      "strip_length": 4316.47509765625,
+      "filepath": "experiment_results/cpu_markers_dxf/marker_10_M2_XL1_XS1.dxf",
+      "error": ""
+    },
+    {
+      "combo_id": 11,
+      "size_mix": {
+        "XS": 1,
+        "L": 1,
+        "XXL": 1
+      },
+      "utilization": 77.62627830839122,
+      "strip_length": 3477.369140625,
+      "filepath": "experiment_results/cpu_markers_dxf/marker_11_L1_XS1_XXL1.dxf",
+      "error": ""
+    },
+    {
+      "combo_id": 12,
+      "size_mix": {
+        "XS": 2,
+        "M": 1,
+        "L": 1,
+        "XL": 1
+      },
+      "utilization": 80.37027449317038,
+      "strip_length": 5190.86669921875,
+      "filepath": "experiment_results/cpu_markers_dxf/marker_12_L1_M1_XL1_XS2.dxf",
+      "error": ""
+    },
+    {
+      "combo_id": 13,
+      "size_mix": {
+        "XS": 1,
+        "S": 1,
+        "M": 1,
+        "XL": 2,
+        "XXL": 1
+      },
+      "utilization": 79.70222644269953,
+      "strip_length": 6745.146484375,
+      "filepath": "experiment_results/cpu_markers_dxf/marker_13_M1_S1_XL2_XS1_XXL1.dxf",
+      "error": ""
+    },
+    {
+      "combo_id": 14,
+      "size_mix": {
+        "XXL": 1
+      },
+      "utilization": 78.14773766183197,
+      "strip_length": 1369.1363525390625,
+      "filepath": "experiment_results/cpu_markers_dxf/marker_14_XXL1.dxf",
+      "error": ""
+    },
+    {
+      "combo_id": 15,
+      "size_mix": {
+        "XS": 1,
+        "M": 1
+      },
+      "utilization": 75.94602077957235,
+      "strip_length": 2048.63720703125,
+      "filepath": "experiment_results/cpu_markers_dxf/marker_15_M1_XS1.dxf",
+      "error": ""
+    },
+    {
+      "combo_id": 16,
+      "size_mix": {
+        "XS": 1,
+        "L": 1
+      },
+      "utilization": 74.25700387737419,
+      "strip_length": 2194.275390625,
+      "filepath": "experiment_results/cpu_markers_dxf/marker_16_L1_XS1.dxf",
+      "error": ""
+    },
+    {
+      "combo_id": 17,
+      "size_mix": {
+        "M": 1,
+        "L": 1,
+        "XXL": 1
+      },
+      "utilization": 77.85831423953259,
+      "strip_length": 3606.516357421875,
+      "filepath": "experiment_results/cpu_markers_dxf/marker_17_L1_M1_XXL1.dxf",
+      "error": ""
+    },
+    {
+      "combo_id": 18,
+      "size_mix": {
+        "M": 2
+      },
+      "utilization": 72.14003038251721,
+      "strip_length": 2307.2890625,
+      "filepath": "experiment_results/cpu_markers_dxf/marker_18_M2.dxf",
+      "error": ""
+    },
+    {
+      "combo_id": 19,
+      "size_mix": {
+        "M": 1,
+        "XXL": 1
+      },
+      "utilization": 77.25985671148644,
+      "strip_length": 2462.06591796875,
+      "filepath": "experiment_results/cpu_markers_dxf/marker_19_M1_XXL1.dxf",
+      "error": ""
+    },
+    {
+      "combo_id": 20,
+      "size_mix": {
+        "XS": 1,
+        "S": 1,
+        "XL": 1,
+        "XXL": 3
+      },
+      "utilization": 80.36720884920626,
+      "strip_length": 7088.759765625,
+      "filepath": "experiment_results/cpu_markers_dxf/marker_20_S1_XL1_XS1_XXL3.dxf",
+      "error": ""
+    },
+    {
+      "combo_id": 21,
+      "size_mix": {
+        "S": 2,
+        "L": 2,
+        "XXL": 1
+      },
+      "utilization": 78.10685270792767,
+      "strip_length": 5678.57666015625,
+      "filepath": "experiment_results/cpu_markers_dxf/marker_21_L2_S2_XXL1.dxf",
+      "error": ""
+    },
+    {
+      "combo_id": 22,
+      "size_mix": {
+        "XL": 1,
+        "XXL": 2
+      },
+      "utilization": 78.83508965837227,
+      "strip_length": 3965.9375,
+      "filepath": "experiment_results/cpu_markers_dxf/marker_22_XL1_XXL2.dxf",
+      "error": ""
+    },
+    {
+      "combo_id": 23,
+      "size_mix": {
+        "M": 1,
+        "XXL": 1
+      },
+      "utilization": 77.25218865602092,
+      "strip_length": 2462.310302734375,
+      "filepath": "experiment_results/cpu_markers_dxf/marker_23_M1_XXL1.dxf",
+      "error": ""
+    },
+    {
+      "combo_id": 24,
+      "size_mix": {
+        "S": 1
+      },
+      "utilization": 66.49946796302353,
+      "strip_length": 1168.31005859375,
+      "filepath": "experiment_results/cpu_markers_dxf/marker_24_S1.dxf",
+      "error": ""
+    },
+    {
+      "combo_id": 25,
+      "size_mix": {
+        "M": 1
+      },
+      "utilization": 68.2615279121103,
+      "strip_length": 1219.192626953125,
+      "filepath": "experiment_results/cpu_markers_dxf/marker_25_M1.dxf",
+      "error": ""
+    },
+    {
+      "combo_id": 26,
+      "size_mix": {
+        "XS": 1,
+        "S": 1,
+        "M": 1,
+        "XL": 1
+      },
+      "utilization": 78.24888099664135,
+      "strip_length": 4242.14453125,
+      "filepath": "experiment_results/cpu_markers_dxf/marker_26_M1_S1_XL1_XS1.dxf",
+      "error": ""
+    },
+    {
+      "combo_id": 27,
+      "size_mix": {
+        "S": 1,
+        "M": 1,
+        "L": 2,
+        "XXL": 2
+      },
+      "utilization": 80.02873857010458,
+      "strip_length": 6948.28662109375,
+      "filepath": "experiment_results/cpu_markers_dxf/marker_27_L2_M1_S1_XXL2.dxf",
+      "error": ""
+    },
+    {
+      "combo_id": 28,
+      "size_mix": {
+        "S": 3,
+        "M": 1
+      },
+      "utilization": 76.0800401093777,
+      "strip_length": 4157.462890625,
+      "filepath": "experiment_results/cpu_markers_dxf/marker_28_M1_S3.dxf",
+      "error": ""
+    },
+    {
+      "combo_id": 29,
+      "size_mix": {
+        "M": 1,
+        "L": 1,
+        "XL": 3,
+        "XXL": 1
+      },
+      "utilization": 78.74556317059502,
+      "strip_length": 7324.767578125,
+      "filepath": "experiment_results/cpu_markers_dxf/marker_29_L1_M1_XL3_XXL1.dxf",
+      "error": ""
+    }
+  ]
+}

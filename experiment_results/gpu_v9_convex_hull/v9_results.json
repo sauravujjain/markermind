@@ -1,0 +1,169 @@
+{
+  "metadata": {
+    "timestamp": "2026-01-13T10:07:05.959973",
+    "algorithm": "V9 Strip Packing",
+    "gpu_available": true,
+    "resolution_scale": 0.15,
+    "strip_width_inch": 60.0,
+    "strip_width_px": 228,
+    "contact_weight": 1000.0
+  },
+  "gpu_results": [
+    {
+      "combo_idx": 0,
+      "combination": {
+        "M": 1
+      },
+      "efficiency": 0.6658859189859465,
+      "strip_area": 43548.0,
+      "strip_length_px": 191,
+      "strip_length_inch": 50.13123359580053,
+      "time_ms": 316.7085647583008,
+      "num_pieces": 4,
+      "total_pieces": 4
+    },
+    {
+      "combo_idx": 1,
+      "combination": {
+        "S": 2
+      },
+      "efficiency": 0.6438787185354691,
+      "strip_area": 83904.0,
+      "strip_length_px": 368,
+      "strip_length_inch": 96.58792650918636,
+      "time_ms": 39.68167304992676,
+      "num_pieces": 8,
+      "total_pieces": 8
+    },
+    {
+      "combo_idx": 2,
+      "combination": {
+        "XS": 1,
+        "XXL": 1
+      },
+      "efficiency": 0.6953449709060682,
+      "strip_area": 91428.0,
+      "strip_length_px": 401,
+      "strip_length_inch": 105.24934383202101,
+      "time_ms": 108.56986045837402,
+      "num_pieces": 8,
+      "total_pieces": 8
+    },
+    {
+      "combo_idx": 3,
+      "combination": {
+        "M": 2,
+        "L": 1
+      },
+      "efficiency": 0.7630981636971806,
+      "strip_area": 117192.0,
+      "strip_length_px": 514,
+      "strip_length_inch": 134.90813648293965,
+      "time_ms": 70.2354907989502,
+      "num_pieces": 12,
+      "total_pieces": 12
+    },
+    {
+      "combo_idx": 4,
+      "combination": {
+        "XS": 2,
+        "S": 1,
+        "M": 1
+      },
+      "efficiency": 0.6715638015903067,
+      "strip_area": 158460.0,
+      "strip_length_px": 695,
+      "strip_length_inch": 182.4146981627297,
+      "time_ms": 81.93755149841309,
+      "num_pieces": 16,
+      "total_pieces": 16
+    },
+    {
+      "combo_idx": 5,
+      "combination": {
+        "S": 1,
+        "M": 1,
+        "L": 1,
+        "XL": 1
+      },
+      "efficiency": 0.7419417807383549,
+      "strip_area": 163932.0,
+      "strip_length_px": 719,
+      "strip_length_inch": 188.7139107611549,
+      "time_ms": 114.62593078613281,
+      "num_pieces": 16,
+      "total_pieces": 16
+    },
+    {
+      "combo_idx": 6,
+      "combination": {
+        "M": 1,
+        "S": 2,
+        "XS": 2,
+        "XXL": 1
+      },
+      "efficiency": 0.7009343125254998,
+      "strip_area": 245100.0,
+      "strip_length_px": 1075,
+      "strip_length_inch": 282.15223097112863,
+      "time_ms": 166.5050983428955,
+      "num_pieces": 24,
+      "total_pieces": 24
+    },
+    {
+      "combo_idx": 7,
+      "combination": {
+        "L": 2,
+        "XL": 2,
+        "XXL": 1
+      },
+      "efficiency": 0.7552186303321756,
+      "strip_area": 224580.0,
+      "strip_length_px": 985,
+      "strip_length_inch": 258.53018372703417,
+      "time_ms": 117.95425415039062,
+      "num_pieces": 20,
+      "total_pieces": 20
+    },
+    {
+      "combo_idx": 8,
+      "combination": {
+        "XS": 3,
+        "S": 2,
+        "M": 1
+      },
+      "efficiency": 0.6978435305917753,
+      "strip_area": 227316.0,
+      "strip_length_px": 997,
+      "strip_length_inch": 261.67979002624674,
+      "time_ms": 111.02533340454102,
+      "num_pieces": 24,
+      "total_pieces": 24
+    },
+    {
+      "combo_idx": 9,
+      "combination": {
+        "S": 2,
+        "M": 2,
+        "L": 1,
+        "XL": 1
+      },
+      "efficiency": 0.7448508939653148,
+      "strip_area": 238488.0,
+      "strip_length_px": 1046,
+      "strip_length_inch": 274.5406824146982,
+      "time_ms": 136.00587844848633,
+      "num_pieces": 24,
+      "total_pieces": 24
+    }
+  ],
+  "summary": {
+    "efficiency_min": 64.38787185354691,
+    "efficiency_max": 76.30981636971806,
+    "efficiency_avg": 70.80560721868093
+  },
+  "timing": {
+    "total_seconds": 3.8958561420440674,
+    "avg_ms_per_combo": 389.58561420440674
+  }
+}

@@ -1,0 +1,145 @@
+{
+  "timestamp": "2026-01-12T06:07:57.291187",
+  "summary": {
+    "spearman_rho_all": 0.47878787878787876,
+    "pearson_r_all": 0.7653695322192543,
+    "spearman_rho_successful": 0.37142857142857144,
+    "pearson_r_successful": 0.7487369557910457,
+    "verdict": "POOR",
+    "gpu_total_time_s": 159.2633092403412,
+    "cpu_total_time_s": 306.9083077907562,
+    "speedup_factor": 1.9270496717332855,
+    "gpu_success_rate": 0.6,
+    "cpu_success_rate": 1.0,
+    "both_success_rate": 0.6
+  },
+  "per_combo": [
+    {
+      "combo_id": 0,
+      "combo": {
+        "M": 1
+      },
+      "gpu_util": 30.472619047619048,
+      "cpu_util": 68.2615279121103,
+      "gpu_pieces": "4/4",
+      "cpu_pieces": "4/4",
+      "both_successful": true
+    },
+    {
+      "combo_id": 1,
+      "combo": {
+        "S": 2
+      },
+      "gpu_util": 58.56985294117647,
+      "cpu_util": 71.8430666340631,
+      "gpu_pieces": "8/8",
+      "cpu_pieces": "8/8",
+      "both_successful": true
+    },
+    {
+      "combo_id": 2,
+      "combo": {
+        "XS": 1,
+        "XXL": 1
+      },
+      "gpu_util": 59.266129032258064,
+      "cpu_util": 78.1401306781132,
+      "gpu_pieces": "8/8",
+      "cpu_pieces": "8/8",
+      "both_successful": true
+    },
+    {
+      "combo_id": 3,
+      "combo": {
+        "M": 2,
+        "L": 1
+      },
+      "gpu_util": 52.900267737617135,
+      "cpu_util": 80.03001144759975,
+      "gpu_pieces": "12/12",
+      "cpu_pieces": "12/12",
+      "both_successful": true
+    },
+    {
+      "combo_id": 4,
+      "combo": {
+        "XS": 2,
+        "S": 1,
+        "M": 1
+      },
+      "gpu_util": 64.50240054869684,
+      "cpu_util": 77.98612999041484,
+      "gpu_pieces": "16/16",
+      "cpu_pieces": "16/16",
+      "both_successful": true
+    },
+    {
+      "combo_id": 5,
+      "combo": {
+        "S": 1,
+        "M": 1,
+        "L": 1,
+        "XL": 1
+      },
+      "gpu_util": 68.26869455006337,
+      "cpu_util": 79.30998677263447,
+      "gpu_pieces": "16/16",
+      "cpu_pieces": "16/16",
+      "both_successful": true
+    },
+    {
+      "combo_id": 6,
+      "combo": {
+        "M": 1,
+        "S": 2,
+        "XS": 2,
+        "XXL": 1
+      },
+      "gpu_util": 72.50696864111498,
+      "cpu_util": 79.21160454505683,
+      "gpu_pieces": "18/24",
+      "cpu_pieces": "24/24",
+      "both_successful": false
+    },
+    {
+      "combo_id": 7,
+      "combo": {
+        "L": 2,
+        "XL": 2,
+        "XXL": 1
+      },
+      "gpu_util": 70.11120591581343,
+      "cpu_util": 80.83301810381595,
+      "gpu_pieces": "15/20",
+      "cpu_pieces": "20/20",
+      "both_successful": false
+    },
+    {
+      "combo_id": 8,
+      "combo": {
+        "XS": 3,
+        "S": 2,
+        "M": 1
+      },
+      "gpu_util": 77.70930989583333,
+      "cpu_util": 78.19096513873008,
+      "gpu_pieces": "19/24",
+      "cpu_pieces": "24/24",
+      "both_successful": false
+    },
+    {
+      "combo_id": 9,
+      "combo": {
+        "S": 2,
+        "M": 2,
+        "L": 1,
+        "XL": 1
+      },
+      "gpu_util": 71.10125142207053,
+      "cpu_util": 80.1329056766842,
+      "gpu_pieces": "17/24",
+      "cpu_pieces": "24/24",
+      "both_successful": false
+    }
+  ]
+}

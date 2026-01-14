@@ -1,0 +1,377 @@
+{
+  "metadata": {
+    "timestamp": "2026-01-11T10:52:59.407343",
+    "dxf_file": "data/24_2506_7_S-AN1000.DXF",
+    "gpu_available": true,
+    "resolution": 128,
+    "container_width_px": 300,
+    "container_height_px": 400,
+    "cpu_time_limit": 30,
+    "num_combinations": 30,
+    "num_workers": 6,
+    "random_seed": 42
+  },
+  "results": [
+    {
+      "combo_id": 0,
+      "size_mix": {
+        "XS": 2,
+        "S": 2,
+        "M": 1,
+        "XXL": 1
+      },
+      "raster_util": 79.05753968253968,
+      "raster_time": 32.14151477813721,
+      "cpu_util": 79.03918381524107,
+      "cpu_time": 28.436467170715332
+    },
+    {
+      "combo_id": 1,
+      "size_mix": {
+        "XS": 1,
+        "XXL": 1
+      },
+      "raster_util": 72.07440476190476,
+      "raster_time": 8.066889762878418,
+      "cpu_util": 78.16291867438815,
+      "cpu_time": 29.578843355178833
+    },
+    {
+      "combo_id": 2,
+      "size_mix": {
+        "XS": 2,
+        "L": 1,
+        "XL": 2,
+        "XXL": 1
+      },
+      "raster_util": 78.2718253968254,
+      "raster_time": 35.745625257492065,
+      "cpu_util": 79.50772672989869,
+      "cpu_time": 29.373796939849854
+    },
+    {
+      "combo_id": 3,
+      "size_mix": {
+        "XS": 1
+      },
+      "raster_util": 47.45535714285714,
+      "raster_time": 1.4162657260894775,
+      "cpu_util": 65.03808193366103,
+      "cpu_time": 27.995500802993774
+    },
+    {
+      "combo_id": 4,
+      "size_mix": {
+        "S": 1,
+        "XL": 1
+      },
+      "raster_util": 63.452620967741936,
+      "raster_time": 5.6594836711883545,
+      "cpu_util": 74.45085196116663,
+      "cpu_time": 28.072845220565796
+    },
+    {
+      "combo_id": 5,
+      "size_mix": {
+        "XS": 1,
+        "S": 1,
+        "XL": 1,
+        "XXL": 2
+      },
+      "raster_util": 66.08568548387098,
+      "raster_time": 30.92143750190735,
+      "cpu_util": 80.38861310273417,
+      "cpu_time": 27.890636920928955
+    },
+    {
+      "combo_id": 6,
+      "size_mix": {
+        "S": 1,
+        "M": 1,
+        "L": 2,
+        "XL": 2
+      },
+      "raster_util": 79.35218253968253,
+      "raster_time": 37.71005916595459,
+      "cpu_util": 81.07633608919042,
+      "cpu_time": 29.00413751602173
+    },
+    {
+      "combo_id": 7,
+      "size_mix": {
+        "S": 1
+      },
+      "raster_util": 48.12202380952381,
+      "raster_time": 1.3907370567321777,
+      "cpu_util": 66.50532578191698,
+      "cpu_time": 28.399379014968872
+    },
+    {
+      "combo_id": 8,
+      "size_mix": {
+        "S": 2,
+        "M": 3,
+        "L": 1
+      },
+      "raster_util": 80.17361111111111,
+      "raster_time": 36.06866908073425,
+      "cpu_util": 79.64184681027939,
+      "cpu_time": 28.921244382858276
+    },
+    {
+      "combo_id": 9,
+      "size_mix": {
+        "XS": 1
+      },
+      "raster_util": 47.45535714285714,
+      "raster_time": 1.391503095626831,
+      "cpu_util": 65.03808193366103,
+      "cpu_time": 27.72437071800232
+    },
+    {
+      "combo_id": 10,
+      "size_mix": {
+        "XS": 1,
+        "M": 2,
+        "XL": 1
+      },
+      "raster_util": 78.6547619047619,
+      "raster_time": 20.53360891342163,
+      "cpu_util": 78.16927779284303,
+      "cpu_time": 27.84966492652893
+    },
+    {
+      "combo_id": 11,
+      "size_mix": {
+        "XS": 1,
+        "L": 1,
+        "XXL": 1
+      },
+      "raster_util": 67.13380281690141,
+      "raster_time": 15.904890775680542,
+      "cpu_util": 77.77696899338548,
+      "cpu_time": 28.197450160980225
+    },
+    {
+      "combo_id": 12,
+      "size_mix": {
+        "XS": 2,
+        "M": 1,
+        "L": 1,
+        "XL": 1
+      },
+      "raster_util": 65.93253968253968,
+      "raster_time": 29.006970405578613,
+      "cpu_util": 80.35830113166202,
+      "cpu_time": 28.150614261627197
+    },
+    {
+      "combo_id": 13,
+      "size_mix": {
+        "XS": 1,
+        "S": 1,
+        "M": 1,
+        "XL": 2,
+        "XXL": 1
+      },
+      "raster_util": 65.76984126984127,
+      "raster_time": 36.21293830871582,
+      "cpu_util": 80.09787832384859,
+      "cpu_time": 28.778847694396973
+    },
+    {
+      "combo_id": 14,
+      "size_mix": {
+        "XXL": 1
+      },
+      "raster_util": 46.873931623931625,
+      "raster_time": -1.5354413986206055,
+      "cpu_util": 78.1487897752485,
+      "cpu_time": 28.098062992095947
+    },
+    {
+      "combo_id": 15,
+      "size_mix": {
+        "XS": 1,
+        "M": 1
+      },
+      "raster_util": 74.6984126984127,
+      "raster_time": 7.8937602043151855,
+      "cpu_util": 76.11502330778208,
+      "cpu_time": 27.851357221603394
+    },
+    {
+      "combo_id": 16,
+      "size_mix": {
+        "XS": 1,
+        "L": 1
+      },
+      "raster_util": 73.65748031496064,
+      "raster_time": 7.903671503067017,
+      "cpu_util": 74.30283679835487,
+      "cpu_time": 27.910097360610962
+    },
+    {
+      "combo_id": 17,
+      "size_mix": {
+        "M": 1,
+        "L": 1,
+        "XXL": 1
+      },
+      "raster_util": 76.91468253968254,
+      "raster_time": 15.813197612762451,
+      "cpu_util": 78.19669939650802,
+      "cpu_time": 27.988070964813232
+    },
+    {
+      "combo_id": 18,
+      "size_mix": {
+        "M": 2
+      },
+      "raster_util": 75.1170634920635,
+      "raster_time": 5.297957181930542,
+      "cpu_util": 72.14603831806754,
+      "cpu_time": 28.20015048980713
+    },
+    {
+      "combo_id": 19,
+      "size_mix": {
+        "M": 1,
+        "XXL": 1
+      },
+      "raster_util": 73.44742063492063,
+      "raster_time": 8.061197519302368,
+      "cpu_util": 77.26328139976783,
+      "cpu_time": 28.115328550338745
+    },
+    {
+      "combo_id": 20,
+      "size_mix": {
+        "XS": 1,
+        "S": 1,
+        "XL": 1,
+        "XXL": 3
+      },
+      "raster_util": 66.08568548387098,
+      "raster_time": 36.88141345977783,
+      "cpu_util": 80.3200772121536,
+      "cpu_time": 27.984802961349487
+    },
+    {
+      "combo_id": 21,
+      "size_mix": {
+        "S": 2,
+        "L": 2,
+        "XXL": 1
+      },
+      "raster_util": 78.40354330708661,
+      "raster_time": 28.535393714904785,
+      "cpu_util": 78.1229949259773,
+      "cpu_time": 28.482869386672974
+    },
+    {
+      "combo_id": 22,
+      "size_mix": {
+        "XL": 1,
+        "XXL": 2
+      },
+      "raster_util": 64.03861788617886,
+      "raster_time": 13.22545862197876,
+      "cpu_util": 79.32679971104892,
+      "cpu_time": 27.677606105804443
+    },
+    {
+      "combo_id": 23,
+      "size_mix": {
+        "M": 1,
+        "XXL": 1
+      },
+      "raster_util": 73.44742063492063,
+      "raster_time": 7.892350435256958,
+      "cpu_util": 77.2499904033948,
+      "cpu_time": 27.845547914505005
+    },
+    {
+      "combo_id": 24,
+      "size_mix": {
+        "S": 1
+      },
+      "raster_util": 48.12202380952381,
+      "raster_time": 1.3728725910186768,
+      "cpu_util": 66.49827984806903,
+      "cpu_time": 28.500698804855347
+    },
+    {
+      "combo_id": 25,
+      "size_mix": {
+        "M": 1
+      },
+      "raster_util": 48.82837301587302,
+      "raster_time": 1.627307653427124,
+      "cpu_util": 68.2615279121103,
+      "cpu_time": 27.920499801635742
+    },
+    {
+      "combo_id": 26,
+      "size_mix": {
+        "XS": 1,
+        "S": 1,
+        "M": 1,
+        "XL": 1
+      },
+      "raster_util": 65.16929133858268,
+      "raster_time": 21.20238709449768,
+      "cpu_util": 78.21386085385888,
+      "cpu_time": 28.995109796524048
+    },
+    {
+      "combo_id": 27,
+      "size_mix": {
+        "S": 1,
+        "M": 1,
+        "L": 2,
+        "XXL": 2
+      },
+      "raster_util": 79.13690476190476,
+      "raster_time": 35.78129243850708,
+      "cpu_util": 80.04093868857294,
+      "cpu_time": 29.402774333953857
+    },
+    {
+      "combo_id": 28,
+      "size_mix": {
+        "S": 3,
+        "M": 1
+      },
+      "raster_util": 78.43602362204724,
+      "raster_time": 20.636415481567383,
+      "cpu_util": 76.16407165951856,
+      "cpu_time": 29.049697160720825
+    },
+    {
+      "combo_id": 29,
+      "size_mix": {
+        "M": 1,
+        "L": 1,
+        "XL": 3,
+        "XXL": 1
+      },
+      "raster_util": 67.33739837398373,
+      "raster_time": 36.28095984458923,
+      "cpu_util": 78.7487863793917,
+      "cpu_time": 29.37898874282837
+    }
+  ],
+  "correlation": {
+    "spearman_rho": 0.4162402669632925,
+    "spearman_p_value": 1.8505750820486366,
+    "pearson_r": 0.7087752962927106,
+    "pearson_p_value": 1.698919546384262,
+    "top10_overlap": 5
+  },
+  "timing": {
+    "raster_total_seconds": 539.9021759033203,
+    "cpu_total_seconds": 143.7751910686493,
+    "speedup_factor": 0.2662985953484932
+  }
+}

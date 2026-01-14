@@ -1,0 +1,147 @@
+{
+  "metadata": {
+    "time_limit": 30,
+    "num_workers": 6,
+    "container_width_mm": 1524.0,
+    "num_combinations": 10
+  },
+  "results": [
+    {
+      "combo_id": 0,
+      "combo": {
+        "M": 1
+      },
+      "utilization": 68.2615279121103,
+      "placed_pieces": 4,
+      "expected_pieces": 4,
+      "strip_length": 1219.192626953125,
+      "time": 30.43054747581482,
+      "error": ""
+    },
+    {
+      "combo_id": 1,
+      "combo": {
+        "S": 2
+      },
+      "utilization": 71.8430666340631,
+      "placed_pieces": 8,
+      "expected_pieces": 8,
+      "strip_length": 2162.8251953125,
+      "time": 30.37507462501526,
+      "error": ""
+    },
+    {
+      "combo_id": 2,
+      "combo": {
+        "XS": 1,
+        "XXL": 1
+      },
+      "utilization": 78.1401306781132,
+      "placed_pieces": 8,
+      "expected_pieces": 8,
+      "strip_length": 2295.322509765625,
+      "time": 30.300588130950928,
+      "error": ""
+    },
+    {
+      "combo_id": 3,
+      "combo": {
+        "M": 2,
+        "L": 1
+      },
+      "utilization": 80.03001144759975,
+      "placed_pieces": 12,
+      "expected_pieces": 12,
+      "strip_length": 3211.624267578125,
+      "time": 30.858548879623413,
+      "error": ""
+    },
+    {
+      "combo_id": 4,
+      "combo": {
+        "XS": 2,
+        "S": 1,
+        "M": 1
+      },
+      "utilization": 77.98612999041484,
+      "placed_pieces": 16,
+      "expected_pieces": 16,
+      "strip_length": 3919.155029296875,
+      "time": 31.490240573883057,
+      "error": ""
+    },
+    {
+      "combo_id": 5,
+      "combo": {
+        "S": 1,
+        "M": 1,
+        "L": 1,
+        "XL": 1
+      },
+      "utilization": 79.30998677263447,
+      "placed_pieces": 16,
+      "expected_pieces": 16,
+      "strip_length": 4415.07568359375,
+      "time": 30.837224006652832,
+      "error": ""
+    },
+    {
+      "combo_id": 6,
+      "combo": {
+        "M": 1,
+        "S": 2,
+        "XS": 2,
+        "XXL": 1
+      },
+      "utilization": 79.21160454505683,
+      "placed_pieces": 24,
+      "expected_pieces": 24,
+      "strip_length": 6190.0859375,
+      "time": 30.844630479812622,
+      "error": ""
+    },
+    {
+      "combo_id": 7,
+      "combo": {
+        "L": 2,
+        "XL": 2,
+        "XXL": 1
+      },
+      "utilization": 80.83301810381595,
+      "placed_pieces": 20,
+      "expected_pieces": 20,
+      "strip_length": 6005.98876953125,
+      "time": 30.58690905570984,
+      "error": ""
+    },
+    {
+      "combo_id": 8,
+      "combo": {
+        "XS": 3,
+        "S": 2,
+        "M": 1
+      },
+      "utilization": 78.19096513873008,
+      "placed_pieces": 24,
+      "expected_pieces": 24,
+      "strip_length": 5827.95751953125,
+      "time": 30.7751681804657,
+      "error": ""
+    },
+    {
+      "combo_id": 9,
+      "combo": {
+        "S": 2,
+        "M": 2,
+        "L": 1,
+        "XL": 1
+      },
+      "utilization": 80.1329056766842,
+      "placed_pieces": 24,
+      "expected_pieces": 24,
+      "strip_length": 6377.8486328125,
+      "time": 30.40937638282776,
+      "error": ""
+    }
+  ]
+}

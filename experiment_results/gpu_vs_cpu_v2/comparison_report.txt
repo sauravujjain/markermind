@@ -1,0 +1,21 @@
+GPU vs CPU Nesting Comparison Report
+==================================================
+
+Generated: 2026-01-12 06:07:57
+
+Correlation Analysis
+------------------------------
+Spearman rho (all): 0.4788
+Pearson r (all):    0.7654
+Verdict: POOR - GPU method does NOT predict CPU rankings
+
+Timing
+------------------------------
+GPU total: 159.26s
+CPU total: 306.9s
+Speedup:   1.9x
+
+Success Rates
+------------------------------
+GPU: 6/10
+CPU: 10/10

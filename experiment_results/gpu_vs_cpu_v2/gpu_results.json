@@ -1,0 +1,197 @@
+{
+  "metadata": {
+    "gpu_available": true,
+    "global_scale": 0.2,
+    "container_width_px": 304,
+    "container_height_px": 1200,
+    "container_width_mm": 1524.0,
+    "step_size": 4,
+    "num_combinations": 10
+  },
+  "results": [
+    {
+      "combo_id": 0,
+      "combo": {
+        "M": 1
+      },
+      "expected_pieces": 4,
+      "placed_pieces": 4,
+      "utilization": 30.472619047619048,
+      "time": 0.38150906562805176,
+      "failed_pieces": [],
+      "max_x_px": 140.0,
+      "strip_length_mm": 700.0,
+      "visualization": "experiment_results/gpu_vs_cpu_v2/visuals/gpu_combo_00.png"
+    },
+    {
+      "combo_id": 1,
+      "combo": {
+        "S": 2
+      },
+      "expected_pieces": 8,
+      "placed_pieces": 8,
+      "utilization": 58.56985294117647,
+      "time": 0.19846034049987793,
+      "failed_pieces": [],
+      "max_x_px": 136.0,
+      "strip_length_mm": 680.0,
+      "visualization": "experiment_results/gpu_vs_cpu_v2/visuals/gpu_combo_01.png"
+    },
+    {
+      "combo_id": 2,
+      "combo": {
+        "XS": 1,
+        "XXL": 1
+      },
+      "expected_pieces": 8,
+      "placed_pieces": 8,
+      "utilization": 59.266129032258064,
+      "time": 0.19975733757019043,
+      "failed_pieces": [],
+      "max_x_px": 155.0,
+      "strip_length_mm": 775.0,
+      "visualization": "experiment_results/gpu_vs_cpu_v2/visuals/gpu_combo_02.png"
+    },
+    {
+      "combo_id": 3,
+      "combo": {
+        "M": 2,
+        "L": 1
+      },
+      "expected_pieces": 12,
+      "placed_pieces": 12,
+      "utilization": 52.900267737617135,
+      "time": 5.140266418457031,
+      "failed_pieces": [],
+      "max_x_px": 249.0,
+      "strip_length_mm": 1245.0,
+      "visualization": "experiment_results/gpu_vs_cpu_v2/visuals/gpu_combo_03.png"
+    },
+    {
+      "combo_id": 4,
+      "combo": {
+        "XS": 2,
+        "S": 1,
+        "M": 1
+      },
+      "expected_pieces": 16,
+      "placed_pieces": 16,
+      "utilization": 64.50240054869684,
+      "time": 13.058444738388062,
+      "failed_pieces": [],
+      "max_x_px": 243.0,
+      "strip_length_mm": 1215.0,
+      "visualization": "experiment_results/gpu_vs_cpu_v2/visuals/gpu_combo_04.png"
+    },
+    {
+      "combo_id": 5,
+      "combo": {
+        "S": 1,
+        "M": 1,
+        "L": 1,
+        "XL": 1
+      },
+      "expected_pieces": 16,
+      "placed_pieces": 16,
+      "utilization": 68.26869455006337,
+      "time": 15.576732397079468,
+      "failed_pieces": [],
+      "max_x_px": 263.0,
+      "strip_length_mm": 1315.0,
+      "visualization": "experiment_results/gpu_vs_cpu_v2/visuals/gpu_combo_05.png"
+    },
+    {
+      "combo_id": 6,
+      "combo": {
+        "M": 1,
+        "S": 2,
+        "XS": 2,
+        "XXL": 1
+      },
+      "expected_pieces": 24,
+      "placed_pieces": 18,
+      "utilization": 72.50696864111498,
+      "time": 32.7372612953186,
+      "failed_pieces": [
+        "S_SL_1",
+        "S_SL_2",
+        "S_SL_3",
+        "XS_SL_1",
+        "XS_SL_2",
+        "XS_SL_3"
+      ],
+      "max_x_px": 287.0,
+      "strip_length_mm": 1435.0,
+      "visualization": "experiment_results/gpu_vs_cpu_v2/visuals/gpu_combo_06.png"
+    },
+    {
+      "combo_id": 7,
+      "combo": {
+        "L": 2,
+        "XL": 2,
+        "XXL": 1
+      },
+      "expected_pieces": 20,
+      "placed_pieces": 15,
+      "utilization": 70.11120591581343,
+      "time": 27.265209913253784,
+      "failed_pieces": [
+        "XL_SL_2",
+        "XL_SL_3",
+        "L_SL_1",
+        "L_SL_2",
+        "L_SL_3"
+      ],
+      "max_x_px": 293.0,
+      "strip_length_mm": 1465.0,
+      "visualization": "experiment_results/gpu_vs_cpu_v2/visuals/gpu_combo_07.png"
+    },
+    {
+      "combo_id": 8,
+      "combo": {
+        "XS": 3,
+        "S": 2,
+        "M": 1
+      },
+      "expected_pieces": 24,
+      "placed_pieces": 19,
+      "utilization": 77.70930989583333,
+      "time": 29.644996643066406,
+      "failed_pieces": [
+        "XS_SL_1",
+        "XS_SL_2",
+        "XS_SL_3",
+        "XS_SL_4",
+        "XS_SL_5"
+      ],
+      "max_x_px": 256.0,
+      "strip_length_mm": 1280.0,
+      "visualization": "experiment_results/gpu_vs_cpu_v2/visuals/gpu_combo_08.png"
+    },
+    {
+      "combo_id": 9,
+      "combo": {
+        "S": 2,
+        "M": 2,
+        "L": 1,
+        "XL": 1
+      },
+      "expected_pieces": 24,
+      "placed_pieces": 17,
+      "utilization": 71.10125142207053,
+      "time": 35.06067109107971,
+      "failed_pieces": [
+        "M_SL_1",
+        "M_SL_2",
+        "M_SL_3",
+        "S_SL_0",
+        "S_SL_1",
+        "S_SL_2",
+        "S_SL_3"
+      ],
+      "max_x_px": 293.0,
+      "strip_length_mm": 1465.0,
+      "visualization": "experiment_results/gpu_vs_cpu_v2/visuals/gpu_combo_09.png"
+    }
+  ]
+}

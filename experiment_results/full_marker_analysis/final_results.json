@@ -1,0 +1,298 @@
+{
+  "metadata": {
+    "timestamp": "2026-01-13T11:18:14.021608",
+    "gpu_combinations": 923,
+    "cpu_time_limit": 60,
+    "top_n": 3,
+    "strip_width_inch": 60.0
+  },
+  "top_markers": {
+    "1": [
+      {
+        "n_bundles": 1,
+        "combination": {
+          "XL": 1
+        },
+        "combo_str": "XL:1",
+        "efficiency": 71.39724310776943,
+        "length_inch": 55.118110236220474,
+        "time_ms": 19.509315490722656,
+        "num_pieces": 4,
+        "cpu_efficiency": 76.26948392863795,
+        "cpu_length_inch": 50.92957984744095,
+        "cpu_time_s": 60.2317955493927
+      },
+      {
+        "n_bundles": 1,
+        "combination": {
+          "L": 1
+        },
+        "combo_str": "L:1",
+        "efficiency": 69.98174369934989,
+        "length_inch": 51.706036745406834,
+        "time_ms": 22.068262100219727,
+        "num_pieces": 4,
+        "cpu_efficiency": 71.79956883338842,
+        "cpu_length_inch": 49.66648372139518,
+        "cpu_time_s": 60.114586353302
+      },
+      {
+        "n_bundles": 1,
+        "combination": {
+          "M": 1
+        },
+        "combo_str": "M:1",
+        "efficiency": 66.58859189859466,
+        "length_inch": 50.13123359580053,
+        "time_ms": 23.052692413330078,
+        "num_pieces": 4,
+        "cpu_efficiency": 68.26259874087432,
+        "cpu_length_inch": 47.998493825356796,
+        "cpu_time_s": 60.111971616744995
+      }
+    ],
+    "2": [
+      {
+        "n_bundles": 2,
+        "combination": {
+          "XL": 2
+        },
+        "combo_str": "XL:2",
+        "efficiency": 73.49716202270382,
+        "length_inch": 107.08661417322836,
+        "time_ms": 45.21012306213379,
+        "num_pieces": 8,
+        "cpu_efficiency": 77.40265184970883,
+        "cpu_length_inch": 100.36795067974901,
+        "cpu_time_s": 60.36655139923096
+      },
+      {
+        "n_bundles": 2,
+        "combination": {
+          "S": 1,
+          "XXL": 1
+        },
+        "combo_str": "S:1, XXL:1",
+        "efficiency": 72.783640573515,
+        "length_inch": 103.41207349081367,
+        "time_ms": 47.47962951660156,
+        "num_pieces": 8,
+        "cpu_efficiency": 76.97780923466499,
+        "cpu_length_inch": 94.45740226685533,
+        "cpu_time_s": 60.17112469673157
+      },
+      {
+        "n_bundles": 2,
+        "combination": {
+          "L": 1,
+          "XXL": 1
+        },
+        "combo_str": "L:1, XXL:1",
+        "efficiency": 72.72159019877485,
+        "length_inch": 110.49868766404201,
+        "time_ms": 50.110578536987305,
+        "num_pieces": 8,
+        "cpu_efficiency": 78.35659131865629,
+        "cpu_length_inch": 99.27018293245571,
+        "cpu_time_s": 60.132779121398926
+      }
+    ],
+    "3": [
+      {
+        "n_bundles": 3,
+        "combination": {
+          "M": 2,
+          "L": 1
+        },
+        "combo_str": "L:1, M:2",
+        "efficiency": 76.30981636971806,
+        "length_inch": 134.90813648293965,
+        "time_ms": 54.98528480529785,
+        "num_pieces": 12,
+        "cpu_efficiency": 80.31042433993699,
+        "cpu_length_inch": 125.99903497170277,
+        "cpu_time_s": 60.32066059112549
+      },
+      {
+        "n_bundles": 3,
+        "combination": {
+          "XL": 3
+        },
+        "combo_str": "XL:3",
+        "efficiency": 74.59413459020686,
+        "length_inch": 158.26771653543307,
+        "time_ms": 61.333417892456055,
+        "num_pieces": 12,
+        "cpu_efficiency": 78.367919994556,
+        "cpu_length_inch": 148.69755782480317,
+        "cpu_time_s": 60.36386775970459
+      },
+      {
+        "n_bundles": 3,
+        "combination": {
+          "M": 1,
+          "XL": 2
+        },
+        "combo_str": "M:1, XL:2",
+        "efficiency": 74.2700228832952,
+        "length_inch": 150.9186351706037,
+        "time_ms": 70.61529159545898,
+        "num_pieces": 12,
+        "cpu_efficiency": 79.84176540018086,
+        "cpu_length_inch": 138.33921898068405,
+        "cpu_time_s": 60.15279960632324
+      }
+    ],
+    "4": [
+      {
+        "n_bundles": 4,
+        "combination": {
+          "XS": 1,
+          "M": 2,
+          "L": 1
+        },
+        "combo_str": "L:1, M:2, XS:1",
+        "efficiency": 76.17756512493355,
+        "length_inch": 173.22834645669292,
+        "time_ms": 116.74284934997559,
+        "num_pieces": 16,
+        "cpu_efficiency": 77.83304611799839,
+        "cpu_length_inch": 166.61240465059055,
+        "cpu_time_s": 60.48144841194153
+      },
+      {
+        "n_bundles": 4,
+        "combination": {
+          "L": 1,
+          "XXL": 3
+        },
+        "combo_str": "L:1, XXL:3",
+        "efficiency": 75.08710444335136,
+        "length_inch": 224.6719160104987,
+        "time_ms": 243.74055862426758,
+        "num_pieces": 16,
+        "cpu_efficiency": 79.47788072994435,
+        "cpu_length_inch": 203.87251245693898,
+        "cpu_time_s": 60.24518084526062
+      },
+      {
+        "n_bundles": 4,
+        "combination": {
+          "S": 1,
+          "L": 2,
+          "XL": 1
+        },
+        "combo_str": "L:2, S:1, XL:1",
+        "efficiency": 75.05323653962492,
+        "length_inch": 190.2887139107612,
+        "time_ms": 138.61656188964844,
+        "num_pieces": 16,
+        "cpu_efficiency": 80.41277339204032,
+        "cpu_length_inch": 175.03587137057087,
+        "cpu_time_s": 60.222155809402466
+      }
+    ],
+    "5": [
+      {
+        "n_bundles": 5,
+        "combination": {
+          "XS": 1,
+          "L": 2,
+          "XL": 2
+        },
+        "combo_str": "L:2, XL:2, XS:1",
+        "efficiency": 76.83493448065853,
+        "length_inch": 234.38320209973756,
+        "time_ms": 275.6326198577881,
+        "num_pieces": 20,
+        "cpu_efficiency": 80.1769280832432,
+        "cpu_length_inch": 221.38195127952758,
+        "cpu_time_s": 60.407509326934814
+      },
+      {
+        "n_bundles": 5,
+        "combination": {
+          "S": 2,
+          "L": 1,
+          "XL": 2
+        },
+        "combo_str": "L:1, S:2, XL:2",
+        "efficiency": 76.40768115078183,
+        "length_inch": 231.75853018372706,
+        "time_ms": 254.44579124450684,
+        "num_pieces": 20,
+        "cpu_efficiency": 80.00425613450899,
+        "cpu_length_inch": 218.1401867002953,
+        "cpu_time_s": 60.28599143028259
+      },
+      {
+        "n_bundles": 5,
+        "combination": {
+          "S": 1,
+          "M": 2,
+          "L": 1,
+          "XL": 1
+        },
+        "combo_str": "L:1, M:2, S:1, XL:1",
+        "efficiency": 76.37460703782578,
+        "length_inch": 227.03412073490816,
+        "time_ms": 230.67998886108398,
+        "num_pieces": 20,
+        "cpu_efficiency": 78.65044537475045,
+        "cpu_length_inch": 216.93572757750985,
+        "cpu_time_s": 60.36798429489136
+      }
+    ],
+    "6": [
+      {
+        "n_bundles": 6,
+        "combination": {
+          "XS": 1,
+          "M": 4,
+          "L": 1
+        },
+        "combo_str": "L:1, M:4, XS:1",
+        "efficiency": 77.25921947726458,
+        "length_inch": 257.21784776902894,
+        "time_ms": 289.57676887512207,
+        "num_pieces": 24,
+        "cpu_efficiency": 79.77808527667996,
+        "cpu_length_inch": 244.69069112942915,
+        "cpu_time_s": 60.23759865760803
+      },
+      {
+        "n_bundles": 6,
+        "combination": {
+          "S": 1,
+          "L": 4,
+          "XXL": 1
+        },
+        "combo_str": "L:4, S:1, XXL:1",
+        "efficiency": 76.55010814708004,
+        "length_inch": 287.40157480314963,
+        "time_ms": 294.06237602233887,
+        "num_pieces": 24,
+        "cpu_efficiency": 81.8214439607385,
+        "cpu_length_inch": 263.1981460691437,
+        "cpu_time_s": 60.200762033462524
+      },
+      {
+        "n_bundles": 6,
+        "combination": {
+          "S": 1,
+          "M": 1,
+          "L": 3,
+          "XXL": 1
+        },
+        "combo_str": "L:3, M:1, S:1, XXL:1",
+        "efficiency": 76.41217540619786,
+        "length_inch": 284.251968503937,
+        "time_ms": 284.9760055541992,
+        "num_pieces": 24,
+        "cpu_efficiency": 80.87909313324165,
+        "cpu_length_inch": 262.6849701648622,
+        "cpu_time_s": 60.688400745391846
+      }
+    ]
+  }
+}

@@ -1,0 +1,119 @@
+[
+  {
+    "combo_id": 0,
+    "combo": {
+      "M": 1
+    },
+    "utilization": 68.25719504445425,
+    "strip_length_mm": 1219.27001953125,
+    "pieces_placed": 4,
+    "png": "experiment_results/cpu_test_v4/cpu_combo_00.png"
+  },
+  {
+    "combo_id": 1,
+    "combo": {
+      "S": 2
+    },
+    "utilization": 72.08831852583205,
+    "strip_length_mm": 2155.467041015625,
+    "pieces_placed": 8,
+    "png": "experiment_results/cpu_test_v4/cpu_combo_01.png"
+  },
+  {
+    "combo_id": 2,
+    "combo": {
+      "XS": 1,
+      "XXL": 1
+    },
+    "utilization": 78.17108601380694,
+    "strip_length_mm": 2294.41357421875,
+    "pieces_placed": 8,
+    "png": "experiment_results/cpu_test_v4/cpu_combo_02.png"
+  },
+  {
+    "combo_id": 3,
+    "combo": {
+      "M": 2,
+      "L": 1
+    },
+    "utilization": 80.42344695331425,
+    "strip_length_mm": 3195.912841796875,
+    "pieces_placed": 12,
+    "png": "experiment_results/cpu_test_v4/cpu_combo_03.png"
+  },
+  {
+    "combo_id": 4,
+    "combo": {
+      "XS": 2,
+      "S": 1,
+      "M": 1
+    },
+    "utilization": 79.13427973487892,
+    "strip_length_mm": 3862.29248046875,
+    "pieces_placed": 16,
+    "png": "experiment_results/cpu_test_v4/cpu_combo_04.png"
+  },
+  {
+    "combo_id": 5,
+    "combo": {
+      "S": 1,
+      "M": 1,
+      "L": 1,
+      "XL": 1
+    },
+    "utilization": 79.67118271416355,
+    "strip_length_mm": 4395.0595703125,
+    "pieces_placed": 16,
+    "png": "experiment_results/cpu_test_v4/cpu_combo_05.png"
+  },
+  {
+    "combo_id": 6,
+    "combo": {
+      "M": 1,
+      "S": 2,
+      "XS": 2,
+      "XXL": 1
+    },
+    "utilization": 79.72473129744021,
+    "strip_length_mm": 6150.2451171875,
+    "pieces_placed": 24,
+    "png": "experiment_results/cpu_test_v4/cpu_combo_06.png"
+  },
+  {
+    "combo_id": 7,
+    "combo": {
+      "L": 2,
+      "XL": 2,
+      "XXL": 1
+    },
+    "utilization": 80.7262648408656,
+    "strip_length_mm": 6013.93115234375,
+    "pieces_placed": 20,
+    "png": "experiment_results/cpu_test_v4/cpu_combo_07.png"
+  },
+  {
+    "combo_id": 8,
+    "combo": {
+      "XS": 3,
+      "S": 2,
+      "M": 1
+    },
+    "utilization": 78.6821096056039,
+    "strip_length_mm": 5791.57861328125,
+    "pieces_placed": 24,
+    "png": "experiment_results/cpu_test_v4/cpu_combo_08.png"
+  },
+  {
+    "combo_id": 9,
+    "combo": {
+      "S": 2,
+      "M": 2,
+      "L": 1,
+      "XL": 1
+    },
+    "utilization": 80.47482637782706,
+    "strip_length_mm": 6350.75048828125,
+    "pieces_placed": 24,
+    "png": "experiment_results/cpu_test_v4/cpu_combo_09.png"
+  }
+]

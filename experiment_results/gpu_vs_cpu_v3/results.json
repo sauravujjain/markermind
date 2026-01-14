@@ -1,0 +1,355 @@
+{
+  "metadata": {
+    "gpu_available": true,
+    "global_scale": 0.2,
+    "container_width_px": 304,
+    "container_length_px": 1200,
+    "container_width_mm": 1524.0,
+    "cpu_time_limit": 30,
+    "cpu_workers": 6
+  },
+  "gpu_results": [
+    {
+      "combo_id": 0,
+      "combo": {
+        "M": 1
+      },
+      "util": 66.03973168214654,
+      "placed": 4,
+      "expected": 4,
+      "time": 0.41593146324157715,
+      "max_x_px": 255,
+      "strip_length_mm": 1275.0,
+      "failed": [],
+      "png": "experiment_results/gpu_vs_cpu_v3/gpu/gpu_combo_00.png"
+    },
+    {
+      "combo_id": 1,
+      "combo": {
+        "S": 2
+      },
+      "util": 67.04213892941308,
+      "placed": 8,
+      "expected": 8,
+      "time": 0.022191762924194336,
+      "max_x_px": 469,
+      "strip_length_mm": 2345.0,
+      "failed": [],
+      "png": "experiment_results/gpu_vs_cpu_v3/gpu/gpu_combo_01.png"
+    },
+    {
+      "combo_id": 2,
+      "combo": {
+        "XS": 1,
+        "XXL": 1
+      },
+      "util": 69.73367914979757,
+      "placed": 8,
+      "expected": 8,
+      "time": 0.03991270065307617,
+      "max_x_px": 520,
+      "strip_length_mm": 2600.0,
+      "failed": [],
+      "png": "experiment_results/gpu_vs_cpu_v3/gpu/gpu_combo_02.png"
+    },
+    {
+      "combo_id": 3,
+      "combo": {
+        "M": 2,
+        "L": 1
+      },
+      "util": 68.50513140558907,
+      "placed": 12,
+      "expected": 12,
+      "time": 0.03976941108703613,
+      "max_x_px": 759,
+      "strip_length_mm": 3795.0,
+      "failed": [],
+      "png": "experiment_results/gpu_vs_cpu_v3/gpu/gpu_combo_03.png"
+    },
+    {
+      "combo_id": 4,
+      "combo": {
+        "XS": 2,
+        "S": 1,
+        "M": 1
+      },
+      "util": 67.76712111604311,
+      "placed": 16,
+      "expected": 16,
+      "time": 0.035300254821777344,
+      "max_x_px": 913,
+      "strip_length_mm": 4565.0,
+      "failed": [],
+      "png": "experiment_results/gpu_vs_cpu_v3/gpu/gpu_combo_04.png"
+    },
+    {
+      "combo_id": 5,
+      "combo": {
+        "S": 1,
+        "M": 1,
+        "L": 1,
+        "XL": 1
+      },
+      "util": 68.41089209510262,
+      "placed": 16,
+      "expected": 16,
+      "time": 0.04165363311767578,
+      "max_x_px": 1036,
+      "strip_length_mm": 5180.0,
+      "failed": [],
+      "png": "experiment_results/gpu_vs_cpu_v3/gpu/gpu_combo_05.png"
+    },
+    {
+      "combo_id": 6,
+      "combo": {
+        "M": 1,
+        "S": 2,
+        "XS": 2,
+        "XXL": 1
+      },
+      "util": 71.4758086622807,
+      "placed": 18,
+      "expected": 24,
+      "time": 0.04639482498168945,
+      "max_x_px": 1152,
+      "strip_length_mm": 5760.0,
+      "failed": [
+        "S_SL_2",
+        "S_SL_3",
+        "XS_SL_0",
+        "XS_SL_1",
+        "XS_SL_2",
+        "XS_SL_3"
+      ],
+      "png": "experiment_results/gpu_vs_cpu_v3/gpu/gpu_combo_06.png"
+    },
+    {
+      "combo_id": 7,
+      "combo": {
+        "L": 2,
+        "XL": 2,
+        "XXL": 1
+      },
+      "util": 73.39092527502625,
+      "placed": 16,
+      "expected": 20,
+      "time": 0.0394287109375,
+      "max_x_px": 1153,
+      "strip_length_mm": 5765.0,
+      "failed": [
+        "XL_SL_3",
+        "L_SL_1",
+        "L_SL_2",
+        "L_SL_3"
+      ],
+      "png": "experiment_results/gpu_vs_cpu_v3/gpu/gpu_combo_07.png"
+    },
+    {
+      "combo_id": 8,
+      "combo": {
+        "XS": 3,
+        "S": 2,
+        "M": 1
+      },
+      "util": 66.37979935044712,
+      "placed": 19,
+      "expected": 24,
+      "time": 0.04956197738647461,
+      "max_x_px": 1183,
+      "strip_length_mm": 5915.0,
+      "failed": [
+        "XS_SL_1",
+        "XS_SL_2",
+        "XS_SL_3",
+        "XS_SL_4",
+        "XS_SL_5"
+      ],
+      "png": "experiment_results/gpu_vs_cpu_v3/gpu/gpu_combo_08.png"
+    },
+    {
+      "combo_id": 9,
+      "combo": {
+        "S": 2,
+        "M": 2,
+        "L": 1,
+        "XL": 1
+      },
+      "util": 69.31563955902024,
+      "placed": 16,
+      "expected": 24,
+      "time": 0.04493904113769531,
+      "max_x_px": 1141,
+      "strip_length_mm": 5705.0,
+      "failed": [
+        "M_SL_0",
+        "M_SL_1",
+        "M_SL_2",
+        "M_SL_3",
+        "S_SL_0",
+        "S_SL_1",
+        "S_SL_2",
+        "S_SL_3"
+      ],
+      "png": "experiment_results/gpu_vs_cpu_v3/gpu/gpu_combo_09.png"
+    }
+  ],
+  "cpu_results": [
+    {
+      "combo_id": 0,
+      "combo": {
+        "M": 1
+      },
+      "util": 68.2615279121103,
+      "placed": 4,
+      "expected": 4,
+      "time": 30.550158262252808,
+      "error": "",
+      "strip_length_mm": 1219.192626953125,
+      "png": "experiment_results/gpu_vs_cpu_v3/cpu/cpu_combo_00.png"
+    },
+    {
+      "combo_id": 1,
+      "combo": {
+        "S": 2
+      },
+      "util": 71.8430666340631,
+      "placed": 8,
+      "expected": 8,
+      "time": 31.027883052825928,
+      "error": "",
+      "strip_length_mm": 2162.8251953125,
+      "png": "experiment_results/gpu_vs_cpu_v3/cpu/cpu_combo_01.png"
+    },
+    {
+      "combo_id": 2,
+      "combo": {
+        "XS": 1,
+        "XXL": 1
+      },
+      "util": 78.1633677505416,
+      "placed": 8,
+      "expected": 8,
+      "time": 30.284398317337036,
+      "error": "",
+      "strip_length_mm": 2294.64013671875,
+      "png": "experiment_results/gpu_vs_cpu_v3/cpu/cpu_combo_02.png"
+    },
+    {
+      "combo_id": 3,
+      "combo": {
+        "M": 2,
+        "L": 1
+      },
+      "util": 80.03575487797802,
+      "placed": 12,
+      "expected": 12,
+      "time": 31.35066246986389,
+      "error": "",
+      "strip_length_mm": 3211.393798828125,
+      "png": "experiment_results/gpu_vs_cpu_v3/cpu/cpu_combo_03.png"
+    },
+    {
+      "combo_id": 4,
+      "combo": {
+        "XS": 2,
+        "S": 1,
+        "M": 1
+      },
+      "util": 77.53997536062833,
+      "placed": 16,
+      "expected": 16,
+      "time": 31.03546977043152,
+      "error": "",
+      "strip_length_mm": 3941.705322265625,
+      "png": "experiment_results/gpu_vs_cpu_v3/cpu/cpu_combo_04.png"
+    },
+    {
+      "combo_id": 5,
+      "combo": {
+        "S": 1,
+        "M": 1,
+        "L": 1,
+        "XL": 1
+      },
+      "util": 79.42208323569788,
+      "placed": 16,
+      "expected": 16,
+      "time": 31.209184646606445,
+      "error": "",
+      "strip_length_mm": 4408.84423828125,
+      "png": "experiment_results/gpu_vs_cpu_v3/cpu/cpu_combo_05.png"
+    },
+    {
+      "combo_id": 6,
+      "combo": {
+        "M": 1,
+        "S": 2,
+        "XS": 2,
+        "XXL": 1
+      },
+      "util": 79.13917800053487,
+      "placed": 24,
+      "expected": 24,
+      "time": 30.600021839141846,
+      "error": "",
+      "strip_length_mm": 6195.7509765625,
+      "png": "experiment_results/gpu_vs_cpu_v3/cpu/cpu_combo_06.png"
+    },
+    {
+      "combo_id": 7,
+      "combo": {
+        "L": 2,
+        "XL": 2,
+        "XXL": 1
+      },
+      "util": 80.83263694999991,
+      "placed": 20,
+      "expected": 20,
+      "time": 31.021085262298584,
+      "error": "",
+      "strip_length_mm": 6006.01708984375,
+      "png": "experiment_results/gpu_vs_cpu_v3/cpu/cpu_combo_07.png"
+    },
+    {
+      "combo_id": 8,
+      "combo": {
+        "XS": 3,
+        "S": 2,
+        "M": 1
+      },
+      "util": 78.17032171256275,
+      "placed": 24,
+      "expected": 24,
+      "time": 30.670615911483765,
+      "error": "",
+      "strip_length_mm": 5829.49658203125,
+      "png": "experiment_results/gpu_vs_cpu_v3/cpu/cpu_combo_08.png"
+    },
+    {
+      "combo_id": 9,
+      "combo": {
+        "S": 2,
+        "M": 2,
+        "L": 1,
+        "XL": 1
+      },
+      "util": 80.09429289364385,
+      "placed": 24,
+      "expected": 24,
+      "time": 30.788299560546875,
+      "error": "",
+      "strip_length_mm": 6380.92333984375,
+      "png": "experiment_results/gpu_vs_cpu_v3/cpu/cpu_combo_09.png"
+    }
+  ],
+  "comparison": {
+    "spearman_rho": 0.7090909090909091,
+    "verdict": "MODERATE",
+    "gpu_total_time": 0.7750837802886963,
+    "cpu_total_time": 63.20701575279236,
+    "speedup": 81.54862398133216,
+    "gpu_success_rate": 0.6,
+    "cpu_success_rate": 1.0
+  }
+}
