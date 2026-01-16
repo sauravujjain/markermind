@@ -47,7 +47,8 @@ from nesting_engine.engine import SpyrrowEngine, SpyrrowConfig, check_spyrrow_av
 from nesting_engine.io import DXFParser, load_pieces_from_dxf, DXFParseResult
 from nesting_engine.io import (
     load_aama_pattern, grade_to_nesting_pieces, AAMAGrader,
-    AAMAPiece, GradingRules
+    AAMAPiece, GradingRules, get_pieces_by_material, get_available_materials,
+    grade_material_to_nesting_pieces, generate_nesting_queue, LRType
 )
 
 
@@ -194,6 +195,29 @@ def group_pieces_by_type(pieces: List[Piece]) -> Dict[str, Dict[str, List[Piece]
     return grouped
 
 
+def group_pieces_by_name(pieces: List[Piece]) -> Dict[str, Dict[str, List[Piece]]]:
+    """Group pieces by actual piece name and size. Returns: {piece_name: {size: [pieces]}}
+
+    This is better for AAMA patterns where each piece has a unique name like
+    FRONT, BACK, SLEEVE, etc. rather than type codes like BK, FR, SL.
+    """
+    grouped = {}
+    for p in pieces:
+        # Use the piece name directly (strip size suffix if present)
+        piece_name = p.identifier.piece_name or p.name
+        # Remove size suffix if the name ends with it
+        size = p.identifier.size or ""
+        if size and piece_name.endswith(f"-{size}"):
+            piece_name = piece_name[:-len(size)-1]
+
+        if piece_name not in grouped:
+            grouped[piece_name] = {}
+        if size not in grouped[piece_name]:
+            grouped[piece_name][size] = []
+        grouped[piece_name][size].append(p)
+    return grouped
+
+
 def get_representative_piece(pieces_by_size: Dict[str, List[Piece]], preferred_size: str = 'M') -> Optional[Piece]:
     """Get a representative piece, preferring the specified size."""
     if preferred_size in pieces_by_size and pieces_by_size[preferred_size]:
@@ -283,9 +307,11 @@ def build_bundle_pieces(
                 is_flipped_type = config.get('flipped', False)
                 
                 if is_flipped_type:
-                    normal_count = demand // 2
-                    flipped_count = demand // 2
-                    
+                    # When flip is checked, create 'demand' normal + 'demand' flipped pieces
+                    # This matches L/R behavior: L*1-R*1 means 1 left + 1 right
+                    normal_count = demand
+                    flipped_count = demand
+
                     for i in range(normal_count):
                         unique_piece = _create_piece_copy(base_piece, f"_{bundle_id}_n{i}")
                         bundle_pieces.append(BundlePiece(
@@ -296,7 +322,7 @@ def build_bundle_pieces(
                             is_flipped=False,
                             instance_idx=i
                         ))
-                    
+
                     for i in range(flipped_count):
                         flipped_piece = create_flipped_piece(base_piece)
                         unique_piece = _create_piece_copy(flipped_piece, f"_{bundle_id}_f{i}")
@@ -616,6 +642,8 @@ def main():
         st.session_state.aama_grader = None
     if 'aama_available_sizes' not in st.session_state:
         st.session_state.aama_available_sizes = []
+    if 'aama_pieces' not in st.session_state:
+        st.session_state.aama_pieces = []  # Store AAMAPiece objects for L/R detection
     
     # Tabs
     tab1, tab2, tab3 = st.tabs(["📁 Upload", "🔧 Configure", "📊 Results"])
@@ -678,6 +706,7 @@ def main():
                 st.session_state.parse_result = all_results[0] if all_results else None
                 st.session_state.aama_grader = None  # Clear AAMA state
                 st.session_state.aama_available_sizes = []
+                st.session_state.aama_pieces = []  # Clear AAMA pieces
 
                 grouped = group_pieces_by_type(all_pieces)
                 for ptype in grouped.keys():
@@ -726,32 +755,107 @@ def main():
 
                     st.session_state.aama_grader = grader
                     st.session_state.aama_available_sizes = rules.header.size_list
+                    st.session_state.aama_pieces = aama_pieces  # Store for L/R detection
+
+                    # Get available materials
+                    available_materials = get_available_materials(aama_pieces)
+                    pieces_by_material = get_pieces_by_material(aama_pieces)
 
                     # Show pattern info
                     with st.expander("📊 Pattern Information", expanded=True):
-                        col1, col2, col3 = st.columns(3)
-                        col1.metric("Pieces", len(aama_pieces))
+                        col1, col2, col3, col4 = st.columns(4)
+                        col1.metric("Total Pieces", len(aama_pieces))
                         col2.metric("Available Sizes", len(rules.header.size_list))
                         col3.metric("Sample Size", rules.header.sample_size)
+                        col4.metric("Materials", len(available_materials))
 
                         st.markdown(f"**Size range:** {' → '.join(rules.header.size_list)}")
                         st.markdown(f"**Units:** {rules.header.units}")
                         st.markdown(f"**Grading Rules:** {rules.num_rules}")
 
-                        # Show piece summary
+                        # Show materials breakdown
+                        if len(available_materials) > 1:
+                            st.markdown("---")
+                            st.markdown("**Pieces by Material:**")
+                            material_cols = st.columns(min(len(available_materials), 4))
+                            for idx, mat in enumerate(available_materials[:4]):
+                                with material_cols[idx]:
+                                    count = len(pieces_by_material.get(mat, []))
+                                    st.metric(mat, f"{count} pieces")
+
+                        # Show piece summary with L/R detection
                         st.markdown("---")
                         st.markdown("**Pieces in pattern:**")
                         piece_info = []
                         for p in aama_pieces[:10]:
+                            lr_display = {
+                                LRType.NONE: "Center",
+                                LRType.SEPARATE_LEFT: "Left",
+                                LRType.SEPARATE_RIGHT: "Right",
+                                LRType.FLIP_FOR_LR: "Flip L/R"
+                            }.get(p.lr_type, "-")
                             piece_info.append({
-                                "Name": p.name,
+                                "Name": p.display_name,
                                 "Vertices": p.num_vertices,
                                 "Grade Points": p.num_grade_points,
-                                "Material": p.material or "-"
+                                "Material": p.material or "-",
+                                "L/R Type": lr_display
                             })
                         st.dataframe(piece_info, use_container_width=True)
                         if len(aama_pieces) > 10:
                             st.caption(f"... and {len(aama_pieces) - 10} more pieces")
+
+                    # Material selection (if multiple materials)
+                    st.markdown("---")
+                    if len(available_materials) > 1:
+                        st.subheader("🧵 Select Material")
+                        st.caption("Different materials are cut separately on different fabric rolls")
+
+                        # Material selector with piece counts
+                        material_options = [f"{mat} ({len(pieces_by_material.get(mat, []))} pieces)"
+                                           for mat in available_materials]
+                        selected_material_idx = st.selectbox(
+                            "Material to nest",
+                            range(len(available_materials)),
+                            format_func=lambda x: material_options[x],
+                            key="aama_material_select"
+                        )
+                        selected_material = available_materials[selected_material_idx]
+
+                        st.info(f"📌 Will generate pieces for **{selected_material}** material only. "
+                               "Run nesting separately for other materials.")
+                    else:
+                        selected_material = available_materials[0] if available_materials else None
+                        if selected_material and selected_material != "UNKNOWN":
+                            st.info(f"📌 All pieces are **{selected_material}** material")
+
+                    # Show nesting queue for selected material
+                    if selected_material:
+                        queue = generate_nesting_queue(aama_pieces, material_filter=selected_material)
+                        if queue:
+                            with st.expander("📋 Nesting Queue", expanded=False):
+                                st.caption("Preview of how pieces will be nested with L/R handling")
+                                queue_data = []
+                                for item in queue:
+                                    lr_display = {
+                                        LRType.NONE: "Center",
+                                        LRType.SEPARATE_LEFT: "Left",
+                                        LRType.SEPARATE_RIGHT: "Right",
+                                        LRType.FLIP_FOR_LR: "Flip L/R"
+                                    }.get(item.piece.lr_type, "-")
+                                    queue_data.append({
+                                        "Piece": item.display_name,
+                                        "Material": item.material,
+                                        "Qty": item.quantity,
+                                        "Flip": "✅" if item.flip else "",
+                                        "L/R Type": lr_display
+                                    })
+                                st.dataframe(queue_data, use_container_width=True)
+
+                                # Summary stats
+                                total_pieces = sum(item.quantity for item in queue)
+                                flip_pieces = sum(item.quantity for item in queue if item.flip)
+                                st.caption(f"Total: {total_pieces} pieces | Flip required: {flip_pieces} pieces")
 
                     # Size selection for grading
                     st.markdown("---")
@@ -783,30 +887,64 @@ def main():
 
                     if selected_sizes:
                         # Generate pieces for selected sizes
-                        if st.button("🔄 Generate Pieces", type="primary", use_container_width=True):
-                            with st.spinner(f"Generating pieces for {len(selected_sizes)} sizes..."):
-                                nesting_pieces = grade_to_nesting_pieces(
-                                    dxf_path,
-                                    rul_path,
-                                    target_sizes=selected_sizes,
-                                    rotations=allowed_rotations,
-                                    allow_flip=True
-                                )
+                        generate_label = f"🔄 Generate {selected_material} Pieces" if len(available_materials) > 1 else "🔄 Generate Pieces"
+                        if st.button(generate_label, type="primary", use_container_width=True):
+                            with st.spinner(f"Generating {selected_material} pieces for {len(selected_sizes)} sizes..."):
+                                if len(available_materials) > 1 and selected_material:
+                                    # Use material-filtered function
+                                    nesting_pieces = grade_material_to_nesting_pieces(
+                                        dxf_path,
+                                        rul_path,
+                                        material=selected_material,
+                                        target_sizes=selected_sizes,
+                                        rotations=allowed_rotations,
+                                        allow_flip=True
+                                    )
+                                else:
+                                    # Use regular function (all materials)
+                                    nesting_pieces = grade_to_nesting_pieces(
+                                        dxf_path,
+                                        rul_path,
+                                        target_sizes=selected_sizes,
+                                        rotations=allowed_rotations,
+                                        allow_flip=True
+                                    )
 
                             st.session_state.pieces = nesting_pieces
                             st.session_state.parse_result = None
 
-                            # Configure piece types
-                            grouped = group_pieces_by_type(nesting_pieces)
-                            for ptype in grouped.keys():
-                                if ptype not in st.session_state.piece_type_config:
-                                    st.session_state.piece_type_config[ptype] = {'demand': 1, 'flipped': False}
+                            # Configure piece types with L/R auto-flip detection
+                            # Use group_pieces_by_name for AAMA (same as Configure tab)
+                            grouped = group_pieces_by_name(nesting_pieces)
+
+                            # Build lookup of aama_pieces by name for L/R detection
+                            aama_pieces_lookup = {}
+                            for ap in st.session_state.aama_pieces:
+                                aama_pieces_lookup[ap.name] = ap
+
+                            for piece_name in grouped.keys():
+                                if piece_name not in st.session_state.piece_type_config:
+                                    # Check if this piece has L/R annotation
+                                    aama_piece = aama_pieces_lookup.get(piece_name)
+                                    if aama_piece and aama_piece.quantity.has_left_right:
+                                        # L/R piece: set demand to left_qty, auto-check flip
+                                        demand = aama_piece.quantity.left_qty
+                                        flipped = True
+                                    else:
+                                        # Regular piece: use total, no flip
+                                        demand = aama_piece.quantity.total if aama_piece else 1
+                                        flipped = False
+                                    st.session_state.piece_type_config[piece_name] = {
+                                        'demand': demand,
+                                        'flipped': flipped
+                                    }
 
                             # Update size quantities to 1 for generated sizes
                             for size in selected_sizes:
                                 st.session_state.size_quantities[size] = 1
 
-                            st.success(f"✅ Generated {len(nesting_pieces)} pieces for sizes: {', '.join(selected_sizes)}")
+                            material_note = f" ({selected_material})" if len(available_materials) > 1 else ""
+                            st.success(f"✅ Generated {len(nesting_pieces)} pieces{material_note} for sizes: {', '.join(selected_sizes)}")
                             st.info("👉 Go to the **Configure** tab to set quantities and run nesting")
                     else:
                         st.warning("⚠️ Please select at least one size to generate")
@@ -826,13 +964,16 @@ def main():
     # ==================== TAB 2: CONFIGURE ====================
     with tab2:
         st.header("Configure Nesting")
-        
+
         pieces = st.session_state.pieces
-        
+
         if not pieces:
             st.info("👆 Upload DXF files in the Upload tab first")
         else:
-            grouped = group_pieces_by_type(pieces)
+            # Use group_pieces_by_name for AAMA patterns (shows all pieces individually)
+            # Use group_pieces_by_type for standard DXF (groups by type code)
+            is_aama = st.session_state.aama_grader is not None
+            grouped = group_pieces_by_name(pieces) if is_aama else group_pieces_by_type(pieces)
             
             available_sizes_set = set()
             for ptype, pieces_by_size in grouped.items():
@@ -938,12 +1079,14 @@ def main():
                         st.caption("N/A")
                 
                 with cols[2]:
-                    is_flipped = config.get('flipped', False)
-                    min_d, step = (2, 2) if is_flipped else (1, 1)
+                    # Allow 0 demand (to exclude pieces from nesting)
+                    # Demand represents count per side:
+                    # - Non-flipped: demand pieces total
+                    # - Flipped: demand normal + demand flipped = 2×demand pieces total
+                    min_d = 0
+                    step = 1
                     current_d = config.get('demand', 1)
-                    if is_flipped and current_d % 2 != 0:
-                        current_d = max(2, current_d + 1)
-                    new_d = st.number_input(f"d_{ptype}", min_value=min_d, max_value=100, 
+                    new_d = st.number_input(f"d_{ptype}", min_value=min_d, max_value=100,
                                            value=current_d, step=step, key=f"demand_{ptype}",
                                            label_visibility="collapsed")
                     st.session_state.piece_type_config[ptype]['demand'] = new_d
@@ -953,8 +1096,6 @@ def main():
                                        key=f"flipped_{ptype}", label_visibility="collapsed")
                     if new_f != config.get('flipped', False):
                         st.session_state.piece_type_config[ptype]['flipped'] = new_f
-                        if new_f and st.session_state.piece_type_config[ptype]['demand'] % 2 != 0:
-                            st.session_state.piece_type_config[ptype]['demand'] = max(2, st.session_state.piece_type_config[ptype]['demand'] + 1)
                         st.rerun()
                 
                 with cols[4]:
@@ -986,13 +1127,15 @@ def main():
     # ==================== TAB 3: RESULTS ====================
     with tab3:
         st.header("Nesting Results")
-        
+
         pieces = st.session_state.pieces
-        
+
         if not pieces:
             st.info("👆 Upload DXF files in the Upload tab first")
         else:
-            grouped = group_pieces_by_type(pieces)
+            # Use same grouping as Configure tab
+            is_aama = st.session_state.aama_grader is not None
+            grouped = group_pieces_by_name(pieces) if is_aama else group_pieces_by_type(pieces)
             col1, col2 = st.columns([1, 2])
             
             with col1:

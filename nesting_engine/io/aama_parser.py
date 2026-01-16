@@ -29,6 +29,7 @@ import logging
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import List, Dict, Optional, Tuple, Any
+from enum import Enum
 
 import ezdxf
 from shapely.geometry import Polygon as ShapelyPolygon
@@ -39,6 +40,37 @@ from nesting_engine.core.piece import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+# =============================================================================
+# Enums
+# =============================================================================
+
+class LRType(Enum):
+    """
+    How L/R (Left/Right) is handled for this piece.
+
+    There are three patterns in AAMA DXF files:
+
+    Pattern A - SEPARATE_LEFT/SEPARATE_RIGHT:
+        Two separate blocks with "LEFT"/"RIGHT" in the name.
+        Geometries are already different (pre-mirrored).
+        Use each as-is, NO flip needed.
+
+    Pattern B - FLIP_FOR_LR:
+        Single block with annotation like SHELL(L*1-R*1).
+        Geometry is symmetric - flip creates the mirror piece.
+        Add N× normal + M× flipped to nesting queue.
+
+    Pattern C - NONE:
+        No L/R in name, no L/R in annotation.
+        Center pieces or fully symmetric (BACK, COLLAR, etc.).
+        Use as-is, single piece.
+    """
+    NONE = "none"              # No L/R (center piece like BACK, COLLAR)
+    SEPARATE_LEFT = "left"     # Separate block, this is the LEFT piece
+    SEPARATE_RIGHT = "right"   # Separate block, this is the RIGHT piece
+    FLIP_FOR_LR = "flip"       # Single block, flip to get L and R
 
 
 # =============================================================================
@@ -99,6 +131,163 @@ class GradePoint:
 
 
 @dataclass
+class PieceQuantity:
+    """
+    Parsed quantity information from AAMA annotation field.
+
+    Supports formats like:
+    - "SHELL*2" -> total=2, has_left_right=False
+    - "IL(L*1-R*1)" -> total=2, has_left_right=True, left_qty=1, right_qty=1
+    - "SHELL(L*2-R*2)" -> total=4, has_left_right=True, left_qty=2, right_qty=2
+
+    Attributes:
+        total: Total pieces needed (left_qty + right_qty if has_left_right)
+        has_left_right: True if annotation has (L*N-R*M) format
+        left_qty: Number of left pieces (0 if no L/R specification)
+        right_qty: Number of right pieces (0 if no L/R specification)
+        material: Extracted material type (SHELL, IL, FINISH, etc.)
+        raw: Original annotation string
+    """
+    total: int
+    has_left_right: bool
+    left_qty: int = 0
+    right_qty: int = 0
+    material: Optional[str] = None
+    raw: Optional[str] = None
+
+    @classmethod
+    def default(cls) -> "PieceQuantity":
+        """Create a default quantity (1 piece, no L/R)."""
+        return cls(total=1, has_left_right=False, left_qty=0, right_qty=0)
+
+
+def parse_annotation(annotation: Optional[str]) -> PieceQuantity:
+    """
+    Parse AAMA annotation field to extract material and quantity info.
+
+    Supported formats:
+    - "SHELL*2" -> material=SHELL, total=2, no L/R
+    - "IL(L*1-R*1)" -> material=IL, total=2, left=1, right=1
+    - "SHELL(L*2-R*2)" -> material=SHELL, total=4, left=2, right=2
+    - "FINISH" -> material=FINISH, total=1, no L/R
+
+    Args:
+        annotation: The annotation string from DXF, or None
+
+    Returns:
+        PieceQuantity with parsed information
+
+    Note:
+        Unknown formats return a default PieceQuantity with total=1
+        and the raw annotation preserved for debugging.
+    """
+    if not annotation:
+        return PieceQuantity.default()
+
+    annotation = annotation.strip()
+    if not annotation:
+        return PieceQuantity.default()
+
+    # Pattern 1: "MATERIAL(L*N-R*M)" format
+    # Example: "IL(L*1-R*1)", "SHELL(L*2-R*2)", "SO1(L*1-R*1)"
+    # Note: Material codes can contain digits (SO1, FO1, WO2, etc.)
+    lr_pattern = re.compile(
+        r'^([A-Za-z][A-Za-z0-9]*)\(L\*(\d+)-R\*(\d+)\)$',
+        re.IGNORECASE
+    )
+    match = lr_pattern.match(annotation)
+    if match:
+        material = match.group(1).upper()
+        left_qty = int(match.group(2))
+        right_qty = int(match.group(3))
+        return PieceQuantity(
+            total=left_qty + right_qty,
+            has_left_right=True,
+            left_qty=left_qty,
+            right_qty=right_qty,
+            material=material,
+            raw=annotation
+        )
+
+    # Pattern 2: "MATERIAL*N" format
+    # Example: "SHELL*2", "IL*4", "SO1*2"
+    qty_pattern = re.compile(r'^([A-Za-z][A-Za-z0-9]*)\*(\d+)$', re.IGNORECASE)
+    match = qty_pattern.match(annotation)
+    if match:
+        material = match.group(1).upper()
+        total = int(match.group(2))
+        return PieceQuantity(
+            total=total,
+            has_left_right=False,
+            left_qty=0,
+            right_qty=0,
+            material=material,
+            raw=annotation
+        )
+
+    # Pattern 3: Just material name (implies quantity 1)
+    # Example: "SHELL", "IL", "FINISH", "SO1"
+    material_only = re.compile(r'^([A-Za-z][A-Za-z0-9]*)$', re.IGNORECASE)
+    match = material_only.match(annotation)
+    if match:
+        material = match.group(1).upper()
+        return PieceQuantity(
+            total=1,
+            has_left_right=False,
+            left_qty=0,
+            right_qty=0,
+            material=material,
+            raw=annotation
+        )
+
+    # Unknown format - return default with raw preserved
+    logger.debug(f"Unknown annotation format: '{annotation}'")
+    result = PieceQuantity.default()
+    result.raw = annotation
+    return result
+
+
+def detect_lr_type(piece_name: str, quantity: PieceQuantity) -> LRType:
+    """
+    Determine how L/R is handled for this piece.
+
+    Decision tree:
+    1. If annotation has (L*N-R*M) format → FLIP_FOR_LR
+    2. Else if name contains "LEFT" → SEPARATE_LEFT
+    3. Else if name contains "RIGHT" → SEPARATE_RIGHT
+    4. Else → NONE (center/symmetric piece)
+
+    Args:
+        piece_name: The piece name from DXF
+        quantity: Parsed PieceQuantity from annotation
+
+    Returns:
+        LRType indicating how to handle L/R for this piece
+
+    Examples:
+        >>> detect_lr_type("SLEEVE", PieceQuantity(2, True, 1, 1))
+        LRType.FLIP_FOR_LR
+        >>> detect_lr_type("FRONT LEFT", PieceQuantity(1, False, 0, 0))
+        LRType.SEPARATE_LEFT
+        >>> detect_lr_type("BACK", PieceQuantity(1, False, 0, 0))
+        LRType.NONE
+    """
+    # Check annotation first (Pattern B) - has L/R quantities
+    if quantity.has_left_right:
+        return LRType.FLIP_FOR_LR
+
+    # Check name for LEFT/RIGHT (Pattern A) - separate blocks
+    name_upper = piece_name.upper()
+    if "LEFT" in name_upper:
+        return LRType.SEPARATE_LEFT
+    if "RIGHT" in name_upper:
+        return LRType.SEPARATE_RIGHT
+
+    # Default: center/symmetric piece (Pattern C)
+    return LRType.NONE
+
+
+@dataclass
 class AAMAPiece:
     """A piece extracted from AAMA DXF with grade point information."""
     name: str  # e.g., "BK R"
@@ -110,7 +299,10 @@ class AAMAPiece:
     material: Optional[str] = None
     category: Optional[str] = None
     annotation: Optional[str] = None
-    quantity: Optional[str] = None
+    quantity: PieceQuantity = field(default_factory=PieceQuantity.default)
+
+    # L/R handling
+    lr_type: LRType = LRType.NONE
 
     # Additional geometry from other layers
     grain_line: Optional[Tuple[Tuple[float, float], Tuple[float, float]]] = None
@@ -127,6 +319,21 @@ class AAMAPiece:
         """Number of grade points."""
         return len(self.grade_points)
 
+    @property
+    def display_name(self) -> str:
+        """
+        Generate display name with L/R indicator.
+
+        Examples:
+            - FRONT LEFT → "FRONT LEFT" (already has LEFT)
+            - SLEEVE with FLIP_FOR_LR → "SLEEVE (L/R)"
+            - BACK with NONE → "BACK"
+        """
+        if self.lr_type == LRType.FLIP_FOR_LR:
+            return f"{self.name} (L/R)"
+        # For SEPARATE_LEFT/RIGHT, the name already contains LEFT/RIGHT
+        return self.name
+
 
 @dataclass
 class GradedPiece:
@@ -138,6 +345,26 @@ class GradedPiece:
 
     # Preserved from original
     grain_line: Optional[Tuple[Tuple[float, float], Tuple[float, float]]] = None
+
+
+@dataclass
+class NestingQueueItem:
+    """
+    A single item in the nesting queue.
+
+    This represents one "cut" needed - a specific piece that needs
+    to be placed on the fabric, possibly flipped for L/R pairing.
+    """
+    piece: AAMAPiece             # Reference to source piece
+    graded_piece: Optional[GradedPiece]  # Graded version (if graded)
+    display_name: str            # e.g., "SLEEVE (L)" or "SLEEVE (R)"
+    quantity: int                # How many to cut
+    flip: bool                   # True = mirror the geometry for cutting
+    material: str                # For filtering by fabric type
+
+    def __str__(self) -> str:
+        flip_marker = " [FLIP]" if self.flip else ""
+        return f"{self.display_name} × {self.quantity}{flip_marker}"
 
 
 # =============================================================================
@@ -402,6 +629,16 @@ class AAMADXFParser:
                 piece_name = metadata.get('piece_name', parts[0])
                 size = metadata.get('size', parts[1])
 
+        # Parse annotation to extract quantity and material info
+        annotation_str = metadata.get('annotation')
+        parsed_qty = parse_annotation(annotation_str)
+
+        # Use material from metadata, falling back to annotation-derived material
+        material = metadata.get('material') or parsed_qty.material
+
+        # Detect L/R type based on piece name and quantity annotation
+        lr_type = detect_lr_type(piece_name, parsed_qty)
+
         return AAMAPiece(
             name=piece_name,
             block_name=block_name,
@@ -409,10 +646,11 @@ class AAMADXFParser:
             vertices=vertices,
             grade_points=grade_points,
             layer="1",
-            material=metadata.get('material'),
+            material=material,
             category=metadata.get('category'),
-            annotation=metadata.get('annotation'),
-            quantity=metadata.get('quantity'),
+            annotation=annotation_str,
+            quantity=parsed_qty,
+            lr_type=lr_type,
             grain_line=grain_line
         )
 
@@ -957,7 +1195,10 @@ def grade_to_nesting_pieces(
 
         for gp in graded:
             # Convert vertices to mm
-            vertices_mm = [(x * to_mm, y * to_mm) for x, y in gp.vertices]
+            # AAMA DXF files use a different coordinate convention than standard DXF
+            # Swap (x, y) → (y, x) to transpose for proper strip packing orientation
+            # This ensures pieces extend horizontally (along X) in the nesting visualization
+            vertices_mm = [(y * to_mm, x * to_mm) for x, y in gp.vertices]
 
             # Clean vertices (remove consecutive duplicates)
             vertices_mm = _clean_vertices(vertices_mm)
@@ -995,15 +1236,16 @@ def grade_to_nesting_pieces(
             )
 
             # Create grain constraint
+            # Also swap grain line coordinates to match the vertex swap
             grain = GrainConstraint(direction=GrainDirection.LENGTHWISE)
             if gp.grain_line:
                 grain.grain_line_start = (
-                    gp.grain_line[0][0] * to_mm,
-                    gp.grain_line[0][1] * to_mm
+                    gp.grain_line[0][1] * to_mm,  # Swapped: y becomes x
+                    gp.grain_line[0][0] * to_mm   # Swapped: x becomes y
                 )
                 grain.grain_line_end = (
-                    gp.grain_line[1][0] * to_mm,
-                    gp.grain_line[1][1] * to_mm
+                    gp.grain_line[1][1] * to_mm,  # Swapped: y becomes x
+                    gp.grain_line[1][0] * to_mm   # Swapped: x becomes y
                 )
 
             try:
@@ -1045,6 +1287,333 @@ def _clean_vertices(
             cleaned.append((x, y))
 
     return cleaned
+
+
+# =============================================================================
+# Multi-Material Workflow Functions
+# =============================================================================
+
+def get_pieces_by_material(pieces: List[AAMAPiece]) -> Dict[str, List[AAMAPiece]]:
+    """
+    Group AAMA pieces by material type.
+
+    Material is extracted from:
+    1. The piece's `material` field (from DXF TEXT metadata)
+    2. The piece's `quantity.material` field (from annotation parsing)
+    3. Falls back to "UNKNOWN" if neither is available
+
+    Args:
+        pieces: List of AAMAPiece objects
+
+    Returns:
+        Dictionary mapping material name (uppercase) to list of pieces.
+        Keys are sorted alphabetically.
+
+    Example:
+        >>> pieces_by_material = get_pieces_by_material(aama_pieces)
+        >>> for material, material_pieces in pieces_by_material.items():
+        ...     print(f"{material}: {len(material_pieces)} pieces")
+        FINISH: 3 pieces
+        IL: 8 pieces
+        SHELL: 15 pieces
+    """
+    result: Dict[str, List[AAMAPiece]] = {}
+
+    for piece in pieces:
+        # Determine material (prioritize explicit material field)
+        material = piece.material
+
+        if not material and piece.quantity and piece.quantity.material:
+            material = piece.quantity.material
+
+        if not material:
+            material = "UNKNOWN"
+
+        # Normalize to uppercase
+        material = material.upper()
+
+        if material not in result:
+            result[material] = []
+        result[material].append(piece)
+
+    # Return sorted by material name
+    return dict(sorted(result.items()))
+
+
+def get_available_materials(pieces: List[AAMAPiece]) -> List[str]:
+    """
+    Get sorted list of unique materials in the pattern.
+
+    Convenience function that returns just the material names.
+
+    Args:
+        pieces: List of AAMAPiece objects
+
+    Returns:
+        Sorted list of unique material names (uppercase)
+
+    Example:
+        >>> materials = get_available_materials(aama_pieces)
+        >>> print(materials)
+        ['FINISH', 'IL', 'SHELL']
+    """
+    return list(get_pieces_by_material(pieces).keys())
+
+
+def generate_nesting_queue(
+    pieces: List[AAMAPiece],
+    material_filter: Optional[str] = None
+) -> List[NestingQueueItem]:
+    """
+    Generate nesting queue from parsed pieces.
+
+    Handles all three L/R patterns:
+    - SEPARATE_LEFT/RIGHT: Add as-is, no flip
+    - FLIP_FOR_LR: Add left_qty normal + right_qty flipped
+    - NONE: Add as-is, no flip
+
+    Args:
+        pieces: List of parsed AAMAPiece objects
+        material_filter: Optional material to filter (e.g., "SHELL")
+
+    Returns:
+        List of NestingQueueItem ready for nesting
+
+    Example:
+        >>> queue = generate_nesting_queue(pieces, "SHELL")
+        >>> for item in queue:
+        ...     print(f"{item.display_name}: {item.quantity} {'[FLIP]' if item.flip else ''}")
+        SLEEVE (L): 1
+        SLEEVE (R): 1 [FLIP]
+        BACK: 1
+    """
+    queue: List[NestingQueueItem] = []
+
+    for piece in pieces:
+        # Filter by material if specified
+        if material_filter:
+            piece_material = piece.material or ""
+            if piece_material.upper() != material_filter.upper():
+                continue
+
+        material = piece.material or "UNKNOWN"
+
+        if piece.lr_type == LRType.FLIP_FOR_LR:
+            # Pattern B: Single geometry, add L (normal) and R (flipped)
+            if piece.quantity.left_qty > 0:
+                queue.append(NestingQueueItem(
+                    piece=piece,
+                    graded_piece=None,
+                    display_name=f"{piece.name} (L)",
+                    quantity=piece.quantity.left_qty,
+                    flip=False,
+                    material=material
+                ))
+            if piece.quantity.right_qty > 0:
+                queue.append(NestingQueueItem(
+                    piece=piece,
+                    graded_piece=None,
+                    display_name=f"{piece.name} (R)",
+                    quantity=piece.quantity.right_qty,
+                    flip=True,
+                    material=material
+                ))
+
+        elif piece.lr_type == LRType.SEPARATE_LEFT:
+            # Pattern A: Already LEFT geometry
+            queue.append(NestingQueueItem(
+                piece=piece,
+                graded_piece=None,
+                display_name=piece.name,  # Name already has LEFT
+                quantity=piece.quantity.total,
+                flip=False,
+                material=material
+            ))
+
+        elif piece.lr_type == LRType.SEPARATE_RIGHT:
+            # Pattern A: Already RIGHT geometry
+            queue.append(NestingQueueItem(
+                piece=piece,
+                graded_piece=None,
+                display_name=piece.name,  # Name already has RIGHT
+                quantity=piece.quantity.total,
+                flip=False,
+                material=material
+            ))
+
+        else:
+            # Pattern C: Center/symmetric piece (LRType.NONE)
+            queue.append(NestingQueueItem(
+                piece=piece,
+                graded_piece=None,
+                display_name=piece.name,
+                quantity=piece.quantity.total,
+                flip=False,
+                material=material
+            ))
+
+    return queue
+
+
+def grade_material_to_nesting_pieces(
+    dxf_path: str,
+    rul_path: str,
+    material: str,
+    target_sizes: List[str],
+    rotations: List[float] = [0, 180],
+    allow_flip: bool = False
+) -> List[Piece]:
+    """
+    Load AAMA pattern, filter by material, grade, and return Piece objects.
+
+    This is the main entry point for multi-material workflow. Call this
+    function once per material to generate nesting pieces for separate
+    nesting runs.
+
+    Args:
+        dxf_path: Path to .dxf file
+        rul_path: Path to .rul file
+        material: Material type to filter (case-insensitive, e.g., "SHELL", "IL")
+        target_sizes: List of sizes to generate
+        rotations: Allowed rotation angles (default [0, 180] for grain constraint)
+        allow_flip: Whether to allow flipping (consider L/R from annotation)
+
+    Returns:
+        List of Piece objects for the specified material, ready for nesting
+
+    Example:
+        >>> # Nest shell pieces separately from interlining
+        >>> shell_pieces = grade_material_to_nesting_pieces(
+        ...     "style.dxf", "style.rul",
+        ...     material="SHELL",
+        ...     target_sizes=["S", "M", "L"]
+        ... )
+        >>> il_pieces = grade_material_to_nesting_pieces(
+        ...     "style.dxf", "style.rul",
+        ...     material="IL",
+        ...     target_sizes=["S", "M", "L"]
+        ... )
+
+    Note:
+        Pieces with L/R specification in annotation (has_left_right=True)
+        will be set up for paired flipping automatically if allow_flip=True.
+    """
+    # Load pattern
+    aama_pieces, rules = load_aama_pattern(dxf_path, rul_path)
+
+    # Filter by material (case-insensitive)
+    material_upper = material.upper()
+    pieces_by_material = get_pieces_by_material(aama_pieces)
+
+    if material_upper not in pieces_by_material:
+        available = list(pieces_by_material.keys())
+        logger.warning(
+            f"Material '{material}' not found. "
+            f"Available materials: {available}"
+        )
+        return []
+
+    filtered_pieces = pieces_by_material[material_upper]
+
+    # Create grader with filtered pieces
+    grader = AAMAGrader(filtered_pieces, rules)
+
+    # Determine unit conversion
+    if rules.header.units == 'ENGLISH':
+        to_mm = 25.4
+    else:
+        to_mm = 1.0
+
+    nesting_pieces = []
+
+    for target_size in target_sizes:
+        if target_size not in grader.get_available_sizes():
+            logger.warning(f"Skipping unknown size: {target_size}")
+            continue
+
+        graded = grader.grade(target_size)
+
+        for gp in graded:
+            # Find original AAMA piece to get quantity info
+            original_piece = next(
+                (p for p in filtered_pieces if p.name == gp.source_piece),
+                None
+            )
+
+            # Convert vertices to mm
+            # AAMA DXF files use a different coordinate convention than standard DXF
+            # Swap (x, y) → (y, x) to transpose for proper strip packing orientation
+            vertices_mm = [(y * to_mm, x * to_mm) for x, y in gp.vertices]
+            vertices_mm = _clean_vertices(vertices_mm)
+
+            if len(vertices_mm) < 3:
+                logger.warning(f"Skipping piece {gp.name} - too few vertices")
+                continue
+
+            # Ensure polygon is closed
+            if vertices_mm[0] != vertices_mm[-1]:
+                vertices_mm.append(vertices_mm[0])
+
+            # Validate with shapely
+            try:
+                poly = ShapelyPolygon(vertices_mm)
+                if not poly.is_valid:
+                    poly = make_valid(poly)
+                if poly.area <= 0:
+                    logger.warning(f"Skipping piece {gp.name} - invalid polygon")
+                    continue
+            except Exception as e:
+                logger.warning(f"Skipping piece {gp.name}: {e}")
+                continue
+
+            # Determine if piece should allow flip based on L/R annotation
+            piece_allow_flip = allow_flip
+            if original_piece and original_piece.quantity.has_left_right:
+                # Piece has L/R specification - should allow flip for pairing
+                piece_allow_flip = True
+
+            # Create identifier
+            identifier = PieceIdentifier(
+                piece_name=gp.name,
+                size=target_size
+            )
+
+            # Create orientation constraint
+            orientation = OrientationConstraint(
+                allowed_rotations=rotations,
+                allow_flip=piece_allow_flip
+            )
+
+            # Create grain constraint
+            # Also swap grain line coordinates to match the vertex swap
+            grain = GrainConstraint(direction=GrainDirection.LENGTHWISE)
+            if gp.grain_line:
+                grain.grain_line_start = (
+                    gp.grain_line[0][1] * to_mm,  # Swapped: y becomes x
+                    gp.grain_line[0][0] * to_mm   # Swapped: x becomes y
+                )
+                grain.grain_line_end = (
+                    gp.grain_line[1][1] * to_mm,  # Swapped: y becomes x
+                    gp.grain_line[1][0] * to_mm   # Swapped: x becomes y
+                )
+
+            try:
+                piece = Piece(
+                    vertices=vertices_mm,
+                    identifier=identifier,
+                    orientation=orientation,
+                    grain=grain
+                )
+                nesting_pieces.append(piece)
+            except Exception as e:
+                logger.warning(f"Failed to create piece {gp.name}: {e}")
+
+    logger.info(
+        f"Generated {len(nesting_pieces)} nesting pieces "
+        f"for material '{material}' across {len(target_sizes)} sizes"
+    )
+
+    return nesting_pieces
 
 
 # =============================================================================
