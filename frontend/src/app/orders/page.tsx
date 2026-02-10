@@ -10,17 +10,17 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { useToast } from '@/hooks/use-toast'
-import { Plus, Search, FileText, Clock, CheckCircle2, AlertCircle } from 'lucide-react'
+import { Plus, Search, FileText, Clock, CheckCircle2, AlertCircle, ChevronRight, Loader2 } from 'lucide-react'
 
-const statusColors: Record<string, string> = {
-  draft: 'bg-gray-100 text-gray-800',
-  pending_pattern: 'bg-yellow-100 text-yellow-800',
-  pending_nesting: 'bg-blue-100 text-blue-800',
-  nesting_in_progress: 'bg-purple-100 text-purple-800',
-  pending_cutplan: 'bg-orange-100 text-orange-800',
-  cutplan_ready: 'bg-green-100 text-green-800',
-  approved: 'bg-emerald-100 text-emerald-800',
-  completed: 'bg-gray-100 text-gray-800',
+const statusConfig: Record<string, { bg: string; text: string; dot: string }> = {
+  draft: { bg: 'bg-muted', text: 'text-muted-foreground', dot: 'bg-muted-foreground' },
+  pending_pattern: { bg: 'bg-amber-100/80', text: 'text-amber-700', dot: 'bg-amber-500' },
+  pending_nesting: { bg: 'bg-blue-100/80', text: 'text-blue-700', dot: 'bg-blue-500' },
+  nesting_in_progress: { bg: 'bg-purple-100/80', text: 'text-purple-700', dot: 'bg-purple-500 animate-pulse' },
+  pending_cutplan: { bg: 'bg-accent/10', text: 'text-accent', dot: 'bg-accent' },
+  cutplan_ready: { bg: 'bg-green-100/80', text: 'text-green-700', dot: 'bg-green-500' },
+  approved: { bg: 'bg-emerald-100/80', text: 'text-emerald-700', dot: 'bg-emerald-500' },
+  completed: { bg: 'bg-secondary', text: 'text-secondary-foreground', dot: 'bg-secondary-foreground/50' },
 }
 
 const statusLabels: Record<string, string> = {
@@ -79,8 +79,11 @@ export default function OrdersPage() {
 
   if (authLoading || !isAuthenticated) {
     return (
-      <div className="min-h-screen flex items-center justify-center">
-        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary"></div>
+      <div className="min-h-screen flex items-center justify-center bg-background">
+        <div className="flex flex-col items-center gap-3">
+          <Loader2 className="w-8 h-8 text-primary animate-spin" />
+          <p className="text-sm text-muted-foreground">Loading...</p>
+        </div>
       </div>
     )
   }
@@ -88,15 +91,15 @@ export default function OrdersPage() {
   return (
     <DashboardLayout>
       <div className="space-y-6">
-        <div className="flex items-center justify-between">
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
           <div>
-            <h1 className="text-3xl font-bold tracking-tight">Orders</h1>
-            <p className="text-muted-foreground">
+            <h1 className="text-3xl font-bold tracking-tight text-foreground">Orders</h1>
+            <p className="text-muted-foreground mt-1">
               Manage your cutting orders and cutplans
             </p>
           </div>
           <Link href="/orders/new">
-            <Button>
+            <Button className="shadow-warm hover:shadow-warm-lg transition-all duration-200 hover:-translate-y-0.5">
               <Plus className="mr-2 h-4 w-4" />
               New Order
             </Button>
@@ -104,32 +107,37 @@ export default function OrdersPage() {
         </div>
 
         <div className="flex items-center space-x-2">
-          <div className="relative flex-1 max-w-sm">
+          <div className="relative flex-1 max-w-md">
             <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
             <Input
               placeholder="Search orders..."
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              className="pl-9"
+              className="pl-10 h-11 bg-card border-border/50 focus:border-primary focus:ring-primary/20"
             />
           </div>
         </div>
 
         {isLoading ? (
-          <div className="flex items-center justify-center py-12">
-            <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary"></div>
+          <div className="flex items-center justify-center py-16">
+            <div className="flex flex-col items-center gap-3">
+              <Loader2 className="w-8 h-8 text-primary animate-spin" />
+              <p className="text-sm text-muted-foreground">Loading orders...</p>
+            </div>
           </div>
         ) : filteredOrders.length === 0 ? (
-          <Card>
-            <CardContent className="flex flex-col items-center justify-center py-12">
-              <FileText className="h-12 w-12 text-muted-foreground mb-4" />
-              <h3 className="text-lg font-medium">No orders found</h3>
-              <p className="text-muted-foreground mb-4">
+          <Card className="border-border/50 border-dashed">
+            <CardContent className="flex flex-col items-center justify-center py-16">
+              <div className="w-16 h-16 rounded-2xl bg-muted flex items-center justify-center mb-4">
+                <FileText className="h-8 w-8 text-muted-foreground" />
+              </div>
+              <h3 className="text-lg font-semibold text-foreground">No orders found</h3>
+              <p className="text-muted-foreground mb-6 text-center max-w-sm">
                 {search ? 'Try a different search term' : 'Get started by creating your first order'}
               </p>
               {!search && (
                 <Link href="/orders/new">
-                  <Button>
+                  <Button className="shadow-warm">
                     <Plus className="mr-2 h-4 w-4" />
                     Create Order
                   </Button>
@@ -138,40 +146,49 @@ export default function OrdersPage() {
             </CardContent>
           </Card>
         ) : (
-          <div className="grid gap-4">
-            {filteredOrders.map((order) => (
-              <Link key={order.id} href={`/orders/${order.id}`}>
-                <Card className="hover:shadow-md transition-shadow cursor-pointer">
-                  <CardContent className="p-6">
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center space-x-4">
-                        <div className="w-10 h-10 bg-primary/10 rounded-lg flex items-center justify-center">
-                          <FileText className="h-5 w-5 text-primary" />
+          <div className="grid gap-3">
+            {filteredOrders.map((order, index) => {
+              const status = statusConfig[order.status] || statusConfig.draft
+              return (
+                <Link key={order.id} href={`/orders/${order.id}`}>
+                  <Card
+                    className="card-hover border-border/50 cursor-pointer group"
+                    style={{ animationDelay: `${index * 50}ms` }}
+                  >
+                    <CardContent className="p-5">
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-4">
+                          <div className="w-12 h-12 bg-gradient-to-br from-primary/10 to-accent/10 rounded-xl flex items-center justify-center group-hover:scale-105 transition-transform duration-200">
+                            <FileText className="h-5 w-5 text-primary" />
+                          </div>
+                          <div>
+                            <h3 className="font-semibold text-foreground group-hover:text-primary transition-colors">
+                              {order.order_number}
+                            </h3>
+                            <p className="text-sm text-muted-foreground">
+                              <span className="text-accent font-medium">{order.order_lines?.length || 0}</span> lines, {' '}
+                              <span className="font-medium">{(order.order_lines || []).reduce((acc, c) => acc + c.size_quantities.reduce((a, s) => a + s.quantity, 0), 0).toLocaleString()}</span> units
+                            </p>
+                          </div>
                         </div>
-                        <div>
-                          <h3 className="font-semibold">{order.order_number}</h3>
-                          <p className="text-sm text-muted-foreground">
-                            {order.order_lines?.length || 0} lines, {(order.order_lines || []).reduce((acc, c) => acc + c.size_quantities.reduce((a, s) => a + s.quantity, 0), 0).toLocaleString()} units
-                          </p>
+                        <div className="flex items-center gap-4">
+                          <span
+                            className={`px-3 py-1.5 rounded-full text-xs font-medium flex items-center gap-1.5 ${status.bg} ${status.text}`}
+                          >
+                            <span className={`w-1.5 h-1.5 rounded-full ${status.dot}`} />
+                            {statusLabels[order.status] || order.status}
+                          </span>
+                          <span className="text-sm text-muted-foreground hidden sm:block">
+                            {new Date(order.created_at).toLocaleDateString()}
+                          </span>
+                          <ChevronRight className="h-4 w-4 text-muted-foreground group-hover:text-primary group-hover:translate-x-1 transition-all" />
                         </div>
                       </div>
-                      <div className="flex items-center space-x-4">
-                        <span
-                          className={`px-2.5 py-0.5 rounded-full text-xs font-medium ${
-                            statusColors[order.status] || 'bg-gray-100 text-gray-800'
-                          }`}
-                        >
-                          {statusLabels[order.status] || order.status}
-                        </span>
-                        <span className="text-sm text-muted-foreground">
-                          {new Date(order.created_at).toLocaleDateString()}
-                        </span>
-                      </div>
-                    </div>
-                  </CardContent>
-                </Card>
-              </Link>
-            ))}
+                    </CardContent>
+                  </Card>
+                </Link>
+              )
+            })}
           </div>
         )}
       </div>
