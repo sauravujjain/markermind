@@ -1,0 +1,156 @@
+/home/sarv/projects/MarkerMind/backend/venv/lib/python3.13/site-packages/cupyx/jit/_interface.py:173: FutureWarning: cupyx.jit.rawkernel is experimental. The interface can change in the future.
+  cupy._util.experimental('cupyx.jit.rawkernel')
+GPU: NVIDIA GeForce RTX 3060 Laptop GPU
+============================================================
+MARKERMIND - FULL NESTING WORKFLOW
+Fabric Width: 60.0"
+Pattern: 23583 PROD 1 L 0 W 0 25FEB22.dxf
+============================================================
+
+[Step 1] Loading and rasterizing pieces...
+
+Loading pattern from: /home/sarv/projects/garment-nester/data/dxf-amaa/23583 PROD 1 L 0 W 0 25FEB22.dxf
+Pattern sizes: ['XXX42', '4XXX4', '46', '48', '50', '52', '54', '56', '58', 'XXX60', 'XXX62', 'XXX64', 'XXX66']
+Target material: SO1
+Fabric width: 60.0" (228 px)
+
+Loaded 105 pieces across 7 sizes
+  Size 46: 15 pieces
+  Size 48: 15 pieces
+  Size 50: 15 pieces
+  Size 52: 15 pieces
+  Size 54: 15 pieces
+  Size 56: 15 pieces
+  Size 58: 15 pieces
+
+[Step 2] Running GPU nesting...
+
+============================================================
+GPU NESTING - All Markers
+Fabric Width: 60.0"
+============================================================
+
+--- Bundle Count: 1 ---
+  Total combinations: 7
+    Evaluating ratio 1/7...
+  Time: 1.31s
+  Top 3:
+    1. 0-0-0-0-1-0-0: 74.2% (1.60Y)
+    2. 0-0-0-0-0-0-1: 73.6% (1.66Y)
+    3. 0-0-0-0-0-1-0: 73.1% (1.63Y)
+
+--- Bundle Count: 2 ---
+  Total combinations: 28
+    Evaluating ratio 1/28...
+  Time: 6.72s
+  Top 3:
+    1. 0-0-0-1-1-0-0: 79.2% (2.97Y)
+    2. 1-0-0-1-0-0-0: 78.2% (2.91Y)
+    3. 0-0-0-0-1-1-0: 77.7% (3.05Y)
+
+--- Bundle Count: 3 ---
+  Total combinations: 84
+    Evaluating ratio 1/84...
+    Evaluating ratio 51/84...
+  Time: 30.12s
+  Top 3:
+    1. 1-0-0-2-0-0-0: 80.4% (4.28Y)
+    2. 0-1-0-1-1-0-0: 80.1% (4.35Y)
+    3. 0-0-0-3-0-0-0: 79.9% (4.38Y)
+
+--- Bundle Count: 4 ---
+  Total combinations: 210
+    Evaluating ratio 1/210...
+    Evaluating ratio 51/210...
+    Evaluating ratio 101/210...
+    Evaluating ratio 151/210...
+    Evaluating ratio 201/210...
+  Time: 98.20s
+  Top 3:
+    1. 0-0-4-0-0-0-0: 81.2% (5.64Y)
+    2. 0-1-2-0-1-0-0: 81.1% (5.67Y)
+    3. 1-0-0-3-0-0-0: 80.8% (5.71Y)
+
+--- Bundle Count: 5 ---
+  Total combinations: 462
+    Evaluating ratio 1/462...
+    Evaluating ratio 51/462...
+    Evaluating ratio 101/462...
+    Evaluating ratio 151/462...
+    Evaluating ratio 201/462...
+    Evaluating ratio 251/462...
+    Evaluating ratio 301/462...
+    Evaluating ratio 351/462...
+    Evaluating ratio 401/462...
+    Evaluating ratio 451/462...
+  Time: 269.01s
+  Top 3:
+    1. 1-1-0-0-2-0-1: 81.5% (7.15Y)
+    2. 2-1-0-2-0-0-0: 81.4% (6.98Y)
+    3. 0-4-1-0-0-0-0: 81.3% (6.96Y)
+
+--- Bundle Count: 6 ---
+  Total combinations: 924
+    Evaluating ratio 1/924...
+    Evaluating ratio 51/924...
+    Evaluating ratio 101/924...
+    Evaluating ratio 151/924...
+    Evaluating ratio 201/924...
+    Evaluating ratio 251/924...
+    Evaluating ratio 301/924...
+    Evaluating ratio 351/924...
+    Evaluating ratio 401/924...
+    Evaluating ratio 451/924...
+    Evaluating ratio 501/924...
+    Evaluating ratio 551/924...
+    Evaluating ratio 601/924...
+    Evaluating ratio 651/924...
+    Evaluating ratio 701/924...
+    Evaluating ratio 751/924...
+    Evaluating ratio 801/924...
+    Evaluating ratio 851/924...
+    Evaluating ratio 901/924...
+  Time: 1409.54s
+  Top 3:
+    1. 2-0-1-2-1-0-0: 81.4% (8.45Y)
+    2. 0-2-3-0-0-0-1: 81.3% (8.50Y)
+    3. 0-3-0-0-0-2-1: 81.3% (8.60Y)
+
+Total nesting time: 1814.90s
+
+Nesting results saved to: /home/sarv/projects/MarkerMind/backend/experiment_results/gpu_nesting_results.json
+
+[Step 3] Running cutplan optimization...
+
+============================================================
+CUTPLAN OPTIMIZATION
+Order: 46:74 | 48:244 | 50:347 | 52:342 | 54:265 | 56:162 | 58:62
+============================================================
+Loaded 75 markers from nesting results
+
+--- Option 1: Balanced ---
+WARNING: scipy.optimize.milp not available, using greedy fallback
+  Time: 0.00s
+
+--- Option 2: Max Efficiency ---
+WARNING: scipy.optimize.milp not available, using greedy fallback
+  Time: 0.00s
+
+--- Option 3: Min Markers ---
+WARNING: scipy.optimize.milp not available, using greedy fallback
+  Time: 0.00s
+
+============================================================
+CUTPLAN COMPARISON
+============================================================
+Option                   Eff%  Markers    Plies      Yards         Cost
+----------------------------------------------------------------------
+Balanced                78.9%        9      472     3484.7 $  31538.63
+Max Efficiency          78.9%        9      472     3484.7 $  31538.63
+Min Markers             78.9%        9      472     3484.7 $  31538.63
+
+Cutplan results saved to: /home/sarv/projects/MarkerMind/backend/experiment_results/cutplan_results.json
+
+============================================================
+WORKFLOW COMPLETE - Total time: 1815.77s
+============================================================

@@ -1,0 +1,224 @@
+{
+  "order_demand": {
+    "46": 74,
+    "48": 244,
+    "50": 347,
+    "52": 342,
+    "54": 265,
+    "56": 162,
+    "58": 62
+  },
+  "plans": [
+    {
+      "name": "Balanced",
+      "efficiency": 0.8053841041498373,
+      "unique_markers": 7,
+      "total_plies": 301,
+      "total_cuts": 8,
+      "total_bundle_cuts": 32,
+      "costs": {
+        "fabric_cost": 19758.16200058326,
+        "spreading_cost": 1162.2448235637212,
+        "cutting_cost": 43.40787401574803,
+        "prep_cost": 105.0,
+        "total_cost": 21068.81469816273,
+        "total_yards": 2324.4896471274424
+      },
+      "time_seconds": 9.099186182022095,
+      "markers": [
+        {
+          "ratio_str": "0-0-0-1-1-0-0",
+          "efficiency": 0.7924479503426872,
+          "plies": 1,
+          "cuts": 1,
+          "length_yards": 2.967337416156314
+        },
+        {
+          "ratio_str": "0-1-1-0-2-0-0",
+          "efficiency": 0.8039218943824207,
+          "plies": 103,
+          "cuts": 2,
+          "length_yards": 5.774278215223097
+        },
+        {
+          "ratio_str": "0-2-3-0-0-0-1",
+          "efficiency": 0.8127125274593,
+          "plies": 62,
+          "cuts": 1,
+          "length_yards": 8.501020705745116
+        },
+        {
+          "ratio_str": "0-0-0-4-0-2-0",
+          "efficiency": 0.8120890461447737,
+          "plies": 52,
+          "cuts": 1,
+          "length_yards": 8.675998833479149
+        },
+        {
+          "ratio_str": "1-0-1-2-1-1-0",
+          "efficiency": 0.8096104340580034,
+          "plies": 58,
+          "cuts": 1,
+          "length_yards": 8.595800524934383
+        },
+        {
+          "ratio_str": "2-0-0-0-0-0-0",
+          "efficiency": 0.77,
+          "plies": 8,
+          "cuts": 1,
+          "length_yards": 10.0
+        },
+        {
+          "ratio_str": "0-1-0-1-0-0-0",
+          "efficiency": 0.77,
+          "plies": 17,
+          "cuts": 1,
+          "length_yards": 10.0
+        }
+      ]
+    },
+    {
+      "name": "Max Efficiency",
+      "efficiency": 0.807304210590963,
+      "unique_markers": 9,
+      "total_plies": 285,
+      "total_cuts": 9,
+      "total_bundle_cuts": 36,
+      "costs": {
+        "fabric_cost": 18722.2353455818,
+        "spreading_cost": 1101.3079615048118,
+        "cutting_cost": 52.68136482939633,
+        "prep_cost": 135.0,
+        "total_cost": 20011.22467191601,
+        "total_yards": 2202.6159230096237
+      },
+      "time_seconds": 0.5098874568939209,
+      "markers": [
+        {
+          "ratio_str": "0-0-0-0-3-0-0",
+          "efficiency": 0.7924047924689773,
+          "plies": 24,
+          "cuts": 1,
+          "length_yards": 4.483814523184602
+        },
+        {
+          "ratio_str": "0-0-0-3-1-0-0",
+          "efficiency": 0.804371692686033,
+          "plies": 34,
+          "cuts": 1,
+          "length_yards": 5.825313502478858
+        },
+        {
+          "ratio_str": "0-0-3-0-1-1-0",
+          "efficiency": 0.8089118884609898,
+          "plies": 42,
+          "cuts": 1,
+          "length_yards": 7.174103237095363
+        },
+        {
+          "ratio_str": "0-0-0-4-0-2-0",
+          "efficiency": 0.8120890461447737,
+          "plies": 60,
+          "cuts": 1,
+          "length_yards": 8.675998833479149
+        },
+        {
+          "ratio_str": "1-3-0-0-1-0-1",
+          "efficiency": 0.8111517010177544,
+          "plies": 62,
+          "cuts": 1,
+          "length_yards": 8.508311461067366
+        },
+        {
+          "ratio_str": "0-1-4-0-1-0-0",
+          "efficiency": 0.8102599981944569,
+          "plies": 55,
+          "cuts": 1,
+          "length_yards": 8.501020705745116
+        },
+        {
+          "ratio_str": "2-0-0-0-0-0-0",
+          "efficiency": 0.77,
+          "plies": 6,
+          "cuts": 1,
+          "length_yards": 10.0
+        },
+        {
+          "ratio_str": "0-2-0-0-0-0-0",
+          "efficiency": 0.77,
+          "plies": 1,
+          "cuts": 1,
+          "length_yards": 10.0
+        },
+        {
+          "ratio_str": "0-1-1-0-0-0-0",
+          "efficiency": 0.77,
+          "plies": 1,
+          "cuts": 1,
+          "length_yards": 10.0
+        }
+      ]
+    },
+    {
+      "name": "Min Markers",
+      "efficiency": 0.8056060862133311,
+      "unique_markers": 6,
+      "total_plies": 349,
+      "total_cuts": 7,
+      "total_bundle_cuts": 25,
+      "costs": {
+        "fabric_cost": 20684.6719160105,
+        "spreading_cost": 1216.745406824147,
+        "cutting_cost": 36.05879265091863,
+        "prep_cost": 90.0,
+        "total_cost": 22027.476115485562,
+        "total_yards": 2433.490813648294
+      },
+      "time_seconds": 24.08413553237915,
+      "markers": [
+        {
+          "ratio_str": "1-0-0-1-0-0-0",
+          "efficiency": 0.7823176361957526,
+          "plies": 18,
+          "cuts": 1,
+          "length_yards": 2.909011373578303
+        },
+        {
+          "ratio_str": "0-1-2-0-1-0-0",
+          "efficiency": 0.8111780092905786,
+          "plies": 153,
+          "cuts": 2,
+          "length_yards": 5.672207640711578
+        },
+        {
+          "ratio_str": "1-1-0-0-2-0-1",
+          "efficiency": 0.8145599728168536,
+          "plies": 56,
+          "cuts": 1,
+          "length_yards": 7.152230971128609
+        },
+        {
+          "ratio_str": "0-0-0-4-0-2-0",
+          "efficiency": 0.8120890461447737,
+          "plies": 81,
+          "cuts": 1,
+          "length_yards": 8.675998833479149
+        },
+        {
+          "ratio_str": "0-1-1-0-0-0-0",
+          "efficiency": 0.77,
+          "plies": 35,
+          "cuts": 1,
+          "length_yards": 10.0
+        },
+        {
+          "ratio_str": "0-0-1-0-0-0-1",
+          "efficiency": 0.77,
+          "plies": 6,
+          "cuts": 1,
+          "length_yards": 10.0
+        }
+      ]
+    }
+  ]
+}
