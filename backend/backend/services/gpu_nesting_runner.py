@@ -370,6 +370,11 @@ def evaluate_ratio(
     return efficiency, length_yards, preview_base64
 
 
+class NestingCancelled(Exception):
+    """Raised when a nesting job is cancelled by the user."""
+    pass
+
+
 def run_nesting_for_material(
     dxf_path: str,
     rul_path: str,
@@ -384,6 +389,7 @@ def run_nesting_for_material(
     preview_interval_seconds: float = 5.0,
     full_coverage: bool = False,
     result_callback: Optional[Callable[[int, List[Dict]], None]] = None,
+    cancel_check: Optional[Callable[[], bool]] = None,
 ) -> Dict[int, List[Dict]]:
     """
     Run GPU nesting for a specific material.
@@ -435,19 +441,45 @@ def run_nesting_for_material(
 
     all_results = {}
     last_preview_time = 0.0
+    evaluated_count = 0
+
+    # Pre-compute total ratio counts per bundle for progress display
+    ratios_per_bundle = {}
+    total_ratios = 0
+    for bc in range(1, max_bundle_count + 1):
+        n = len(generate_all_ratios(bc, sizes))
+        ratios_per_bundle[bc] = n
+        total_ratios += n
+
+    if progress_callback:
+        mode = "brute-force (100% coverage)" if full_coverage else "GA + brute-force"
+        progress_callback(2, f"Total ratios to evaluate: {total_ratios} across {max_bundle_count} bundle counts ({mode})")
 
     for bundle_count in range(1, max_bundle_count + 1):
-        if progress_callback:
-            progress = int((bundle_count - 1) / max_bundle_count * 80)
-            progress_callback(progress, f"Processing {bundle_count}-bundle markers...")
+        # Check for cancellation at start of each bundle count
+        if cancel_check and cancel_check():
+            raise NestingCancelled("Job cancelled by user")
 
         all_ratios = generate_all_ratios(bundle_count, sizes)
         n_combos = len(all_ratios)
 
+        if progress_callback:
+            progress = int((bundle_count - 1) / max_bundle_count * 80)
+            if full_coverage or n_combos < MIN_ISLAND_SIZE:
+                progress_callback(progress, f"Brute-force: {bundle_count}-bundle ({n_combos} ratios) — {evaluated_count}/{total_ratios} total")
+            else:
+                progress_callback(progress, f"GA search: {bundle_count}-bundle ({n_combos} possible) — {evaluated_count}/{total_ratios} total")
+
         if full_coverage or n_combos < MIN_ISLAND_SIZE:
             # Brute force: evaluate all ratios (full_coverage=True or small search space)
             results = []
+            cancel_check_counter = 0
             for ratio in all_ratios:
+                # Check for cancellation every 20 ratios (avoid DB overhead)
+                cancel_check_counter += 1
+                if cancel_check and cancel_check_counter % 20 == 0 and cancel_check():
+                    raise NestingCancelled("Job cancelled by user")
+
                 # Check if we should capture a preview
                 current_time = time.time()
                 should_capture = preview_callback and (current_time - last_preview_time >= preview_interval_seconds)
@@ -469,12 +501,19 @@ def run_nesting_for_material(
                     'length_yards': length,
                     'bundle_count': bundle_count,
                 })
+                evaluated_count += 1
+
+                # Update progress within bundle (every 20 ratios)
+                if progress_callback and cancel_check_counter % 20 == 0:
+                    progress = int((bundle_count - 1) / max_bundle_count * 80) + int(len(results) / n_combos * (80 / max_bundle_count))
+                    progress_callback(min(progress, 95), f"Brute-force: {bundle_count}-bundle ({len(results)}/{n_combos}) — {evaluated_count}/{total_ratios} total")
+
             results.sort(key=lambda x: -x['efficiency'])
-            # Smart retention: ALL for 1-2 bundles, top 50% for 3-6 bundles
+            # Retention: ALL for 1-2 bundles, top 25% (floor 25) for 3+ bundles
             if bundle_count <= 2:
                 all_results[bundle_count] = results  # Keep all
             else:
-                keep_count = max(top_n, len(results) // 2)  # At least top_n or 50%
+                keep_count = max(25, int(len(results) * 0.25))  # Top 25%, min 25
                 all_results[bundle_count] = results[:keep_count]
             # Notify of incremental results
             if result_callback:
@@ -486,19 +525,23 @@ def run_nesting_for_material(
                 packer, strip_width_px, gpu_scale, sizes, top_n,
                 preview_callback=preview_callback,
                 preview_interval_seconds=preview_interval_seconds,
+                cancel_check=cancel_check,
             )
-            # Smart retention: ALL for 1-2 bundles, top 50% for 3-6 bundles
+            # GA evaluates a subset — count the results it returned
+            evaluated_count += len(results)
+            # Retention: ALL for 1-2 bundles, top 25% (floor 25) for 3+ bundles
             if bundle_count <= 2:
                 all_results[bundle_count] = results  # Keep all
             else:
-                keep_count = max(top_n, len(results) // 2)  # At least top_n or 50%
+                keep_count = max(25, int(len(results) * 0.25))  # Top 25%, min 25
                 all_results[bundle_count] = results[:keep_count]
             # Notify of incremental results
             if result_callback:
                 result_callback(bundle_count, all_results[bundle_count])
 
+    total_saved = sum(len(v) for v in all_results.values())
     if progress_callback:
-        progress_callback(100, "Nesting complete")
+        progress_callback(100, f"Complete — {evaluated_count} ratios evaluated, {total_saved} markers saved")
 
     return all_results
 
@@ -514,6 +557,7 @@ def _run_island_ga(
     top_n: int,
     preview_callback: Optional[Callable[[str, str, float], None]] = None,
     preview_interval_seconds: float = 5.0,
+    cancel_check: Optional[Callable[[], bool]] = None,
 ) -> List[Dict]:
     """Run island-based GA for larger search spaces."""
     total_combos = len(all_ratios)
@@ -539,6 +583,8 @@ def _run_island_ga(
     last_preview_time = [0.0]  # Use list for mutability in closure
 
     for island_idx, island_pool in enumerate(islands):
+        if cancel_check and cancel_check():
+            raise NestingCancelled("Job cancelled by user")
         best, _ = _run_island_ga_single(
             pieces_by_size, island_pool, bundle_count,
             packer, strip_width_px, gpu_scale, sizes, global_cache,

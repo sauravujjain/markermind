@@ -86,9 +86,9 @@ export default function OrdersPage() {
     }
   }
 
-  const filteredOrders = orders.filter((order) =>
-    order.order_number.toLowerCase().includes(search.toLowerCase())
-  )
+  const filteredOrders = orders
+    .filter((order) => order.order_number.toLowerCase().includes(search.toLowerCase()))
+    .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
 
   const toggleOrderSelection = (orderId: string, e: React.MouseEvent) => {
     e.preventDefault()
@@ -309,7 +309,7 @@ export default function OrdersPage() {
                             {statusLabels[order.status] || order.status}
                           </span>
                           <span className="text-sm text-muted-foreground hidden sm:block">
-                            {new Date(order.created_at).toLocaleDateString()}
+                            {new Date(order.created_at).toLocaleDateString()} {new Date(order.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                           </span>
                           <ChevronRight className="h-4 w-4 text-muted-foreground group-hover:text-primary group-hover:translate-x-1 transition-all" />
                         </div>

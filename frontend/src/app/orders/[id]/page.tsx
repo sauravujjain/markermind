@@ -9,7 +9,7 @@ import { DashboardLayout } from '@/components/dashboard-layout'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { useToast } from '@/hooks/use-toast'
-import { ArrowLeft, Play, FileText, CheckCircle2, Clock, Package, ChevronDown, ChevronRight, Settings, AlertCircle, Loader2, Pencil, Eye, Layers, FlipHorizontal, Upload, Plus } from 'lucide-react'
+import { ArrowLeft, Play, FileText, CheckCircle2, Clock, Package, ChevronDown, ChevronRight, Settings, AlertCircle, Loader2, Pencil, Eye, Layers, FlipHorizontal, Upload, Plus, XCircle } from 'lucide-react'
 import { useRef } from 'react'
 import {
   Select,
@@ -40,10 +40,14 @@ export default function OrderDetailPage() {
   const [showCutplanConfig, setShowCutplanConfig] = useState(false)
   const [cutplanConfig, setCutplanConfig] = useState({
     maxPlyHeight: 100,
-    fabricCostPerYard: 5.0,
+    fabricCostPerYard: 3.0,
     strategies: ['max_efficiency', 'balanced', 'min_markers'] as string[],
+    selectedColor: 'all' as string,
   })
   const [isGeneratingCutplan, setIsGeneratingCutplan] = useState(false)
+  const [cutplanOptStatus, setCutplanOptStatus] = useState<{
+    status: string; progress: number; message: string; strategies_total: number; strategies_done: number
+  } | null>(null)
   const [nestingConfig, setNestingConfig] = useState({
     fabricWidthInches: 60,
     maxBundleCount: 6,
@@ -87,6 +91,27 @@ export default function OrderDetailPage() {
       loadData()
     }
   }, [isAuthenticated, orderId])
+
+  // Poll for nesting job progress when any job is running
+  useEffect(() => {
+    const hasRunningJob = nestingJobs.some(j => j.status === 'running')
+    if (!hasRunningJob) return
+
+    const interval = setInterval(async () => {
+      try {
+        const jobsData = await api.getNestingJobs(orderId)
+        setNestingJobs(jobsData)
+        // If job just completed, reload everything to update order status
+        if (jobsData.every(j => j.status !== 'running') && jobsData.some(j => j.status === 'completed')) {
+          loadData()
+        }
+      } catch (e) {
+        console.error('Polling error:', e)
+      }
+    }, 3000)
+
+    return () => clearInterval(interval)
+  }, [nestingJobs.some(j => j.status === 'running'), orderId])
 
   const loadData = async () => {
     try {
@@ -158,7 +183,7 @@ export default function OrderDetailPage() {
           }
 
           // Initialize per-fabric nesting config
-          const fabricConfigs: Record<string, { widthInches: number; maxBundles: number; maxMarkerLengthYards: number; topN: number }> = {}
+          const fabricConfigs: Record<string, { widthInches: number; maxBundles: number; maxMarkerLengthYards: number; topN: number; fullCoverage: boolean }> = {}
           orderFabricCodes.forEach(code => {
             const fabric = fabricsData.find(f => f.code === code)
             fabricConfigs[code] = {
@@ -166,6 +191,7 @@ export default function OrderDetailPage() {
               maxBundles: 6,
               maxMarkerLengthYards: 15,
               topN: 10,
+              fullCoverage: false,
             }
           })
           setPerFabricConfig(fabricConfigs)
@@ -336,7 +362,7 @@ export default function OrderDetailPage() {
 
     try {
       // Use perFabricConfig if available for the active nesting fabric
-      const fabricConfig = activeNestingFabric && perFabricConfig[activeNestingFabric]
+      const fabricConfig = activeNestingFabric ? perFabricConfig[activeNestingFabric] : undefined
       const job = await api.createNestingJob({
         order_id: orderId,
         pattern_id: order.pattern_id,
@@ -361,28 +387,88 @@ export default function OrderDetailPage() {
 
   const handleOptimizeCutplan = async () => {
     setIsGeneratingCutplan(true)
+    setCutplanOptStatus({ status: 'running', progress: 0, message: 'Starting...', strategies_total: cutplanConfig.strategies.length, strategies_done: 0 })
     try {
-      const plans = await api.optimizeCutplan({
+      await api.optimizeCutplan({
         order_id: orderId,
         generate_options: cutplanConfig.strategies,
         penalty: 5.0,
-      })
-      toast({
-        title: 'Cutplan optimization complete',
-        description: `Generated ${plans.length} cutplan options`,
+        fabric_cost_per_yard: cutplanConfig.fabricCostPerYard,
+        ...(cutplanConfig.selectedColor !== 'all' ? { color_code: cutplanConfig.selectedColor } : {}),
       })
       setShowCutplanConfig(false)
-      loadData() // Reload to show new cutplans
+      // Start polling for status
+      startCutplanPolling()
     } catch (error) {
       toast({
-        title: 'Failed to optimize cutplan',
+        title: 'Failed to start cutplan optimization',
         description: error instanceof Error ? error.message : 'Please try again',
         variant: 'destructive',
       })
-    } finally {
       setIsGeneratingCutplan(false)
+      setCutplanOptStatus(null)
     }
   }
+
+  const cutplanPollingRef = useRef<NodeJS.Timeout | null>(null)
+  const lastStrategiesDone = useRef(0)
+
+  const startCutplanPolling = () => {
+    if (cutplanPollingRef.current) clearInterval(cutplanPollingRef.current)
+    lastStrategiesDone.current = 0
+    cutplanPollingRef.current = setInterval(async () => {
+      try {
+        const status = await api.getCutplanOptimizeStatus(orderId)
+        setCutplanOptStatus(status)
+
+        // Reload cutplans when a new strategy completes (incremental display)
+        if (status.strategies_done > lastStrategiesDone.current) {
+          lastStrategiesDone.current = status.strategies_done
+          const plans = await api.getCutplans(orderId)
+          setCutplans(plans)
+        }
+
+        if (status.status === 'completed' || status.status === 'failed' || status.status === 'cancelled') {
+          if (cutplanPollingRef.current) clearInterval(cutplanPollingRef.current)
+          setIsGeneratingCutplan(false)
+          loadData()
+          if (status.status === 'completed') {
+            toast({ title: 'Cutplan optimization complete', description: status.message })
+          } else if (status.status === 'failed') {
+            toast({ title: 'Cutplan optimization failed', description: status.message, variant: 'destructive' })
+          }
+        }
+      } catch (e) {
+        console.error('Cutplan polling error:', e)
+      }
+    }, 2000)
+  }
+
+  const handleCancelCutplan = async () => {
+    try {
+      await api.cancelCutplanOptimize(orderId)
+      toast({ title: 'Cancellation requested', description: 'The solver will stop after the current strategy' })
+    } catch (error) {
+      toast({ title: 'Failed to cancel', description: error instanceof Error ? error.message : 'Please try again', variant: 'destructive' })
+    }
+  }
+
+  // Cleanup cutplan polling on unmount
+  useEffect(() => {
+    return () => { if (cutplanPollingRef.current) clearInterval(cutplanPollingRef.current) }
+  }, [])
+
+  // Check if cutplan optimization is already running on load
+  useEffect(() => {
+    if (!isAuthenticated || !orderId) return
+    api.getCutplanOptimizeStatus(orderId).then(status => {
+      if (status.status === 'running') {
+        setCutplanOptStatus(status)
+        setIsGeneratingCutplan(true)
+        startCutplanPolling()
+      }
+    }).catch(() => {})
+  }, [isAuthenticated, orderId])
 
   if (authLoading || !isAuthenticated || isLoading) {
     return (
@@ -453,7 +539,10 @@ export default function OrderDetailPage() {
                   Run Nesting
                 </Button>
                 <Button
-                  onClick={() => setShowCutplanConfig(true)}
+                  onClick={() => {
+                    setShowCutplanConfig(true)
+                    setTimeout(() => document.getElementById('cutplan-config-section')?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 100)
+                  }}
                   disabled={!hasNestingResults}
                   title={!hasNestingResults ? 'Run nesting first' : 'Generate cutplan options'}
                 >
@@ -1522,7 +1611,14 @@ export default function OrderDetailPage() {
                               {fabric ? (
                                 <Button
                                   onClick={() => {
-                                    router.push(`/orders/${orderId}/nesting?fabric=${activeNestingFabric}`)
+                                    const params = new URLSearchParams({
+                                      fabric: activeNestingFabric,
+                                      width: String(config.widthInches),
+                                      maxBundles: String(config.maxBundles),
+                                      topN: String(config.topN),
+                                      fullCoverage: String(config.fullCoverage),
+                                    })
+                                    router.push(`/orders/${orderId}/nesting?${params.toString()}`)
                                   }}
                                   className="w-full"
                                 >
@@ -1557,80 +1653,141 @@ export default function OrderDetailPage() {
           )
         })()}
 
-        {/* Nesting Results Section - shown after nesting is complete */}
-        {nestingJobs.some(j => j.status === 'completed') && (
-          <Card className="border-green-200 bg-green-50/30">
-            <CardHeader>
-              <div className="flex items-center justify-between">
+        {/* Nesting In Progress Section - shown while nesting is running */}
+        {nestingJobs.some(j => j.status === 'running') && (() => {
+          const runningJobs = nestingJobs.filter(j => j.status === 'running')
+          return (
+            <Card className="border-blue-200 bg-blue-50/30">
+              <CardHeader>
                 <div className="flex items-center gap-3">
-                  <div className="h-10 w-10 rounded-xl bg-gradient-to-br from-green-500 to-green-600 flex items-center justify-center">
-                    <CheckCircle2 className="h-5 w-5 text-white" />
+                  <div className="h-10 w-10 rounded-xl bg-gradient-to-br from-blue-500 to-blue-600 flex items-center justify-center">
+                    <Loader2 className="h-5 w-5 text-white animate-spin" />
                   </div>
-                  <div>
-                    <CardTitle>Nesting Complete</CardTitle>
+                  <div className="flex-1">
+                    <CardTitle>Nesting in Progress</CardTitle>
                     <CardDescription>
-                      {(() => {
-                        const completedJobs = nestingJobs.filter(j => j.status === 'completed')
-                        const totalMarkers = completedJobs.reduce((sum, j) => sum + (j.results?.length || 0), 0)
-                        return `${totalMarkers} markers generated across ${completedJobs.length} job(s)`
-                      })()}
+                      {runningJobs.length} job(s) running — results update automatically
                     </CardDescription>
                   </div>
                 </div>
-                <Button onClick={() => setShowCutplanConfig(true)}>
-                  Generate Cutplan Options
-                </Button>
-              </div>
-            </CardHeader>
-            <CardContent>
-              <div className="space-y-4">
-                {/* Results summary per job */}
-                {nestingJobs.filter(j => j.status === 'completed').map((job) => (
-                  <div key={job.id} className="p-4 bg-white rounded-lg border border-green-100">
-                    <div className="flex items-center justify-between mb-3">
-                      <div className="font-medium">
-                        {job.fabric_width_inches}" wide × {job.max_bundle_count} max bundles
-                      </div>
-                      <span className="text-xs text-muted-foreground">
-                        {new Date(job.updated_at).toLocaleString()}
-                      </span>
-                    </div>
-                    {/* Top markers preview */}
-                    {job.results && job.results.length > 0 && (
-                      <div className="grid gap-2 sm:grid-cols-2 md:grid-cols-3">
-                        {job.results.slice(0, 6).map((result, idx) => (
-                          <div
-                            key={result.id}
-                            className={`p-2 rounded border text-xs ${idx === 0 ? 'bg-green-50 border-green-300' : 'bg-muted/30'}`}
-                          >
-                            <div className="flex items-center justify-between">
-                              <span className="font-mono">{result.ratio_str}</span>
-                              <span className={`font-medium ${(result.efficiency * 100) >= 80 ? 'text-green-600' : (result.efficiency * 100) >= 75 ? 'text-amber-600' : 'text-red-600'}`}>
-                                {(result.efficiency * 100).toFixed(1)}%
-                              </span>
-                            </div>
-                            <div className="text-muted-foreground mt-1">
-                              {result.bundle_count} bundles • {result.length_yards.toFixed(2)} yd
-                            </div>
+              </CardHeader>
+              <CardContent>
+                <div className="space-y-4">
+                  {runningJobs.map((job) => {
+                    const progress = job.progress || 0
+                    const resultCount = job.results?.length || 0
+                    return (
+                      <div key={job.id} className="p-4 bg-white rounded-lg border border-blue-100">
+                        <div className="flex items-center justify-between mb-2">
+                          <div className="font-medium text-sm">
+                            {job.fabric_width_inches}" wide × {job.max_bundle_count} max bundles
                           </div>
-                        ))}
+                          <span className="text-xs text-blue-600 font-medium">
+                            {progress.toFixed(0)}%
+                          </span>
+                        </div>
+                        {/* Progress bar */}
+                        <div className="w-full bg-blue-100 rounded-full h-2 mb-2">
+                          <div
+                            className="bg-blue-500 h-2 rounded-full transition-all duration-500"
+                            style={{ width: `${Math.max(progress, 2)}%` }}
+                          />
+                        </div>
+                        <div className="text-xs text-muted-foreground">
+                          {job.progress_message || 'Starting...'}
+                          {resultCount > 0 && ` — ${resultCount} markers found`}
+                        </div>
+                        {/* Show incremental results */}
+                        {job.results && job.results.length > 0 && (
+                          <div className="mt-3 grid gap-2 sm:grid-cols-2 md:grid-cols-3">
+                            {job.results.slice(0, 6).map((result, idx) => (
+                              <div
+                                key={result.id}
+                                className={`p-2 rounded border text-xs ${idx === 0 ? 'bg-blue-50 border-blue-300' : 'bg-muted/30'}`}
+                              >
+                                <div className="flex items-center justify-between">
+                                  <span className="font-mono">{result.ratio_str}</span>
+                                  <span className={`font-medium ${(result.efficiency * 100) >= 80 ? 'text-green-600' : (result.efficiency * 100) >= 75 ? 'text-amber-600' : 'text-red-600'}`}>
+                                    {(result.efficiency * 100).toFixed(1)}%
+                                  </span>
+                                </div>
+                                <div className="text-muted-foreground mt-1">
+                                  {result.bundle_count} bundles • {result.length_yards.toFixed(2)} yd
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                        {job.results && job.results.length > 6 && (
+                          <p className="text-xs text-muted-foreground mt-2">
+                            +{job.results.length - 6} more markers
+                          </p>
+                        )}
+                        {/* Cancel button */}
+                        <div className="mt-3 pt-3 border-t border-blue-100">
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="text-red-600 border-red-200 hover:bg-red-50"
+                            onClick={async () => {
+                              try {
+                                await api.cancelNestingJob(job.id)
+                                toast({ title: 'Cancellation requested', description: 'Job will stop at next checkpoint' })
+                                loadData()
+                              } catch (e) {
+                                toast({ title: 'Failed to cancel', variant: 'destructive' })
+                              }
+                            }}
+                          >
+                            Stop Nesting
+                          </Button>
+                        </div>
                       </div>
-                    )}
-                    {job.results && job.results.length > 6 && (
-                      <p className="text-xs text-muted-foreground mt-2">
-                        +{job.results.length - 6} more markers
-                      </p>
-                    )}
-                  </div>
-                ))}
+                    )
+                  })}
+                </div>
+              </CardContent>
+            </Card>
+          )
+        })()}
 
-                {/* Re-run nesting option */}
-                <div className="flex items-center justify-between pt-3 border-t">
-                  <p className="text-sm text-muted-foreground">
-                    Want to try different parameters?
-                  </p>
+        {/* Nesting Results Section - shown after nesting is complete */}
+        {nestingJobs.some(j => j.status === 'completed') && (
+          <Card className="border-green-200 bg-green-50/30">
+            <CardContent className="py-4">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                  <div className="h-9 w-9 rounded-lg bg-gradient-to-br from-green-500 to-green-600 flex items-center justify-center">
+                    <CheckCircle2 className="h-4 w-4 text-white" />
+                  </div>
+                  <div>
+                    <div className="font-semibold text-sm">Nesting Complete</div>
+                    <div className="text-xs text-muted-foreground flex gap-3 mt-0.5">
+                      {(() => {
+                        const completedJobs = nestingJobs.filter(j => j.status === 'completed')
+                        const totalMarkers = completedJobs.reduce((sum, j) => sum + (j.results?.length || 0), 0)
+                        const bestEff = Math.max(...completedJobs.flatMap(j => (j.results || []).map(r => r.efficiency)))
+                        const bundleCounts = Array.from(new Set(completedJobs.flatMap(j => (j.results || []).map(r => r.bundle_count)))).sort((a, b) => a - b)
+                        return (
+                          <>
+                            <span>{totalMarkers} markers</span>
+                            <span>{bundleCounts.join(',')}-bundle ratios</span>
+                            <span className="text-green-600 font-medium">Best: {(bestEff * 100).toFixed(1)}%</span>
+                          </>
+                        )
+                      })()}
+                    </div>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2">
                   <Button variant="outline" size="sm" onClick={handleStartNesting}>
-                    Re-run Nesting
+                    Re-run
+                  </Button>
+                  <Button size="sm" onClick={() => {
+                    setShowCutplanConfig(true)
+                    setTimeout(() => document.getElementById('cutplan-config-section')?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 100)
+                  }}>
+                    Generate Cutplan Options
                   </Button>
                 </div>
               </div>
@@ -1640,7 +1797,7 @@ export default function OrderDetailPage() {
 
         {/* Cutplan Configuration Modal */}
         {showCutplanConfig && (
-          <Card className="border-primary/30">
+          <Card id="cutplan-config-section" className="border-primary/30">
             <CardHeader>
               <div className="flex items-center justify-between">
                 <div>
@@ -1656,6 +1813,53 @@ export default function OrderDetailPage() {
             </CardHeader>
             <CardContent>
               <div className="space-y-6">
+                {/* Color Selection */}
+                {order && order.order_lines && order.order_lines.length > 0 && (
+                  <div>
+                    <label className="text-sm font-medium mb-2 block">Color</label>
+                    <div className="flex flex-wrap gap-2">
+                      <button
+                        onClick={() => setCutplanConfig({ ...cutplanConfig, selectedColor: 'all' })}
+                        className={`px-3 py-2 rounded-lg border text-sm transition-all ${
+                          cutplanConfig.selectedColor === 'all'
+                            ? 'bg-primary text-primary-foreground border-primary'
+                            : 'bg-muted/30 hover:bg-muted border-border'
+                        }`}
+                      >
+                        <div className="font-medium">All Colors</div>
+                        <div className={`text-xs ${cutplanConfig.selectedColor === 'all' ? 'text-primary-foreground/80' : 'text-muted-foreground'}`}>
+                          Aggregate demand across all colors
+                        </div>
+                      </button>
+                      {Array.from(new Set(order.order_lines.map(l => l.color_code))).map((color) => {
+                        const colorLines = order.order_lines.filter(l => l.color_code === color)
+                        const firstLine = colorLines[0]
+                        const perFabricQty = firstLine.size_quantities.reduce((s, sq) => s + sq.quantity, 0)
+                        const fabricCount = Array.from(new Set(colorLines.map(l => l.fabric_code))).length
+                        return (
+                          <button
+                            key={color}
+                            onClick={() => setCutplanConfig({ ...cutplanConfig, selectedColor: color })}
+                            className={`px-3 py-2 rounded-lg border text-sm transition-all ${
+                              cutplanConfig.selectedColor === color
+                                ? 'bg-primary text-primary-foreground border-primary'
+                                : 'bg-muted/30 hover:bg-muted border-border'
+                            }`}
+                          >
+                            <div className="font-medium">{color}</div>
+                            <div className={`text-xs ${cutplanConfig.selectedColor === color ? 'text-primary-foreground/80' : 'text-muted-foreground'}`}>
+                              {perFabricQty.toLocaleString()} garments · {fabricCount} fabric{fabricCount > 1 ? 's' : ''}
+                            </div>
+                          </button>
+                        )
+                      })}
+                    </div>
+                    <p className="text-xs text-muted-foreground mt-2">
+                      Select a specific color to optimize, or &quot;All Colors&quot; to aggregate demand
+                    </p>
+                  </div>
+                )}
+
                 {/* Input Parameters */}
                 <div className="grid gap-4 sm:grid-cols-2">
                   <div>
@@ -1676,13 +1880,13 @@ export default function OrderDetailPage() {
                     </p>
                   </div>
                   <div>
-                    <label className="text-sm font-medium mb-2 block">Fabric Cost ($/yard)</label>
+                    <label className="text-sm font-medium mb-2 block">Fabric Cost ($/yard, default: $3)</label>
                     <input
                       type="number"
                       value={cutplanConfig.fabricCostPerYard}
                       onChange={(e) => setCutplanConfig({
                         ...cutplanConfig,
-                        fabricCostPerYard: parseFloat(e.target.value) || 5.0
+                        fabricCostPerYard: parseFloat(e.target.value) || 3.0
                       })}
                       className="w-full px-3 py-2 border rounded-md text-sm"
                       min={0}
@@ -1763,11 +1967,64 @@ export default function OrderDetailPage() {
           </Card>
         )}
 
+        {/* Cutplan Optimization Progress */}
+        {isGeneratingCutplan && cutplanOptStatus && (
+          <Card className="border-purple-200 bg-purple-50/30">
+            <CardHeader>
+              <div className="flex items-center gap-3">
+                <div className="h-10 w-10 rounded-xl bg-gradient-to-br from-purple-500 to-purple-600 flex items-center justify-center">
+                  <Loader2 className="h-5 w-5 text-white animate-spin" />
+                </div>
+                <div className="flex-1">
+                  <CardTitle>Cutplan Optimization Running</CardTitle>
+                  <CardDescription>{cutplanOptStatus.message}</CardDescription>
+                </div>
+                <div className="text-right text-sm">
+                  <span className="font-medium">{cutplanOptStatus.strategies_done}/{cutplanOptStatus.strategies_total}</span>
+                  <span className="text-muted-foreground"> strategies</span>
+                </div>
+              </div>
+            </CardHeader>
+            <CardContent>
+              <div className="space-y-3">
+                {/* Progress bar */}
+                <div className="w-full bg-purple-100 rounded-full h-2">
+                  <div
+                    className="bg-purple-500 h-2 rounded-full transition-all duration-500"
+                    style={{ width: `${Math.max(cutplanOptStatus.progress, 2)}%` }}
+                  />
+                </div>
+                <div className="flex items-center justify-between text-xs text-muted-foreground">
+                  <span>{cutplanOptStatus.progress}%</span>
+                  <span>Each strategy has a 2-minute time limit</span>
+                </div>
+                {/* Cancel button */}
+                <Button
+                  variant="destructive"
+                  size="sm"
+                  onClick={handleCancelCutplan}
+                >
+                  <XCircle className="mr-2 h-4 w-4" />
+                  Stop Optimization
+                </Button>
+              </div>
+            </CardContent>
+          </Card>
+        )}
+
         {/* Cutplans */}
         {cutplans.length > 0 && (() => {
-          // Get sizes from pattern or order
-          const pattern = order.pattern_id ? patterns.find(p => p.id === order.pattern_id) : null
-          const sizes = pattern?.available_sizes || []
+          // Get sizes from order demand (not pattern — pattern may have extra sizes)
+          const orderSizesSet = new Set<string>()
+          const seenColors = new Set<string>()
+          order.order_lines.forEach(line => {
+            if (seenColors.has(line.color_code)) return
+            seenColors.add(line.color_code)
+            line.size_quantities.forEach(sq => {
+              if (sq.quantity > 0) orderSizesSet.add(sq.size_code)
+            })
+          })
+          const sizes = Array.from(orderSizesSet).sort()
 
           return (
             <Card>
@@ -1878,23 +2135,32 @@ export default function OrderDetailPage() {
 
                       {/* Cost Breakdown */}
                       <div className="px-4 py-3 bg-muted/20 border-t">
-                        <div className="text-xs text-muted-foreground mb-2">Cost Breakdown</div>
-                        <div className="grid grid-cols-4 gap-4 text-sm">
-                          <div>
+                        <div className="flex items-center justify-between mb-3">
+                          <div className="text-sm font-medium">Cost Breakdown</div>
+                          <div className="text-xs text-muted-foreground">
+                            {plan.total_yards?.toFixed(1)} yards total
+                          </div>
+                        </div>
+                        <div className="grid grid-cols-5 gap-3 text-sm">
+                          <div className="bg-background rounded-lg p-2 border">
                             <div className="text-muted-foreground text-xs">Fabric</div>
-                            <div className="font-medium">${plan.fabric_cost?.toFixed(2) || '0.00'}</div>
+                            <div className="font-semibold">${plan.fabric_cost?.toFixed(2) || '0.00'}</div>
                           </div>
-                          <div>
+                          <div className="bg-background rounded-lg p-2 border">
                             <div className="text-muted-foreground text-xs">Spreading</div>
-                            <div className="font-medium">${plan.spreading_cost?.toFixed(2) || '0.00'}</div>
+                            <div className="font-semibold">${plan.spreading_cost?.toFixed(2) || '0.00'}</div>
                           </div>
-                          <div>
+                          <div className="bg-background rounded-lg p-2 border">
                             <div className="text-muted-foreground text-xs">Cutting</div>
-                            <div className="font-medium">${plan.cutting_cost?.toFixed(2) || '0.00'}</div>
+                            <div className="font-semibold">${plan.cutting_cost?.toFixed(2) || '0.00'}</div>
                           </div>
-                          <div>
+                          <div className="bg-background rounded-lg p-2 border">
                             <div className="text-muted-foreground text-xs">Prep</div>
-                            <div className="font-medium">${plan.prep_cost?.toFixed(2) || '0.00'}</div>
+                            <div className="font-semibold">${plan.prep_cost?.toFixed(2) || '0.00'}</div>
+                          </div>
+                          <div className="bg-primary/5 rounded-lg p-2 border border-primary/20">
+                            <div className="text-muted-foreground text-xs">Total</div>
+                            <div className="font-bold text-primary">${plan.total_cost?.toFixed(2) || '0.00'}</div>
                           </div>
                         </div>
                       </div>
@@ -1955,7 +2221,10 @@ export default function OrderDetailPage() {
           stepLabel = 'Nesting Complete'
           nextAction = {
             label: 'Generate Cutplan Options',
-            onClick: () => setShowCutplanConfig(true),
+            onClick: () => {
+              setShowCutplanConfig(true)
+              setTimeout(() => document.getElementById('cutplan-config-section')?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 100)
+            },
           }
         }
         if (hasCutplans) {

@@ -50,9 +50,12 @@ class CutplanService:
 
         return demand
 
-    def get_flat_demand(self, db: Session, order_id: str) -> Dict[str, int]:
+    def get_flat_demand(self, db: Session, order_id: str, color_code: Optional[str] = None) -> Dict[str, int]:
         """
-        Get total demand per size (aggregated across all colors).
+        Get total demand per size.
+        If color_code is specified, use the first order line for that color
+        (all fabric lines for the same color share identical demand).
+        Otherwise aggregate across unique colors (one line per color).
         Returns: {"46": 74, "48": 244, ...}
         """
         order = db.query(Order).filter(Order.id == order_id).first()
@@ -60,16 +63,23 @@ class CutplanService:
             return {}
 
         flat_demand = {}
+        seen_colors = set()
         for order_line in order.order_lines:
+            if color_code and order_line.color_code != color_code:
+                continue
+            # Only count each color once (multiple fabric lines share the same demand)
+            if order_line.color_code in seen_colors:
+                continue
+            seen_colors.add(order_line.color_code)
             for sq in order_line.size_quantities:
                 if sq.quantity > 0:
                     flat_demand[sq.size_code] = flat_demand.get(sq.size_code, 0) + sq.quantity
 
         return flat_demand
 
-    def get_order_sizes(self, db: Session, order_id: str) -> List[str]:
+    def get_order_sizes(self, db: Session, order_id: str, color_code: Optional[str] = None) -> List[str]:
         """Get list of sizes in the order, sorted."""
-        demand = self.get_flat_demand(db, order_id)
+        demand = self.get_flat_demand(db, order_id, color_code=color_code)
         return sorted(demand.keys())
 
     def get_available_markers(
@@ -228,9 +238,14 @@ class CutplanService:
         customer_id: str,
         strategies: List[str] = None,
         penalty: float = 5.0,
+        progress_callback: Any = None,
+        cancel_check: Any = None,
+        color_code: Optional[str] = None,
+        fabric_cost_per_yard: Optional[float] = None,
     ) -> List[Cutplan]:
         """
         Run ILP optimization with multiple strategies and create cutplans for each.
+        Each strategy result is saved immediately when complete.
 
         Args:
             db: Database session
@@ -240,6 +255,9 @@ class CutplanService:
             customer_id: Customer ID for cost config
             strategies: List of strategies to run
             penalty: Penalty for balanced strategy
+            progress_callback: Optional (progress_pct, message) callback
+            cancel_check: Optional callable returning True to cancel
+            color_code: Optional color to filter demand (None = all colors)
 
         Returns:
             List of Cutplan objects
@@ -247,12 +265,13 @@ class CutplanService:
         if strategies is None:
             strategies = ["max_efficiency", "balanced", "min_markers"]
 
-        # Get demand
-        flat_demand = self.get_flat_demand(db, order_id)
+        # Get demand (filtered by color if specified)
+        flat_demand = self.get_flat_demand(db, order_id, color_code=color_code)
         if not flat_demand:
-            raise ValueError("Order has no quantities")
+            color_msg = f" for color '{color_code}'" if color_code else ""
+            raise ValueError(f"Order has no quantities{color_msg}")
 
-        sizes = self.get_order_sizes(db, order_id)
+        sizes = self.get_order_sizes(db, order_id, color_code=color_code)
 
         # Get markers
         markers = self.get_available_markers(db, pattern_id, fabric_id)
@@ -269,21 +288,24 @@ class CutplanService:
             for m in markers
         ]
 
-        # Get cost config
+        color_label = f" [{color_code}]" if color_code else ""
+        total_garments = sum(flat_demand.values())
+
+        if progress_callback:
+            progress_callback(5, f"Loaded {len(marker_dicts)} markers{color_label}, {total_garments} garments across {len(sizes)} sizes...")
+
+        # Get cost config, override fabric cost if user specified
         cost_config = self.get_cost_config(db, customer_id)
+        effective_fabric_cost = fabric_cost_per_yard if fabric_cost_per_yard is not None else cost_config.fabric_cost_per_yard
 
-        # Run optimization
-        cutplan_options = optimize_cutplan(
-            demand=flat_demand,
-            markers=marker_dicts,
-            sizes=sizes,
-            options=strategies,
-            penalty=penalty,
-        )
-
-        # Create cutplan for each result
+        # Track cutplans created incrementally
         cutplans = []
-        for option in cutplan_options:
+        completed_strategies = 0
+
+        def on_strategy_complete(strategy_name: str, option: Dict):
+            """Called when each strategy finishes — save result immediately."""
+            nonlocal completed_strategies
+
             cutplan = self.create_cutplan(
                 db=db,
                 order_id=order_id,
@@ -298,9 +320,10 @@ class CutplanService:
             # Calculate and save costs
             costs = calculate_cutplan_costs(
                 option,
-                fabric_cost_per_yard=cost_config.fabric_cost_per_yard,
+                fabric_cost_per_yard=effective_fabric_cost,
                 max_ply_height=cost_config.max_ply_height,
                 spreading_cost_per_yard=cost_config.spreading_cost_per_yard,
+                spreading_cost_per_ply=getattr(cost_config, 'spreading_cost_per_ply', 0.013),
                 cutting_cost_per_inch=cost_config.cutting_cost_per_inch,
                 prep_cost_per_marker=cost_config.prep_cost_per_marker,
             )
@@ -317,15 +340,43 @@ class CutplanService:
             cutplan.spreading_cost = costs["spreading_cost"]
             cutplan.cutting_cost = costs["cutting_cost"]
             cutplan.prep_cost = costs["prep_cost"]
+            cutplan.bundle_cuts = option.get("bundle_cuts", 0)
             db.commit()
 
             cutplans.append(cutplan)
+            completed_strategies += 1
 
-        # Update order status
-        order = db.query(Order).filter(Order.id == order_id).first()
-        if order and order.status in ("pending_cutplan",):
-            order.status = "cutplan_ready"
-            db.commit()
+            solve_time = option.get("solve_time", 0)
+            if progress_callback:
+                pct = int(10 + (completed_strategies / len(strategies)) * 85)
+                progress_callback(pct, f"Strategy {completed_strategies}/{len(strategies)} done: "
+                                      f"{option.get('name', strategy_name)} — "
+                                      f"{option.get('efficiency', 0)*100:.1f}% eff "
+                                      f"({solve_time:.0f}s)")
+
+        if progress_callback:
+            progress_callback(10, f"Running ILP solver: {len(strategies)} strategies, penalty={penalty}...")
+
+        # Run optimization with incremental callback
+        optimize_cutplan(
+            demand=flat_demand,
+            markers=marker_dicts,
+            sizes=sizes,
+            options=strategies,
+            penalty=penalty,
+            strategy_callback=on_strategy_complete,
+            cancel_check=cancel_check,
+        )
+
+        # Update order status if any strategies completed
+        if cutplans:
+            order = db.query(Order).filter(Order.id == order_id).first()
+            if order and order.status in ("pending_cutplan",):
+                order.status = "cutplan_ready"
+                db.commit()
+
+        if progress_callback:
+            progress_callback(100, f"Complete — {len(cutplans)} cutplan options generated")
 
         return cutplans
 

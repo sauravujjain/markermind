@@ -14,12 +14,13 @@ class CostConfig(Base, TimestampMixin):
     name = Column(String(100), default="Default")  # Config name
 
     # Per-yard costs
-    fabric_cost_per_yard = Column(Float, default=5.0)  # Base fabric cost if not specified
-    spreading_cost_per_yard = Column(Float, default=0.10)  # Labor for spreading
+    fabric_cost_per_yard = Column(Float, default=3.0)  # Base fabric cost per yard
+    spreading_cost_per_yard = Column(Float, default=0.00122)  # Spreading cost per yard of fabric spread
+    spreading_cost_per_ply = Column(Float, default=0.013)  # Spreading cost per ply (layer)
 
     # Per-operation costs
-    cutting_cost_per_inch = Column(Float, default=0.01)  # Per linear inch of cut
-    prep_cost_per_marker = Column(Float, default=2.0)  # Setup cost per marker
+    cutting_cost_per_inch = Column(Float, default=0.000424)  # Per linear inch of perimeter per cut
+    prep_cost_per_marker = Column(Float, default=0.03)  # Paper/print cost per unique marker
 
     # Constraints
     max_ply_height = Column(Integer, default=100)  # Max layers per cut

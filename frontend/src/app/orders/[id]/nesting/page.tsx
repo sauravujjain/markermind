@@ -35,15 +35,16 @@ export default function NestingProgressPage() {
   const [isLoading, setIsLoading] = useState(true)
   const [isStarting, setIsStarting] = useState(false)
   const [markers, setMarkers] = useState<MarkerResult[]>([])
+  const [newMarkerRatios, setNewMarkerRatios] = useState<Set<string>>(new Set())
   const [currentMarkerPreview, setCurrentMarkerPreview] = useState<string | null>(null)
   const [currentPreviewRatio, setCurrentPreviewRatio] = useState<string>('')
   const [currentPreviewEfficiency, setCurrentPreviewEfficiency] = useState<number>(0)
   const [elapsedTime, setElapsedTime] = useState(0)
   const [startTime, setStartTime] = useState<number | null>(null)
 
-  const resultsEndRef = useRef<HTMLDivElement>(null)
   const timerRef = useRef<NodeJS.Timeout | null>(null)
   const pollingRef = useRef<NodeJS.Timeout | null>(null)
+  const knownRatiosRef = useRef<Set<string>>(new Set())
 
   useEffect(() => {
     checkAuth()
@@ -61,12 +62,14 @@ export default function NestingProgressPage() {
     }
   }, [isAuthenticated, orderId])
 
-  // Auto-scroll to bottom when new markers are added
+  // Clear "new" highlight after 2 seconds
   useEffect(() => {
-    if (resultsEndRef.current) {
-      resultsEndRef.current.scrollIntoView({ behavior: 'smooth' })
-    }
-  }, [markers])
+    if (newMarkerRatios.size === 0) return
+    const timeout = setTimeout(() => {
+      setNewMarkerRatios(new Set())
+    }, 2000)
+    return () => clearTimeout(timeout)
+  }, [newMarkerRatios])
 
   // Timer for elapsed time
   useEffect(() => {
@@ -125,7 +128,7 @@ export default function NestingProgressPage() {
           startPolling(latestJob.id)
         }
 
-        // Load existing results
+        // Load existing results (mark all as already known — no highlight)
         if (latestJob.results && latestJob.results.length > 0) {
           const sortedResults = latestJob.results
             .map(r => ({
@@ -137,6 +140,7 @@ export default function NestingProgressPage() {
             }))
             .sort((a, b) => b.efficiency - a.efficiency)
           setMarkers(sortedResults)
+          knownRatiosRef.current = new Set(sortedResults.map(r => r.ratio))
         }
       }
     } catch (error) {
@@ -179,7 +183,7 @@ export default function NestingProgressPage() {
           setCurrentPreviewEfficiency(previewData.efficiency || 0)
         }
 
-        // Update results
+        // Update results and detect newly added markers
         if (jobData.results && jobData.results.length > 0) {
           const sortedResults = jobData.results
             .map(r => ({
@@ -190,6 +194,20 @@ export default function NestingProgressPage() {
               rank: r.rank,
             }))
             .sort((a, b) => b.efficiency - a.efficiency)
+
+          // Find which ratios are new since last poll
+          const freshRatios = new Set<string>()
+          sortedResults.forEach(r => {
+            if (!knownRatiosRef.current.has(r.ratio)) {
+              freshRatios.add(r.ratio)
+            }
+          })
+          if (freshRatios.size > 0) {
+            setNewMarkerRatios(freshRatios)
+            // Update known set
+            sortedResults.forEach(r => knownRatiosRef.current.add(r.ratio))
+          }
+
           setMarkers(sortedResults)
         }
 
@@ -223,6 +241,8 @@ export default function NestingProgressPage() {
 
     setIsStarting(true)
     setMarkers([])
+    setNewMarkerRatios(new Set())
+    knownRatiosRef.current = new Set()
     setCurrentMarkerPreview(null)
     setStartTime(Date.now())
     setElapsedTime(0)
@@ -232,6 +252,7 @@ export default function NestingProgressPage() {
       const widthInches = parseFloat(searchParams.get('width') || String(fabric.width_inches || 60))
       const maxBundles = parseInt(searchParams.get('maxBundles') || '6')
       const topN = parseInt(searchParams.get('topN') || '10')
+      const fullCoverage = searchParams.get('fullCoverage') === 'true'
 
       // Create nesting job
       const job = await api.createNestingJob({
@@ -240,6 +261,7 @@ export default function NestingProgressPage() {
         fabric_width_inches: widthInches,
         max_bundle_count: maxBundles,
         top_n_results: topN,
+        full_coverage: fullCoverage,
       })
 
       setNestingJob(job)
@@ -260,9 +282,32 @@ export default function NestingProgressPage() {
     }
   }
 
+  const [isCancelling, setIsCancelling] = useState(false)
+
+  const cancelNesting = async () => {
+    if (!nestingJob) return
+    setIsCancelling(true)
+    try {
+      await api.cancelNestingJob(nestingJob.id)
+      toast({
+        title: 'Cancellation requested',
+        description: 'The nesting job will stop at the next checkpoint',
+      })
+    } catch (error) {
+      toast({
+        title: 'Failed to cancel',
+        description: error instanceof Error ? error.message : 'Please try again',
+        variant: 'destructive',
+      })
+    } finally {
+      setIsCancelling(false)
+    }
+  }
+
   const isNesting = nestingJob?.status === 'running' || nestingJob?.status === 'pending'
   const isComplete = nestingJob?.status === 'completed'
   const isFailed = nestingJob?.status === 'failed'
+  const isCancelled = nestingJob?.status === 'cancelled'
 
   if (authLoading || !isAuthenticated || isLoading) {
     return (
@@ -307,6 +352,11 @@ export default function NestingProgressPage() {
               </h1>
               <p className="text-muted-foreground">
                 {order.order_number} • {pattern?.name || 'Pattern'} • {fabric?.width_inches || 60}" wide
+                {searchParams.get('fullCoverage') === 'true' && (
+                  <span className="ml-2 text-xs bg-amber-100 text-amber-800 px-2 py-0.5 rounded-full">
+                    100% Coverage
+                  </span>
+                )}
               </p>
             </div>
           </div>
@@ -328,9 +378,11 @@ export default function NestingProgressPage() {
                   isNesting ? 'bg-primary text-primary-foreground animate-pulse' :
                   isComplete ? 'bg-green-500 text-white' :
                   isFailed ? 'bg-red-500 text-white' :
+                  isCancelled ? 'bg-amber-500 text-white' :
                   'bg-muted'
                 }`}>
                   {isFailed ? <XCircle className="h-6 w-6" /> :
+                   isCancelled ? <AlertCircle className="h-6 w-6" /> :
                    isComplete ? <CheckCircle2 className="h-6 w-6" /> :
                    <Zap className="h-6 w-6" />}
                 </div>
@@ -338,6 +390,7 @@ export default function NestingProgressPage() {
                   <CardTitle>
                     {isNesting ? 'Nesting in Progress...' :
                      isComplete ? 'Nesting Complete' :
+                     isCancelled ? 'Nesting Cancelled' :
                      isFailed ? 'Nesting Failed' :
                      'Ready to Nest'}
                   </CardTitle>
@@ -346,6 +399,8 @@ export default function NestingProgressPage() {
                       ? nestingJob?.progress_message || 'Processing...'
                       : isComplete
                       ? `Generated ${markers.length} markers`
+                      : isCancelled
+                      ? nestingJob?.progress_message || `Stopped — ${markers.length} markers saved`
                       : isFailed
                       ? nestingJob?.error_message || 'An error occurred'
                       : `Click Start to begin GPU nesting for ${fabricCode}`
@@ -372,6 +427,7 @@ export default function NestingProgressPage() {
                 <div
                   className={`h-full transition-all duration-300 ease-out ${
                     isFailed ? 'bg-red-500' :
+                    isCancelled ? 'bg-amber-500' :
                     isComplete ? 'bg-green-500' :
                     'bg-gradient-to-r from-primary to-primary/80'
                   }`}
@@ -380,8 +436,26 @@ export default function NestingProgressPage() {
               </div>
             </div>
 
+            {/* Job Config Summary */}
+            {nestingJob && (
+              <div className="flex flex-wrap gap-3 mb-4 text-xs">
+                <span className="bg-muted px-2 py-1 rounded">
+                  Width: {nestingJob.fabric_width_inches}"
+                </span>
+                <span className="bg-muted px-2 py-1 rounded">
+                  Max Bundles: {nestingJob.max_bundle_count}
+                </span>
+                <span className="bg-muted px-2 py-1 rounded">
+                  Top N: {nestingJob.top_n_results}
+                </span>
+                <span className={`px-2 py-1 rounded ${nestingJob.full_coverage ? 'bg-amber-100 text-amber-800' : 'bg-muted'}`}>
+                  {nestingJob.full_coverage ? '100% Coverage (All Ratios)' : 'GA Optimized'}
+                </span>
+              </div>
+            )}
+
             {/* Start/Stop Button */}
-            {!isNesting && !isComplete && !isFailed && (
+            {!isNesting && !isComplete && !isFailed && !isCancelled && (
               <Button onClick={startNesting} size="lg" className="w-full" disabled={isStarting}>
                 {isStarting ? (
                   <>
@@ -398,13 +472,28 @@ export default function NestingProgressPage() {
             )}
 
             {isNesting && (
-              <Button variant="outline" size="lg" className="w-full" disabled>
-                <Clock className="mr-2 h-5 w-5 animate-spin" />
-                Processing...
+              <Button
+                variant="destructive"
+                size="lg"
+                className="w-full"
+                onClick={cancelNesting}
+                disabled={isCancelling}
+              >
+                {isCancelling ? (
+                  <>
+                    <Clock className="mr-2 h-5 w-5 animate-spin" />
+                    Cancelling...
+                  </>
+                ) : (
+                  <>
+                    <XCircle className="mr-2 h-5 w-5" />
+                    Stop Nesting
+                  </>
+                )}
               </Button>
             )}
 
-            {(isComplete || isFailed) && (
+            {(isComplete || isFailed || isCancelled) && (
               <div className="flex gap-3">
                 <Button onClick={startNesting} variant="outline" className="flex-1" disabled={isStarting}>
                   <Play className="mr-2 h-4 w-4" />
@@ -471,22 +560,41 @@ export default function NestingProgressPage() {
                 <div>
                   <CardTitle className="text-base">Marker Results</CardTitle>
                   <CardDescription>
-                    {markers.length} markers found, sorted by efficiency
+                    Sorted by efficiency — {isNesting ? 'updating live' : markers.length > 0 ? 'nesting complete' : 'waiting to start'}
                   </CardDescription>
                 </div>
-                {markers.length > 0 && (
-                  <span className="flex items-center gap-1 text-xs text-green-700 dark:text-green-400 bg-green-100 dark:bg-green-900/30 px-2 py-1 rounded-full">
-                    <TrendingUp className="h-3 w-3" />
-                    {markers.length} markers
+                <div className="flex items-center gap-2">
+                  {newMarkerRatios.size > 0 && (
+                    <span className="flex items-center gap-1 text-xs text-blue-700 dark:text-blue-400 bg-blue-100 dark:bg-blue-900/30 px-2 py-1 rounded-full animate-pulse">
+                      +{newMarkerRatios.size} new
+                    </span>
+                  )}
+                  <span className={`flex items-center gap-1 text-sm font-medium px-3 py-1 rounded-full ${
+                    markers.length > 0
+                      ? 'text-green-700 dark:text-green-400 bg-green-100 dark:bg-green-900/30'
+                      : 'text-muted-foreground bg-muted'
+                  }`}>
+                    <TrendingUp className="h-3.5 w-3.5" />
+                    {markers.length}
                   </span>
-                )}
+                </div>
               </div>
             </CardHeader>
             <CardContent>
+              {/* Inline keyframes for row highlight */}
+              <style>{`
+                @keyframes marker-row-flash {
+                  0% { background-color: rgb(191 219 254 / 0.6); }
+                  100% { background-color: transparent; }
+                }
+                .marker-new-row {
+                  animation: marker-row-flash 2s ease-out;
+                }
+              `}</style>
               <div className="border rounded-lg overflow-hidden">
                 <div className="max-h-[400px] overflow-y-auto">
                   <table className="w-full text-sm">
-                    <thead className="sticky top-0 bg-muted/80 backdrop-blur">
+                    <thead className="sticky top-0 bg-muted/80 backdrop-blur z-10">
                       <tr className="border-b">
                         <th className="text-left py-2 px-3 font-medium">#</th>
                         <th className="text-left py-2 px-3 font-medium">Ratio</th>
@@ -497,10 +605,12 @@ export default function NestingProgressPage() {
                     <tbody>
                       {markers.map((marker, idx) => {
                         const effPercent = marker.efficiency * 100
+                        const isNew = newMarkerRatios.has(marker.ratio)
                         return (
                           <tr
-                            key={`${marker.ratio}-${idx}`}
+                            key={marker.ratio}
                             className={`border-b border-border/50 transition-colors ${
+                              isNew ? 'marker-new-row' :
                               idx === 0 ? 'bg-green-50 dark:bg-green-950/30' : 'hover:bg-muted/30'
                             }`}
                           >
@@ -531,7 +641,6 @@ export default function NestingProgressPage() {
                       )}
                     </tbody>
                   </table>
-                  <div ref={resultsEndRef} />
                 </div>
               </div>
             </CardContent>

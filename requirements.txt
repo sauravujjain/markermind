@@ -1,11 +1,18 @@
 # Core dependencies
-numpy>=1.24.0
+numpy>=1.24.0,<2.6.0
 shapely>=2.0.0
 ezdxf>=1.0.0
 svgpathtools>=1.6.0
 pyyaml>=6.0
 matplotlib>=3.7.0
 scipy>=1.10.0
+pillow>=9.0.0
+
+# GPU acceleration (optional - requires NVIDIA GPU + CUDA)
+# Install the appropriate cupy version for your CUDA:
+#   CUDA 11.x: pip install cupy-cuda11x
+#   CUDA 12.x: pip install cupy-cuda12x
+# cupy-cuda11x>=12.0.0
 
 # Optimization
 optuna>=3.4.0

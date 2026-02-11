@@ -6,7 +6,7 @@ for integration into the MarkerMind backend services.
 """
 
 import time
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple, Optional, Callable
 from dataclasses import dataclass, field
 from itertools import combinations_with_replacement
 
@@ -14,6 +14,13 @@ import numpy as np
 
 # Default constraints
 MAX_PLIES_PER_CUT = 100
+
+# ILP solver time limit per strategy (seconds)
+ILP_TIME_LIMIT = 120  # 2 minutes max per strategy
+
+# Marker filtering: top % per bundle count (with floor)
+MARKER_RETENTION_PERCENT = 0.25  # Keep top 25%
+MARKER_RETENTION_FLOOR = 25     # Always keep at least 25 per bundle count
 
 # Minimum plies by bundle count (to avoid wasteful small-ply large markers)
 MIN_PLIES_BY_BUNDLE = {
@@ -175,6 +182,55 @@ def generate_all_1_2_bundle_markers(
     return markers
 
 
+def filter_markers_for_ilp(
+    markers: List['Marker'],
+    retention_pct: float = MARKER_RETENTION_PERCENT,
+    floor: int = MARKER_RETENTION_FLOOR,
+) -> List['Marker']:
+    """
+    Filter markers to keep top % per bundle count for ILP solver performance.
+
+    - 1-2 bundle markers: ALL kept (small search space, needed for exact fulfillment)
+    - 3+ bundle markers: top retention_pct%, with a minimum floor per bundle count
+
+    Args:
+        markers: List of Marker objects (should already be sorted by efficiency)
+        retention_pct: Fraction of markers to keep per bundle count (0.25 = 25%)
+        floor: Minimum markers to keep per bundle count
+
+    Returns:
+        Filtered list of Marker objects
+    """
+    # Group by bundle count
+    by_bundle: Dict[int, List['Marker']] = {}
+    for m in markers:
+        bc = m.bundle_count
+        if bc not in by_bundle:
+            by_bundle[bc] = []
+        by_bundle[bc].append(m)
+
+    filtered = []
+    stats = {}
+    for bc in sorted(by_bundle.keys()):
+        group = sorted(by_bundle[bc], key=lambda m: -m.efficiency)
+        if bc <= 2:
+            # Keep all 1-2 bundle markers
+            filtered.extend(group)
+            stats[bc] = (len(group), len(group))
+        else:
+            keep = max(floor, int(len(group) * retention_pct))
+            kept = group[:keep]
+            filtered.extend(kept)
+            stats[bc] = (len(kept), len(group))
+
+    total_before = len(markers)
+    total_after = len(filtered)
+    print(f"[ILP] Marker filtering: {total_before} → {total_after} markers "
+          f"({', '.join(f'{bc}-bndl: {k}/{t}' for bc, (k, t) in sorted(stats.items()))})")
+
+    return filtered
+
+
 def markers_from_nesting_results(
     nesting_results: List[Dict],
     sizes: List[str],
@@ -243,9 +299,9 @@ def solve_ilp(
         Tuple of (CutPlan, solve_time_seconds)
     """
     try:
-        from scipy.optimize import milp, LinearConstraint, Bounds
+        from scipy.optimize import LinearConstraint, Bounds
     except ImportError:
-        raise ImportError("scipy.optimize.milp not available")
+        raise ImportError("scipy.optimize not available")
 
     t0 = time.time()
     n = len(all_markers)
@@ -344,11 +400,17 @@ def solve_ilp(
         LinearConstraint(np.array(A_eq), b_eq, b_eq),
         LinearConstraint(np.array(A_ub), -np.inf, b_ub),
     ]
-    result = milp(c, constraints=constraints, bounds=bounds, integrality=integrality)
+    from scipy.optimize import milp as scipy_milp
+    options_dict = {"time_limit": ILP_TIME_LIMIT, "disp": False}
+    result = scipy_milp(c, constraints=constraints, bounds=bounds, integrality=integrality, options=options_dict)
     solve_time = time.time() - t0
 
     if not result.success:
-        raise RuntimeError(f"ILP failed: {result.message}")
+        # If time limit reached but we have a feasible solution, use it
+        if result.x is not None and "time limit" in str(result.message).lower():
+            print(f"[ILP] {objective}: Time limit reached ({solve_time:.1f}s), using best feasible solution")
+        else:
+            raise RuntimeError(f"ILP failed ({solve_time:.1f}s): {result.message}")
 
     # Build plan
     plan = CutPlan(name=name, strategy=objective, sizes=sizes)
@@ -370,6 +432,8 @@ def optimize_cutplan(
     sizes: List[str],
     options: List[str] = None,
     penalty: float = 5.0,
+    strategy_callback: Optional[Callable[[str, Dict], None]] = None,
+    cancel_check: Optional[Callable[[], bool]] = None,
 ) -> List[Dict]:
     """
     Run ILP optimization with multiple strategies.
@@ -380,12 +444,16 @@ def optimize_cutplan(
         sizes: List of size codes in order
         options: List of strategies to run (default: ["max_efficiency", "balanced", "min_markers"])
         penalty: Penalty for balanced objective
+        strategy_callback: Called after each strategy completes with (strategy_name, result_dict)
+        cancel_check: Returns True if job should be cancelled
 
     Returns:
         List of cutplan option dicts with cost breakdowns
     """
     if options is None:
         options = ["max_efficiency", "balanced", "min_markers"]
+
+    print(f"[ILP] Starting optimization: {len(markers)} raw markers, {len(options)} strategies, demand={demand}")
 
     # Convert markers to Marker objects
     marker_objects = markers_from_nesting_results(markers, sizes)
@@ -400,8 +468,16 @@ def optimize_cutplan(
         if sm.ratio_str not in existing_ratios:
             marker_objects.append(sm)
 
+    print(f"[ILP] After adding 1-2 bundle completions: {len(marker_objects)} markers")
+
+    # Filter markers for solver performance (top 25% per bundle, floor 25)
+    marker_objects = filter_markers_for_ilp(marker_objects)
+
     # Sort by efficiency
     marker_objects.sort(key=lambda m: -m.efficiency)
+
+    print(f"[ILP] Final marker pool: {len(marker_objects)} markers → "
+          f"{len(marker_objects) * 2} ILP variables")
 
     # Run each strategy
     cutplan_options = []
@@ -414,7 +490,13 @@ def optimize_cutplan(
         "balanced": f"Option E: Balanced (penalty={penalty})",
     }
 
-    for option in options:
+    for idx, option in enumerate(options):
+        # Check for cancellation
+        if cancel_check and cancel_check():
+            print(f"[ILP] Cancelled before strategy {option}")
+            break
+
+        print(f"[ILP] Running strategy {idx+1}/{len(options)}: {option}...")
         try:
             plan, solve_time = solve_ilp(
                 demand=demand,
@@ -424,9 +506,18 @@ def optimize_cutplan(
                 marker_penalty=penalty,
                 name=strategy_names.get(option, f"Option: {option}"),
             )
-            cutplan_options.append(plan.to_dict())
+            result = plan.to_dict()
+            result["solve_time"] = solve_time
+            cutplan_options.append(result)
+            print(f"[ILP] Strategy {option}: {plan.weighted_efficiency*100:.1f}% eff, "
+                  f"{plan.unique_markers} markers, solved in {solve_time:.1f}s")
+
+            # Notify of incremental result
+            if strategy_callback:
+                strategy_callback(option, result)
+
         except Exception as e:
-            print(f"Strategy {option} failed: {e}")
+            print(f"[ILP] Strategy {option} failed ({type(e).__name__}): {e}")
             continue
 
     return cutplan_options
@@ -436,39 +527,57 @@ def calculate_cutplan_costs(
     cutplan: Dict,
     fabric_cost_per_yard: float = 3.0,
     max_ply_height: int = 100,
-    spreading_cost_per_yard: float = 0.50,
-    cutting_cost_per_inch: float = 0.01,
-    prep_cost_per_marker: float = 5.0,
+    spreading_cost_per_yard: float = 0.00122,
+    spreading_cost_per_ply: float = 0.013,
+    cutting_cost_per_inch: float = 0.000424,
+    prep_cost_per_marker: float = 0.03,
 ) -> Dict:
     """
     Calculate cost breakdown for a cutplan.
+
+    Formulas (from docs/cutting_costs.md):
+      Fabric    = total_yards × fabric_cost_per_yard
+      Spreading = (total_yards × 0.00122) + (total_plies × 0.013)
+      Cutting   = Σ(marker_perimeter × cuts × 0.000424) per marker
+      Prep      = unique_markers × 0.03
 
     Args:
         cutplan: Cutplan dict from optimize_cutplan
         fabric_cost_per_yard: Cost per yard of fabric
         max_ply_height: Maximum plies per cut
-        spreading_cost_per_yard: Cost per yard for spreading
-        cutting_cost_per_inch: Cost per inch of cutting
+        spreading_cost_per_yard: Cost per yard for spreading (area component)
+        spreading_cost_per_ply: Cost per ply for spreading (layer component)
+        cutting_cost_per_inch: Cost per inch of perimeter per cut
         prep_cost_per_marker: Cost per unique marker for preparation
 
     Returns:
         Dictionary with cost breakdown
     """
     total_yards = cutplan.get("total_yards", 0)
+    total_plies = cutplan.get("total_plies", 0)
     unique_markers = cutplan.get("unique_markers", 0)
     total_cuts = cutplan.get("total_cuts", 0)
+    markers = cutplan.get("markers", [])
 
-    # Fabric cost
+    # Fabric cost: total_yards × rate
     fabric_cost = total_yards * fabric_cost_per_yard
 
-    # Spreading cost
-    spreading_cost = total_yards * spreading_cost_per_yard
+    # Spreading cost: area component + per-ply component
+    spreading_cost = (total_yards * spreading_cost_per_yard) + (total_plies * spreading_cost_per_ply)
 
-    # Cutting cost (simplified: assume avg 100 inches perimeter per marker)
-    avg_perimeter_inches = 100
-    cutting_cost = total_cuts * avg_perimeter_inches * cutting_cost_per_inch
+    # Cutting cost: perimeter × cuts × rate per marker
+    # Use actual bundle perimeters if available, otherwise estimate from bundle count
+    # Average perimeter per bundle ~1,000 inches (from docs: sizes range 988-1055")
+    AVG_PERIMETER_PER_BUNDLE = 1000  # inches
+    cutting_cost = 0.0
+    for m in markers:
+        bundle_count = m.get("bundle_count", sum(int(x) for x in m.get("ratio_str", "0").split("-")))
+        marker_perimeter = bundle_count * AVG_PERIMETER_PER_BUNDLE
+        marker_plies = m.get("total_plies", 0)
+        marker_cuts = (marker_plies + max_ply_height - 1) // max_ply_height if marker_plies > 0 else 0
+        cutting_cost += marker_perimeter * marker_cuts * cutting_cost_per_inch
 
-    # Prep cost
+    # Prep cost: per unique marker
     prep_cost = unique_markers * prep_cost_per_marker
 
     total_cost = fabric_cost + spreading_cost + cutting_cost + prep_cost
@@ -480,7 +589,7 @@ def calculate_cutplan_costs(
         "cutting_cost": cutting_cost,
         "prep_cost": prep_cost,
         "total_yards": total_yards,
-        "total_plies": cutplan.get("total_plies", 0),
+        "total_plies": total_plies,
         "total_cuts": total_cuts,
         "unique_markers": unique_markers,
         "efficiency": cutplan.get("efficiency", 0),

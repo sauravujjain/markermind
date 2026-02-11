@@ -186,8 +186,32 @@ async def cancel_nesting_job(
     #     celery_app.control.revoke(job.celery_task_id, terminate=True)
 
     job.status = "cancelled"
+    job.progress_message = "Cancelling..."
     db.commit()
     return {"message": "Job cancelled"}
+
+
+@router.post("/jobs/{job_id}/cancel")
+async def cancel_running_job(
+    job_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Cancel a running nesting job. The GPU runner will stop at the next checkpoint."""
+    job = db.query(NestingJob).join(Pattern).filter(
+        NestingJob.id == job_id,
+        Pattern.customer_id == current_user.customer_id
+    ).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    if job.status not in ["running", "pending"]:
+        raise HTTPException(status_code=400, detail=f"Job is {job.status}, cannot cancel")
+
+    job.status = "cancelled"
+    job.progress_message = "Cancelling..."
+    db.commit()
+    return {"message": "Job cancellation requested", "status": "cancelled"}
 
 
 @router.websocket("/jobs/{job_id}/stream")

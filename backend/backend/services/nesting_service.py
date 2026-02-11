@@ -199,7 +199,7 @@ class NestingService:
         Run GPU nesting algorithm.
         This is the main entry point that will be called by the job runner.
         """
-        from .gpu_nesting_runner import run_nesting_for_material
+        from .gpu_nesting_runner import run_nesting_for_material, NestingCancelled
 
         results = []
 
@@ -255,6 +255,11 @@ class NestingService:
                     results.append(result)
                 db.commit()  # Commit so frontend can see results immediately
 
+            # Cancel check - reads job status from DB
+            def check_cancelled() -> bool:
+                db.refresh(job)
+                return job.status == "cancelled"
+
             update_progress(5, f"Starting GPU nesting for {material}...")
 
             # Run GPU nesting with callbacks for preview and incremental results
@@ -271,6 +276,7 @@ class NestingService:
                 preview_interval_seconds=0.5,
                 full_coverage=job.full_coverage or False,
                 result_callback=save_incremental_results,
+                cancel_check=check_cancelled,
             )
 
             # Results already saved incrementally, now add to marker bank
@@ -305,6 +311,13 @@ class NestingService:
             if order and order.status in ("pending_nesting", "nesting_in_progress"):
                 order.status = "pending_cutplan"
                 db.commit()
+
+        except NestingCancelled:
+            # Cancelled by user — keep status as "cancelled" (already set by the cancel endpoint)
+            job.progress_message = f"Cancelled by user — {len(results)} markers saved"
+            self.clear_preview(job.id)
+            db.commit()
+            # Don't raise — this is a graceful stop
 
         except Exception as e:
             job.status = "failed"

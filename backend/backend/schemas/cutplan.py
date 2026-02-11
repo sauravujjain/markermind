@@ -8,6 +8,8 @@ class CutplanOptimizeRequest(BaseModel):
     solver_type: str = "single_color"  # single_color, multicolor_joint, two_stage
     penalty: float = 5.0  # Marker penalty for ILP
     generate_options: List[str] = ["balanced"]  # Which options to generate
+    color_code: Optional[str] = None  # Filter to specific color, None = all colors
+    fabric_cost_per_yard: Optional[float] = None  # User-specified fabric cost, None = use DB default
 
 
 class CostBreakdownResponse(BaseModel):
