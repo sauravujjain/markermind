@@ -40,6 +40,22 @@ npm run dev
 
 ---
 
+## Future Requirements & Roadmap
+
+**See [`REQUIREMENTS_CHECKLIST.md`](./REQUIREMENTS_CHECKLIST.md)** for:
+- Database robustness improvements (soft delete, audit logs, versioning)
+- Authentication & authorization enhancements
+- Nesting & optimization features
+- UI/UX improvements
+- Integration & export capabilities
+- Performance & scalability requirements
+- DevOps & monitoring setup
+- Compliance & security requirements
+
+Update this checklist as new requirements are identified during development.
+
+---
+
 ## Project Overview
 
 A 2D irregular nesting engine for garment manufacturing, targeting state-of-the-art material utilization using the Spyrrow heuristic as the core solver.

@@ -1,17 +1,53 @@
 from typing import List, Optional
-from fastapi import APIRouter, Depends, HTTPException, status, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, HTTPException, status, WebSocket, WebSocketDisconnect, BackgroundTasks
 from sqlalchemy.orm import Session
 import asyncio
 import json
+import traceback
 
 from ...database import get_db, SessionLocal
 from ...schemas.nesting import NestingJobCreate, NestingJobResponse, NestingJobResultResponse
-from ...models import User, NestingJob, NestingJobResult, MarkerBank, Pattern
+from ...models import User, NestingJob, NestingJobResult, MarkerBank, Pattern, Order
 from ...services.nesting_service import NestingService
 from ..deps import get_current_user
 
 router = APIRouter(prefix="/nesting", tags=["nesting"])
 nesting_service = NestingService()
+
+
+def execute_nesting_job(job_id: str):
+    """Execute a nesting job in the background."""
+    db = SessionLocal()
+    try:
+        job = db.query(NestingJob).filter(NestingJob.id == job_id).first()
+        if not job:
+            return
+
+        pattern = db.query(Pattern).filter(Pattern.id == job.pattern_id).first()
+        if not pattern:
+            job.status = "failed"
+            job.error_message = "Pattern not found"
+            db.commit()
+            return
+
+        # Update order status
+        order = db.query(Order).filter(Order.id == job.order_id).first()
+        if order:
+            order.status = "nesting_in_progress"
+            db.commit()
+
+        # Run the GPU nesting
+        nesting_service.run_gpu_nesting(db, job, pattern)
+
+    except Exception as e:
+        traceback.print_exc()
+        job = db.query(NestingJob).filter(NestingJob.id == job_id).first()
+        if job:
+            job.status = "failed"
+            job.error_message = str(e)
+            db.commit()
+    finally:
+        db.close()
 
 # Store active WebSocket connections
 active_connections: dict[str, WebSocket] = {}
@@ -20,6 +56,7 @@ active_connections: dict[str, WebSocket] = {}
 @router.post("/jobs", response_model=NestingJobResponse, status_code=status.HTTP_201_CREATED)
 async def create_nesting_job(
     job_data: NestingJobCreate,
+    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
@@ -43,13 +80,48 @@ async def create_nesting_job(
         fabric_width_inches=job_data.fabric_width_inches,
         max_bundle_count=job_data.max_bundle_count,
         top_n_results=job_data.top_n_results,
+        full_coverage=job_data.full_coverage,
     )
 
-    # TODO: Submit to Celery queue
-    # from ..workers.nesting_worker import run_gpu_nesting_task
-    # task = run_gpu_nesting_task.delay(job.id)
-    # job.celery_task_id = task.id
-    # db.commit()
+    # Update order status to pending_nesting
+    order = db.query(Order).filter(Order.id == job_data.order_id).first()
+    if order:
+        order.status = "pending_nesting"
+        db.commit()
+
+    # Schedule the job to run in background
+    background_tasks.add_task(execute_nesting_job, job.id)
+
+    return job
+
+
+@router.post("/jobs/{job_id}/run", response_model=NestingJobResponse)
+async def run_nesting_job(
+    job_id: str,
+    background_tasks: BackgroundTasks,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Start/restart a nesting job."""
+    job = db.query(NestingJob).join(Pattern).filter(
+        NestingJob.id == job_id,
+        Pattern.customer_id == current_user.customer_id
+    ).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    if job.status in ["running"]:
+        raise HTTPException(status_code=400, detail="Job is already running")
+
+    # Reset job status
+    job.status = "pending"
+    job.progress = 0
+    job.progress_message = "Queued for processing"
+    job.error_message = None
+    db.commit()
+
+    # Schedule the job
+    background_tasks.add_task(execute_nesting_job, job.id)
 
     return job
 
@@ -174,6 +246,39 @@ async def websocket_job_progress(
     finally:
         if job_id in active_connections:
             del active_connections[job_id]
+
+
+@router.get("/jobs/{job_id}/preview")
+async def get_job_preview(
+    job_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Get current marker preview image for a running job."""
+    job = db.query(NestingJob).join(Pattern).filter(
+        NestingJob.id == job_id,
+        Pattern.customer_id == current_user.customer_id
+    ).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    preview = nesting_service.get_preview(job_id)
+    if not preview:
+        return {
+            "has_preview": False,
+            "ratio_str": None,
+            "efficiency": None,
+            "preview_base64": None,
+            "timestamp": None,
+        }
+
+    return {
+        "has_preview": True,
+        "ratio_str": preview['ratio_str'],
+        "efficiency": preview['efficiency'],
+        "preview_base64": preview['preview_base64'],
+        "timestamp": preview['timestamp'],
+    }
 
 
 @router.get("/markers", response_model=List[dict])

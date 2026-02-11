@@ -31,10 +31,25 @@ async def create_fabric(
     db: Session = Depends(get_db)
 ):
     """Create a new fabric."""
+    # Generate unique code if this one already exists
+    base_code = fabric_data.code
+    unique_code = base_code
+    suffix = 1
+
+    while True:
+        existing = db.query(Fabric).filter(
+            Fabric.customer_id == current_user.customer_id,
+            Fabric.code == unique_code
+        ).first()
+        if not existing:
+            break
+        suffix += 1
+        unique_code = f"{base_code}_{suffix}"
+
     fabric = Fabric(
         customer_id=current_user.customer_id,
         name=fabric_data.name,
-        code=fabric_data.code,
+        code=unique_code,
         width_inches=fabric_data.width_inches,
         cost_per_yard=fabric_data.cost_per_yard or 0.0,
         description=fabric_data.description,

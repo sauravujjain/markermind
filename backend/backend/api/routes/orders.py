@@ -11,7 +11,7 @@ from ...schemas.order import (
     SizeQuantityCreate, SizeQuantityResponse,
     OrderImportRequest, OrderImportRow
 )
-from ...models import User, Order, OrderLine, SizeQuantity
+from ...models import User, Order, OrderLine, SizeQuantity, Fabric
 from ..deps import get_current_user
 
 router = APIRouter(prefix="/orders", tags=["orders"])
@@ -40,6 +40,16 @@ async def create_order(
     db: Session = Depends(get_db)
 ):
     """Create a new order."""
+    # Determine initial status
+    has_lines = len(order_data.lines) > 0
+    has_pattern = order_data.pattern_id is not None
+    if has_pattern and has_lines:
+        initial_status = "pending_nesting"
+    elif has_lines:
+        initial_status = "pending_pattern"
+    else:
+        initial_status = "draft"
+
     # Create order
     order = Order(
         customer_id=current_user.customer_id,
@@ -50,6 +60,7 @@ async def create_order(
         piece_buffer_mm=order_data.piece_buffer_mm,
         edge_buffer_mm=order_data.edge_buffer_mm,
         rotation_mode=order_data.rotation_mode,
+        status=initial_status,
     )
     db.add(order)
     db.flush()
@@ -111,8 +122,18 @@ async def update_order(
         raise HTTPException(status_code=404, detail="Order not found")
 
     update_data = order_data.model_dump(exclude_unset=True)
+
+    # Check if pattern is being linked
+    linking_pattern = "pattern_id" in update_data and update_data["pattern_id"]
+    had_pattern = order.pattern_id is not None
+
     for field, value in update_data.items():
         setattr(order, field, value)
+
+    # Auto-advance status when pattern is linked
+    if linking_pattern and not had_pattern:
+        if order.status in ("draft", "pending_pattern"):
+            order.status = "pending_nesting"
 
     db.commit()
     db.refresh(order)
@@ -149,9 +170,35 @@ async def import_orders_batch(
 
     The frontend parses the Excel and sends structured JSON data.
     This allows batch import of all orders at once.
+
+    Auto-creates Fabric records for any fabric_codes that don't exist.
     """
     if not request.rows:
         raise HTTPException(status_code=400, detail="No order data provided")
+
+    # Collect all unique fabric codes from import
+    fabric_codes = set(row.fabric_code for row in request.rows if row.fabric_code)
+
+    # Get existing fabrics for this customer
+    existing_fabrics = db.query(Fabric).filter(
+        Fabric.customer_id == current_user.customer_id,
+        Fabric.code.in_(fabric_codes)
+    ).all()
+    fabric_map = {f.code: f for f in existing_fabrics}
+
+    # Auto-create missing fabrics with default width
+    for code in fabric_codes:
+        if code not in fabric_map and code != "DEFAULT":
+            new_fabric = Fabric(
+                customer_id=current_user.customer_id,
+                name=code,  # Use code as name initially
+                code=code,
+                width_inches=60.0,  # Default width, user should update
+                cost_per_yard=0.0,
+            )
+            db.add(new_fabric)
+            db.flush()
+            fabric_map[code] = new_fabric
 
     # Group rows by order number
     orders_data = {}
@@ -165,36 +212,44 @@ async def import_orders_batch(
             }
         orders_data[order_key]["lines"].append(row)
 
-    # Create each order
+    # Create each order (auto-increment name if duplicate)
     created_orders = []
     for order_data in orders_data.values():
-        # Check if order already exists
-        existing = db.query(Order).filter(
-            Order.customer_id == current_user.customer_id,
-            Order.order_number == order_data["order_number"]
-        ).first()
-        if existing:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Order '{order_data['order_number']}' already exists"
-            )
+        # Generate unique order number if this one already exists
+        base_order_number = order_data["order_number"]
+        order_number = base_order_number
+        suffix = 1
 
-        # Create order
+        while True:
+            existing = db.query(Order).filter(
+                Order.customer_id == current_user.customer_id,
+                Order.order_number == order_number
+            ).first()
+            if not existing:
+                break
+            suffix += 1
+            order_number = f"{base_order_number} ({suffix})"
+
+        # Create new order with unique name
         order = Order(
             customer_id=current_user.customer_id,
-            order_number=order_data["order_number"],
+            order_number=order_number,
             style_number=order_data["style_number"],
+            status="pending_pattern",  # Has lines, needs pattern
         )
         db.add(order)
         db.flush()
 
         # Create lines and quantities
         for row in order_data["lines"]:
+            # Get fabric_id if fabric exists
+            fabric = fabric_map.get(row.fabric_code)
             line = OrderLine(
                 order_id=order.id,
                 fabric_code=row.fabric_code,
                 color_code=row.color_code,
                 extra_percent=row.extra_percent,
+                fabric_id=fabric.id if fabric else None,
             )
             db.add(line)
             db.flush()
@@ -246,9 +301,23 @@ async def import_order(
     color_col = df.columns[0]
     size_cols = list(df.columns[1:])
 
-    # Create order
+    # Create order with auto-increment name if duplicate
     if not order_number:
         order_number = file.filename.rsplit('.', 1)[0]
+
+    # Generate unique order number if this one already exists
+    base_order_number = order_number
+    suffix = 1
+
+    while True:
+        existing = db.query(Order).filter(
+            Order.customer_id == current_user.customer_id,
+            Order.order_number == order_number
+        ).first()
+        if not existing:
+            break
+        suffix += 1
+        order_number = f"{base_order_number} ({suffix})"
 
     order = Order(
         customer_id=current_user.customer_id,

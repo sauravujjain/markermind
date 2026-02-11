@@ -30,88 +30,56 @@ async def optimize_cutplan(
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
 
-    # Get demand
-    demand = cutplan_service.get_order_demand(db, request.order_id)
-    if not demand:
-        raise HTTPException(status_code=400, detail="Order has no quantities")
+    if not order.pattern_id:
+        raise HTTPException(status_code=400, detail="Order has no pattern linked")
 
-    # Get cost config
-    cost_config = cutplan_service.get_cost_config(db, current_user.customer_id)
+    # Get fabric_id from first order line
+    fabric_id = None
+    if order.order_lines:
+        first_line = order.order_lines[0]
+        fabric_id = first_line.fabric_id
+        # If no fabric_id, try to find by fabric_code
+        if not fabric_id and first_line.fabric_code:
+            from ...models import Fabric
+            fabric = db.query(Fabric).filter(
+                Fabric.code == first_line.fabric_code,
+                Fabric.customer_id == current_user.customer_id
+            ).first()
+            if fabric:
+                fabric_id = fabric.id
 
-    # Get available markers
-    markers = cutplan_service.get_available_markers(
-        db,
-        pattern_id=order.pattern_id,
-        fabric_id=order.order_lines[0].fabric_id if order.order_lines else None
-    )
-    if not markers:
-        raise HTTPException(status_code=400, detail="No markers available. Run nesting first.")
+    if not fabric_id:
+        raise HTTPException(status_code=400, detail="Order has no fabric configured")
 
-    cutplans = []
-
-    # Generate cutplan options based on request
-    solver_config = {
-        "penalty": request.penalty,
+    # Map strategy names
+    strategy_map = {
+        "max_efficiency": "max_efficiency",
+        "efficiency": "max_efficiency",
+        "balanced": "balanced",
+        "min_markers": "min_markers",
+        "min_plies": "min_plies",
+        "min_bundle_cuts": "min_bundle_cuts",
     }
 
-    for option in request.generate_options:
-        name = f"Option - {option.title()}"
+    strategies = []
+    for opt in (request.generate_options or ["max_efficiency", "balanced", "min_markers"]):
+        mapped = strategy_map.get(opt.lower(), opt.lower())
+        if mapped not in strategies:
+            strategies.append(mapped)
 
-        cutplan = cutplan_service.create_cutplan(
+    try:
+        cutplans = cutplan_service.run_multi_strategy_optimization(
             db=db,
             order_id=request.order_id,
-            name=name,
-            solver_type=request.solver_type,
+            pattern_id=order.pattern_id,
+            fabric_id=fabric_id,
+            customer_id=current_user.customer_id,
+            strategies=strategies,
+            penalty=request.penalty or 5.0,
         )
-
-        try:
-            # Run optimization based on solver type
-            if request.solver_type == "single_color":
-                selected = cutplan_service.run_ilp_optimization(
-                    db, cutplan, demand, markers, solver_config
-                )
-            elif request.solver_type == "multicolor_joint":
-                # For multicolor, we need markers by color
-                markers_by_color = {}
-                for color in order.order_lines:
-                    color_markers = cutplan_service.get_available_markers(
-                        db, order.pattern_id, color.fabric_id
-                    )
-                    markers_by_color[color.color_code] = color_markers
-                selected = cutplan_service.run_multicolor_optimization(
-                    db, cutplan, demand, markers_by_color, solver_config
-                )
-            else:  # two_stage
-                selected = cutplan_service.run_two_stage_optimization(
-                    db, cutplan, demand, markers, solver_config
-                )
-
-            # Save markers and calculate costs
-            if selected:
-                cutplan_service.save_cutplan_markers(db, cutplan, selected)
-                costs = cutplan_service.calculate_costs(cutplan, cost_config, selected)
-
-                # Update cutplan with summary
-                cutplan.unique_markers = costs["unique_markers"]
-                cutplan.total_cuts = costs["total_cuts"]
-                cutplan.total_plies = costs["total_plies"]
-                cutplan.total_yards = costs["total_yards"]
-                cutplan.total_cost = costs["total_cost"]
-                cutplan.fabric_cost = costs["fabric_cost"]
-                cutplan.spreading_cost = costs["spreading_cost"]
-                cutplan.cutting_cost = costs["cutting_cost"]
-                cutplan.prep_cost = costs["prep_cost"]
-                db.commit()
-
-            cutplans.append(cutplan)
-
-        except Exception as e:
-            cutplan.status = "draft"
-            db.commit()
-            # Continue to next option even if one fails
-
-    db.refresh(order)
-    return [cp for cp in cutplans]
+        return cutplans
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 @router.get("/{cutplan_id}", response_model=CutplanResponse)

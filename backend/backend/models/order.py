@@ -45,8 +45,8 @@ class Order(Base, TimestampMixin):
     style = relationship("Style", back_populates="orders")
     pattern = relationship("Pattern", back_populates="orders")
     order_lines = relationship("OrderLine", back_populates="order", cascade="all, delete-orphan")
-    nesting_jobs = relationship("NestingJob", back_populates="order")
-    cutplans = relationship("Cutplan", back_populates="order")
+    nesting_jobs = relationship("NestingJob", back_populates="order", cascade="all, delete-orphan")
+    cutplans = relationship("Cutplan", back_populates="order", cascade="all, delete-orphan")
 
 
 class OrderLine(Base, TimestampMixin):

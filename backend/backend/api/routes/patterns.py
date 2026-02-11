@@ -40,11 +40,26 @@ async def upload_pattern(
     db: Session = Depends(get_db)
 ):
     """Upload a new pattern (DXF + optional RUL files)."""
-    # Create pattern record
+    # Generate unique name if this one already exists
+    base_name = name
+    unique_name = name
+    suffix = 1
+
+    while True:
+        existing = db.query(Pattern).filter(
+            Pattern.customer_id == current_user.customer_id,
+            Pattern.name == unique_name
+        ).first()
+        if not existing:
+            break
+        suffix += 1
+        unique_name = f"{base_name} ({suffix})"
+
+    # Create pattern record with unique name
     pattern = pattern_service.create_pattern(
         db=db,
         customer_id=current_user.customer_id,
-        name=name,
+        name=unique_name,
         file_type=file_type,
     )
 
@@ -156,6 +171,37 @@ async def update_fabric_mappings(
         results.append(result)
 
     return results
+
+
+@router.get("/{pattern_id}/pieces")
+async def get_pattern_pieces(
+    pattern_id: str,
+    material: Optional[str] = None,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Get list of pieces from a parsed pattern."""
+    pattern = db.query(Pattern).filter(
+        Pattern.id == pattern_id,
+        Pattern.customer_id == current_user.customer_id
+    ).first()
+    if not pattern:
+        raise HTTPException(status_code=404, detail="Pattern not found")
+
+    if not pattern.is_parsed:
+        raise HTTPException(status_code=400, detail="Pattern not parsed yet")
+
+    pieces = pattern_service.get_pattern_pieces(pattern)
+
+    # Filter by material if specified
+    if material:
+        pieces = [p for p in pieces if p.get("material") == material]
+
+    return {
+        "pieces": pieces,
+        "total_count": len(pieces),
+        "pieces_by_material": pattern.parse_metadata.get("pieces_by_material", {}),
+    }
 
 
 @router.get("/{pattern_id}/preview")

@@ -9,6 +9,7 @@ class NestingJobCreate(BaseModel):
     fabric_width_inches: float
     max_bundle_count: int = 6
     top_n_results: int = 10
+    full_coverage: bool = False  # If True, evaluate ALL ratios (brute force / 100% coverage)
 
 
 class NestingJobResultResponse(BaseModel):
@@ -36,6 +37,7 @@ class NestingJobResponse(BaseModel):
     fabric_width_inches: Optional[float]
     max_bundle_count: int
     top_n_results: int
+    full_coverage: bool = False
     results: List[NestingJobResultResponse] = []
     created_at: datetime
     updated_at: datetime

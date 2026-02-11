@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, ForeignKey, Integer, Float, Enum as SQLEnum, Text
+from sqlalchemy import Column, String, ForeignKey, Integer, Float, Enum as SQLEnum, Text, Boolean
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 from ..database import Base
@@ -31,6 +31,7 @@ class NestingJob(Base, TimestampMixin):
     fabric_width_inches = Column(Float)
     max_bundle_count = Column(Integer, default=6)
     top_n_results = Column(Integer, default=10)  # Top N results per bundle count
+    full_coverage = Column(Boolean, default=False)  # If True, evaluate ALL ratios (brute force)
 
     # Relationships
     order = relationship("Order", back_populates="nesting_jobs")

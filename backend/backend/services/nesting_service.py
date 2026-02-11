@@ -1,17 +1,44 @@
 import os
 import sys
+import base64
+import time
 from typing import Optional, List, Dict, Any, Callable
 from sqlalchemy.orm import Session
 
 from ..config import settings
-from ..models import NestingJob, NestingJobResult, Pattern, MarkerBank
+from ..models import NestingJob, NestingJobResult, Pattern, MarkerBank, Order, Fabric
 
-# Add scripts to path
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', '..'))
+# In-memory storage for current preview (cleared on job completion)
+# Key: job_id, Value: {preview_base64, ratio_str, efficiency, timestamp}
+_preview_cache: Dict[str, Dict] = {}
 
 
 class NestingService:
     """Service for GPU nesting job management."""
+
+    def set_preview(
+        self,
+        job_id: str,
+        preview_base64: str,
+        ratio_str: str,
+        efficiency: float
+    ):
+        """Store current marker preview for a job."""
+        _preview_cache[job_id] = {
+            'preview_base64': preview_base64,
+            'ratio_str': ratio_str,
+            'efficiency': efficiency,
+            'timestamp': time.time()
+        }
+
+    def get_preview(self, job_id: str) -> Optional[Dict]:
+        """Get current marker preview for a job."""
+        return _preview_cache.get(job_id)
+
+    def clear_preview(self, job_id: str):
+        """Clear preview cache for a job."""
+        if job_id in _preview_cache:
+            del _preview_cache[job_id]
 
     def create_job(
         self,
@@ -20,7 +47,8 @@ class NestingService:
         pattern_id: str,
         fabric_width_inches: float,
         max_bundle_count: int = 6,
-        top_n_results: int = 10
+        top_n_results: int = 10,
+        full_coverage: bool = False
     ) -> NestingJob:
         """Create a new nesting job."""
         job = NestingJob(
@@ -29,6 +57,7 @@ class NestingService:
             fabric_width_inches=fabric_width_inches,
             max_bundle_count=max_bundle_count,
             top_n_results=top_n_results,
+            full_coverage=full_coverage,
         )
         db.add(job)
         db.commit()
@@ -125,6 +154,40 @@ class NestingService:
         db.refresh(marker)
         return marker
 
+    def get_material_for_job(
+        self,
+        db: Session,
+        job: NestingJob,
+    ) -> str:
+        """Get the primary material to nest for a job."""
+        # Get the order to find which fabric/material we're nesting
+        order = db.query(Order).filter(Order.id == job.order_id).first()
+        if not order or not order.order_lines:
+            raise ValueError("Order not found or has no order lines")
+
+        # Get the first order line's fabric code as the material
+        first_line = order.order_lines[0]
+        return first_line.fabric_code
+
+    def get_fabric_for_job(
+        self,
+        db: Session,
+        job: NestingJob,
+    ) -> Optional[Fabric]:
+        """Get the fabric record for a job."""
+        order = db.query(Order).filter(Order.id == job.order_id).first()
+        if not order or not order.order_lines:
+            return None
+
+        first_line = order.order_lines[0]
+        if first_line.fabric_id:
+            return db.query(Fabric).filter(Fabric.id == first_line.fabric_id).first()
+
+        # Try to find by code
+        return db.query(Fabric).filter(
+            Fabric.code == first_line.fabric_code
+        ).first()
+
     def run_gpu_nesting(
         self,
         db: Session,
@@ -134,45 +197,125 @@ class NestingService:
     ) -> List[NestingJobResult]:
         """
         Run GPU nesting algorithm.
-        This is the main entry point that will be called by Celery worker.
+        This is the main entry point that will be called by the job runner.
         """
+        from .gpu_nesting_runner import run_nesting_for_material
+
         results = []
 
         try:
-            # Import GPU nesting components
-            # This would import from scripts/gpu_20260118_ga_ratio_optimizer.py
-            # For now, this is a placeholder that would be filled in
-
             # Update job status
             job.status = "running"
             db.commit()
 
-            # For each bundle count 1 to max_bundle_count
-            for bundle_count in range(1, job.max_bundle_count + 1):
+            # Get material and fabric for this job
+            material = self.get_material_for_job(db, job)
+            fabric = self.get_fabric_for_job(db, job)
+
+            if not fabric:
+                raise ValueError(f"No fabric record found for material {material}")
+
+            # Get pattern file paths (convert relative to absolute)
+            if not pattern.dxf_file_path or not pattern.rul_file_path:
+                raise ValueError("Pattern DXF or RUL file not available")
+
+            from ..config import resolve_path
+            dxf_path = resolve_path(pattern.dxf_file_path)
+            rul_path = resolve_path(pattern.rul_file_path)
+
+            # Get sizes from pattern - filter out invalid sizes (those with X)
+            sizes = [s for s in pattern.available_sizes if 'X' not in s and s.isdigit()]
+            if not sizes:
+                raise ValueError("Pattern has no valid numeric sizes")
+
+            # Progress wrapper
+            def update_progress(progress: int, message: str):
+                job.progress = progress
+                job.progress_message = message
+                db.commit()
                 if progress_callback:
-                    progress = int((bundle_count - 1) / job.max_bundle_count * 100)
-                    progress_callback(progress, f"Processing {bundle_count}-bundle markers...")
+                    progress_callback(progress, message)
 
-                # TODO: Call actual GPU nesting algorithm
-                # This would:
-                # 1. Load and rasterize pieces from pattern
-                # 2. Generate ratio combinations for bundle_count
-                # 3. Evaluate each ratio using GPU FFT convolution
-                # 4. Sort by efficiency and keep top N
+            # Preview callback - store in cache for frontend polling
+            def update_preview(ratio_str: str, preview_base64: str, efficiency: float):
+                self.set_preview(job.id, preview_base64, ratio_str, efficiency)
 
-                # Placeholder: would be replaced with actual implementation
-                pass
+            # Result callback - save results incrementally as each bundle_count completes
+            def save_incremental_results(bundle_count: int, bundle_results: list):
+                for rank, result in enumerate(bundle_results, 1):
+                    self.save_result(
+                        db=db,
+                        job_id=job.id,
+                        bundle_count=bundle_count,
+                        rank=rank,
+                        ratio_str=result['ratio_str'],
+                        efficiency=result['efficiency'],
+                        length_yards=result['length_yards'],
+                    )
+                    results.append(result)
+                db.commit()  # Commit so frontend can see results immediately
+
+            update_progress(5, f"Starting GPU nesting for {material}...")
+
+            # Run GPU nesting with callbacks for preview and incremental results
+            nesting_results = run_nesting_for_material(
+                dxf_path=dxf_path,
+                rul_path=rul_path,
+                material=material,
+                sizes=sizes,
+                fabric_width_inches=job.fabric_width_inches,
+                max_bundle_count=job.max_bundle_count,
+                top_n=job.top_n_results,
+                progress_callback=update_progress,
+                preview_callback=update_preview,
+                preview_interval_seconds=0.5,
+                full_coverage=job.full_coverage or False,
+                result_callback=save_incremental_results,
+            )
+
+            # Results already saved incrementally, now add to marker bank
+            for bundle_count, bundle_results in nesting_results.items():
+                for rank, result in enumerate(bundle_results, 1):
+                    # Add to marker bank (results already saved to job)
+                    self.add_to_marker_bank(
+                        db=db,
+                        pattern_id=pattern.id,
+                        fabric_id=fabric.id,
+                        ratio_str=result['ratio_str'],
+                        efficiency=result['efficiency'],
+                        length_yards=result['length_yards'],
+                        source_type="gpu_nesting",
+                        metadata={
+                            "bundle_count": bundle_count,
+                            "job_id": job.id,
+                        }
+                    )
 
             # Mark job complete
             job.status = "completed"
             job.progress = 100
-            job.progress_message = "Completed successfully"
+            job.progress_message = f"Completed - {len(results)} markers generated"
             db.commit()
+
+            # Clear preview cache
+            self.clear_preview(job.id)
+
+            # Update order status
+            order = db.query(Order).filter(Order.id == job.order_id).first()
+            if order and order.status in ("pending_nesting", "nesting_in_progress"):
+                order.status = "pending_cutplan"
+                db.commit()
 
         except Exception as e:
             job.status = "failed"
             job.error_message = str(e)
+            # Clear preview cache on failure too
+            self.clear_preview(job.id)
             db.commit()
             raise
 
         return results
+
+
+# Singleton instance
+nesting_service = NestingService()
