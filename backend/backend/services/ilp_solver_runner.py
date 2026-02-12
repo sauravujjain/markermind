@@ -529,17 +529,20 @@ def calculate_cutplan_costs(
     max_ply_height: int = 100,
     spreading_cost_per_yard: float = 0.00122,
     spreading_cost_per_ply: float = 0.013,
-    cutting_cost_per_inch: float = 0.000424,
-    prep_cost_per_marker: float = 0.03,
+    cutting_cost_per_cm: float = 0.0000278,
+    prep_cost_per_meter: float = 0.25,
+    perimeter_by_size: Optional[Dict[str, float]] = None,
+    sizes: Optional[List[str]] = None,
 ) -> Dict:
     """
     Calculate cost breakdown for a cutplan.
 
-    Formulas (from docs/cutting_costs.md):
+    Formulas:
       Fabric    = total_yards × fabric_cost_per_yard
-      Spreading = (total_yards × 0.00122) + (total_plies × 0.013)
-      Cutting   = Σ(marker_perimeter × cuts × 0.000424) per marker
-      Prep      = unique_markers × 0.03
+      Spreading = (total_yards × spreading_cost_per_yard) + (total_plies × spreading_cost_per_ply)
+      Cutting   = Σ(marker_perimeter_cm × cuts × cutting_cost_per_cm) per marker
+                  marker_perimeter = sum of perimeter_by_size[size] * ratio[size] for each size
+      Prep      = Σ(marker_length_m × cuts × prep_cost_per_meter) per marker
 
     Args:
         cutplan: Cutplan dict from optimize_cutplan
@@ -547,8 +550,10 @@ def calculate_cutplan_costs(
         max_ply_height: Maximum plies per cut
         spreading_cost_per_yard: Cost per yard for spreading (area component)
         spreading_cost_per_ply: Cost per ply for spreading (layer component)
-        cutting_cost_per_inch: Cost per inch of perimeter per cut
-        prep_cost_per_marker: Cost per unique marker for preparation
+        cutting_cost_per_cm: Cost per cm of perimeter per cut
+        prep_cost_per_meter: Per-meter prep material cost (sum of enabled paper layers)
+        perimeter_by_size: Dict mapping size -> total perimeter in cm for one bundle
+        sizes: Ordered list of sizes matching the ratio_str positions
 
     Returns:
         Dictionary with cost breakdown
@@ -565,20 +570,37 @@ def calculate_cutplan_costs(
     # Spreading cost: area component + per-ply component
     spreading_cost = (total_yards * spreading_cost_per_yard) + (total_plies * spreading_cost_per_ply)
 
-    # Cutting cost: perimeter × cuts × rate per marker
-    # Use actual bundle perimeters if available, otherwise estimate from bundle count
-    # Average perimeter per bundle ~1,000 inches (from docs: sizes range 988-1055")
-    AVG_PERIMETER_PER_BUNDLE = 1000  # inches
+    # Cutting cost: actual perimeter × cuts × rate per marker
+    YARDS_TO_METERS = 0.9144
+    AVG_PERIMETER_PER_BUNDLE_CM = 2540  # fallback: ~1000 inches in cm
     cutting_cost = 0.0
+    prep_cost = 0.0
+
     for m in markers:
-        bundle_count = m.get("bundle_count", sum(int(x) for x in m.get("ratio_str", "0").split("-")))
-        marker_perimeter = bundle_count * AVG_PERIMETER_PER_BUNDLE
+        ratio_str = m.get("ratio_str", "0")
+        ratio_counts = [int(x) for x in ratio_str.split("-")]
         marker_plies = m.get("total_plies", 0)
         marker_cuts = (marker_plies + max_ply_height - 1) // max_ply_height if marker_plies > 0 else 0
-        cutting_cost += marker_perimeter * marker_cuts * cutting_cost_per_inch
 
-    # Prep cost: per unique marker
-    prep_cost = unique_markers * prep_cost_per_marker
+        # Compute marker perimeter from actual per-size perimeters
+        if perimeter_by_size and sizes and len(sizes) == len(ratio_counts):
+            marker_perimeter_cm = 0.0
+            for i, count in enumerate(ratio_counts):
+                if count > 0:
+                    size = sizes[i]
+                    size_perim = perimeter_by_size.get(size, AVG_PERIMETER_PER_BUNDLE_CM)
+                    marker_perimeter_cm += size_perim * count
+        else:
+            # Fallback: estimate from bundle count
+            bundle_count = m.get("bundle_count", sum(ratio_counts))
+            marker_perimeter_cm = bundle_count * AVG_PERIMETER_PER_BUNDLE_CM
+
+        cutting_cost += marker_perimeter_cm * marker_cuts * cutting_cost_per_cm
+
+        # Prep cost: marker_length_m × cuts × prep_cost_per_meter
+        marker_length_yards = m.get("length_yards", 0)
+        marker_length_m = marker_length_yards * YARDS_TO_METERS
+        prep_cost += marker_length_m * marker_cuts * prep_cost_per_meter
 
     total_cost = fabric_cost + spreading_cost + cutting_cost + prep_cost
 

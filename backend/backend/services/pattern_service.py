@@ -59,7 +59,7 @@ class PatternService:
         """Parse pattern file and extract metadata."""
         try:
             # Import the parser functions
-            from nesting_engine.io.aama_parser import load_aama_pattern
+            from nesting_engine.io.aama_parser import load_aama_pattern, AAMAGrader
 
             # Resolve paths - they may be relative
             from ..config import resolve_path
@@ -136,6 +136,58 @@ class PatternService:
                     pieces_by_material[mat] = []
                 pieces_by_material[mat].append(pd)
 
+            # Compute perimeter_by_size for cost calculations
+            # Result: { material: { size: total_perimeter_cm } }
+            perimeter_by_size = {}
+            if grading_rules and sizes:
+                try:
+                    import math
+                    grader = AAMAGrader(pieces, grading_rules)
+                    # Unit conversion: ENGLISH=inches, METRIC=mm → convert to cm
+                    units = grading_rules.header.units if grading_rules.header else 'METRIC'
+                    if units == 'ENGLISH':
+                        to_cm = 2.54  # inches to cm
+                    else:
+                        to_cm = 0.1   # mm to cm
+
+                    for material in materials:
+                        perimeter_by_size[material] = {}
+                        for target_size in sizes:
+                            try:
+                                graded = grader.grade(target_size)
+                            except ValueError:
+                                continue
+                            total_perimeter = 0.0
+                            for gp in graded:
+                                orig_piece = next(
+                                    (p for p in pieces if p.name == gp.source_piece), None
+                                )
+                                if orig_piece is None or orig_piece.material != material:
+                                    continue
+                                # Calculate perimeter from graded vertices
+                                verts = gp.vertices
+                                if len(verts) >= 3:
+                                    perim = 0.0
+                                    for i in range(len(verts)):
+                                        x1, y1 = verts[i]
+                                        x2, y2 = verts[(i + 1) % len(verts)]
+                                        perim += math.sqrt((x2 - x1)**2 + (y2 - y1)**2)
+                                    perimeter_native = perim
+                                else:
+                                    perimeter_native = 0.0
+                                perimeter_cm = perimeter_native * to_cm
+                                # Multiply by demand (total pieces per bundle)
+                                demand = orig_piece.quantity.total
+                                if orig_piece.quantity.has_left_right:
+                                    demand = orig_piece.quantity.left_qty + orig_piece.quantity.right_qty
+                                total_perimeter += perimeter_cm * demand
+                            perimeter_by_size[material][target_size] = round(total_perimeter, 2)
+                except Exception as e:
+                    import traceback
+                    print(f"[PatternService] Warning: perimeter computation failed: {e}")
+                    print(traceback.format_exc())
+                    perimeter_by_size = {}
+
             # Update pattern record
             pattern.is_parsed = True
             pattern.available_sizes = list(sizes)
@@ -146,6 +198,7 @@ class PatternService:
                 "materials": sorted(list(materials)),
                 "pieces": piece_details,
                 "pieces_by_material": pieces_by_material,
+                "perimeter_by_size": perimeter_by_size,
             }
 
             # Create fabric mappings for each material

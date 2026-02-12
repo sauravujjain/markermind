@@ -217,6 +217,18 @@ class ApiClient {
     return this.request(`/fabrics/${id}`, { method: 'DELETE' })
   }
 
+  // Cost Config
+  async getCostConfig() {
+    return this.request<CostConfig>('/costs')
+  }
+
+  async updateCostConfig(data: Partial<CostConfig>) {
+    return this.request<CostConfig>('/costs', {
+      method: 'PUT',
+      body: JSON.stringify(data),
+    })
+  }
+
   // Nesting
   async createNestingJob(data: NestingJobCreate) {
     return this.request<NestingJob>('/nesting/jobs', {
@@ -293,6 +305,35 @@ class ApiClient {
 
   async getCostAnalysis(id: string) {
     return this.request<CostBreakdown>(`/cutplans/${id}/cost-analysis`)
+  }
+
+  // Final Nesting (CPU Refinement)
+  async startRefinement(cutplanId: string, config: RefinementConfig) {
+    return this.request<{ message: string; cutplan_id: string }>(`/cutplans/${cutplanId}/refine`, {
+      method: 'POST',
+      body: JSON.stringify(config),
+    })
+  }
+
+  async getRefinementStatus(cutplanId: string) {
+    return this.request<RefinementStatus>(`/cutplans/${cutplanId}/refine-status`)
+  }
+
+  async cancelRefinement(cutplanId: string) {
+    return this.request<{ message: string; status: string }>(`/cutplans/${cutplanId}/refine-cancel`, { method: 'POST' })
+  }
+
+  async downloadMarkersDxf(cutplanId: string): Promise<Blob> {
+    const token = this.getToken()
+    const headers: Record<string, string> = {}
+    if (token) headers['Authorization'] = `Bearer ${token}`
+
+    const response = await fetch(`${API_URL}/cutplans/${cutplanId}/download-markers`, { headers })
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}))
+      throw new Error(error.detail || 'Download failed')
+    }
+    return response.blob()
   }
 }
 
@@ -379,6 +420,36 @@ export interface Fabric {
   width_inches: number
   cost_per_yard: number
   description?: string
+  created_at: string
+  updated_at: string
+}
+
+export interface CostConfig {
+  id: string
+  customer_id: string
+  name: string
+  fabric_cost_per_yard: number
+  spreading_cost_per_yard: number
+  spreading_cost_per_ply: number
+  spreading_labor_cost_per_hour: number
+  spreading_speed_m_per_min: number
+  spreading_prep_buffer_pct: number
+  spreading_workers_per_lay: number
+  ply_end_cut_time_s: number
+  cutting_cost_per_inch: number
+  cutting_speed_cm_per_s: number
+  cutting_labor_cost_per_hour: number
+  cutting_workers_per_cut: number
+  prep_cost_per_marker: number
+  prep_cost_per_meter: number
+  prep_perf_paper_cost_per_m: number
+  prep_perf_paper_enabled: boolean
+  prep_underlayer_cost_per_m: number
+  prep_underlayer_enabled: boolean
+  prep_top_layer_cost_per_m: number
+  prep_top_layer_enabled: boolean
+  max_ply_height: number
+  min_plies_by_bundle: string
   created_at: string
   updated_at: string
 }
@@ -516,4 +587,36 @@ export interface PatternPiecesResponse {
   pieces: PatternPiece[]
   total_count: number
   pieces_by_material: Record<string, PatternPiece[]>
+}
+
+export interface RefinementConfig {
+  piece_buffer_mm: number
+  edge_buffer_mm: number
+  time_limit_s: number
+  rotation_mode: string  // "free" or "nap_safe"
+}
+
+export interface MarkerLayout {
+  id: string
+  cutplan_marker_id: string
+  ratio_str: string
+  utilization: number
+  strip_length_mm: number
+  length_yards: number
+  computation_time_s: number
+  svg_preview: string
+  dxf_file_path?: string
+  piece_buffer_mm?: number
+  edge_buffer_mm?: number
+  time_limit_s?: number
+  rotation_mode?: string
+}
+
+export interface RefinementStatus {
+  status: string  // running, completed, failed, cancelled, idle
+  progress: number
+  message: string
+  markers_total: number
+  markers_done: number
+  layouts: MarkerLayout[]
 }

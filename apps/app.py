@@ -27,6 +27,8 @@ import tempfile
 import time
 import math
 import colorsys
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
+import multiprocessing
 
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -564,14 +566,14 @@ def run_nesting(
 ) -> NestingSolution:
     """Run the nesting solver."""
     nest_pieces = [bp.piece for bp in bundle_pieces]
-    
+
     container = Container(width=fabric_width_mm, height=None)
-    
+
     items = [
         NestingItem(piece=p, demand=1, flip_mode=FlipMode.NONE)
         for p in nest_pieces
     ]
-    
+
     instance = NestingInstance.create(
         name="Streamlit Marker",
         container=container,
@@ -579,15 +581,122 @@ def run_nesting(
         piece_buffer=piece_buffer,
         edge_buffer=edge_buffer
     )
-    
+
     engine = SpyrrowEngine()
     config = SpyrrowConfig(
         time_limit=time_limit,
         num_workers=None,
         seed=42
     )
-    
+
     return engine.solve(instance, config=config)
+
+
+def mm_to_yards(mm: float) -> float:
+    """Convert millimeters to yards."""
+    return mm / 914.4  # 1 yard = 914.4 mm
+
+
+@dataclass
+class MarkerResult:
+    """Result of a single marker nesting."""
+    name: str
+    ratio_str: str
+    size_quantities: Dict[str, int]
+    solution: Optional[NestingSolution]
+    bundle_pieces: List[BundlePiece]
+    elapsed_time: float
+    error: Optional[str] = None
+
+    @property
+    def length_mm(self) -> float:
+        return self.solution.strip_length if self.solution else 0
+
+    @property
+    def length_yards(self) -> float:
+        return mm_to_yards(self.length_mm)
+
+    @property
+    def utilization(self) -> float:
+        return self.solution.utilization_percent if self.solution else 0
+
+
+def run_single_marker(
+    marker_name: str,
+    size_quantities: Dict[str, int],
+    grouped: Dict[str, Dict[str, List[Piece]]],
+    piece_type_config: Dict,
+    fabric_width_mm: float,
+    piece_buffer: float,
+    edge_buffer: float,
+    time_limit: int,
+    allowed_rotations: List[int]
+) -> MarkerResult:
+    """Run nesting for a single marker configuration."""
+    # Create ratio string
+    all_sizes = sorted(size_quantities.keys())
+    ratio_str = "-".join(str(size_quantities.get(s, 0)) for s in all_sizes)
+
+    start_time = time.time()
+    error = None
+    solution = None
+
+    try:
+        # Build bundle pieces for this marker
+        bundle_pieces = build_bundle_pieces(grouped, piece_type_config, size_quantities)
+
+        if not bundle_pieces:
+            error = "No pieces generated"
+        else:
+            solution = run_nesting(
+                bundle_pieces, fabric_width_mm, piece_buffer,
+                edge_buffer, time_limit, allowed_rotations
+            )
+    except Exception as e:
+        error = str(e)
+        bundle_pieces = []
+
+    elapsed = time.time() - start_time
+
+    return MarkerResult(
+        name=marker_name,
+        ratio_str=ratio_str,
+        size_quantities=size_quantities.copy(),
+        solution=solution,
+        bundle_pieces=bundle_pieces,
+        elapsed_time=elapsed,
+        error=error
+    )
+
+
+def run_marker_queue(
+    markers: List[Tuple[str, Dict[str, int]]],  # List of (name, size_quantities)
+    grouped: Dict[str, Dict[str, List[Piece]]],
+    piece_type_config: Dict,
+    fabric_width_mm: float,
+    piece_buffer: float,
+    edge_buffer: float,
+    time_limit: int,
+    allowed_rotations: List[int],
+    progress_callback=None
+) -> List[MarkerResult]:
+    """
+    Run nesting for multiple markers sequentially.
+    Returns results as they complete.
+    """
+    results = []
+
+    for i, (marker_name, size_quantities) in enumerate(markers):
+        if progress_callback:
+            progress_callback(i, len(markers), marker_name)
+
+        result = run_single_marker(
+            marker_name, size_quantities, grouped, piece_type_config,
+            fabric_width_mm, piece_buffer, edge_buffer, time_limit, allowed_rotations
+        )
+        results.append(result)
+
+    return results
 
 
 def main():
@@ -644,7 +753,13 @@ def main():
         st.session_state.aama_available_sizes = []
     if 'aama_pieces' not in st.session_state:
         st.session_state.aama_pieces = []  # Store AAMAPiece objects for L/R detection
-    
+    if 'marker_queue' not in st.session_state:
+        st.session_state.marker_queue = []  # List of (name, size_quantities) tuples
+    if 'marker_results' not in st.session_state:
+        st.session_state.marker_results = []  # List of MarkerResult objects
+    if 'selected_result_idx' not in st.session_state:
+        st.session_state.selected_result_idx = 0
+
     # Tabs
     tab1, tab2, tab3 = st.tabs(["📁 Upload", "🔧 Configure", "📊 Results"])
     
@@ -1039,9 +1154,93 @@ def main():
                     for s in display_sizes:
                         st.session_state.size_quantities[s] = preset.get(s, 0)
                     st.rerun()
-            
+
+            # === ADD MARKER SECTION (right after size selector) ===
             st.markdown("---")
-            
+            st.subheader("➕ Add Marker to Queue")
+
+            # Current ratio display
+            current_ratio = "-".join(str(st.session_state.size_quantities.get(s, 0)) for s in display_sizes)
+            current_bundles = sum(st.session_state.size_quantities.get(s, 0) for s in display_sizes)
+
+            # Build bundle pieces for piece count
+            bundle_pieces = build_bundle_pieces(
+                grouped, st.session_state.piece_type_config, st.session_state.size_quantities
+            )
+
+            add_col1, add_col2 = st.columns([3, 1])
+            with add_col1:
+                st.markdown(f"**Current:** `{current_ratio}` ({current_bundles} bundles, {len(bundle_pieces)} pieces)")
+            with add_col2:
+                if current_bundles > 0:
+                    if st.button("➕ Add to Queue", use_container_width=True, type="primary"):
+                        marker_name = f"M{len(st.session_state.marker_queue) + 1}"
+                        st.session_state.marker_queue.append(
+                            (marker_name, {s: st.session_state.size_quantities.get(s, 0) for s in display_sizes})
+                        )
+                        st.rerun()
+                else:
+                    st.button("➕ Add to Queue", use_container_width=True, disabled=True)
+
+            # Bulk add section
+            sizes_header = "-".join(display_sizes)
+            st.caption(f"Or paste multiple ratios (format: `{sizes_header}`, one per line):")
+            ratio_text = st.text_area(
+                "Bulk ratios",
+                placeholder="-".join(["0"] * len(display_sizes)) + "\n" + "-".join(["1"] * len(display_sizes)),
+                height=80,
+                key="bulk_add_ratios",
+                label_visibility="collapsed"
+            )
+            if st.button("➕ Add All Ratios", use_container_width=True):
+                lines = [l.strip() for l in ratio_text.strip().split('\n') if l.strip()]
+                added = 0
+                for line in lines:
+                    parts = line.replace(' ', '').split('-')
+                    if len(parts) == len(display_sizes):
+                        try:
+                            sq = {s: int(parts[i]) for i, s in enumerate(display_sizes)}
+                            if sum(sq.values()) > 0:
+                                marker_name = f"M{len(st.session_state.marker_queue) + 1}"
+                                st.session_state.marker_queue.append((marker_name, sq))
+                                added += 1
+                        except ValueError:
+                            pass
+                if added > 0:
+                    st.success(f"Added {added} marker(s)")
+                    st.rerun()
+                elif ratio_text.strip():
+                    st.warning(f"No valid ratios found. Expected {len(display_sizes)} values per line (e.g., `{sizes_header}`)")
+
+            # === QUEUE DISPLAY ===
+            st.markdown("---")
+            st.subheader("📋 Marker Queue")
+            if st.session_state.marker_queue:
+                st.markdown(f"**{len(st.session_state.marker_queue)} markers queued:**")
+                queue_df_data = []
+                for i, (name, sq) in enumerate(st.session_state.marker_queue):
+                    ratio = "-".join(str(sq.get(s, 0)) for s in display_sizes)
+                    total_b = sum(sq.values())
+                    queue_df_data.append({
+                        "#": i + 1,
+                        "Ratio": ratio,
+                        "Bundles": total_b
+                    })
+                st.dataframe(queue_df_data, use_container_width=True, hide_index=True,
+                            height=min(250, 35 * len(queue_df_data) + 38))
+
+                col_clear, col_go = st.columns(2)
+                with col_clear:
+                    if st.button("🗑️ Clear Queue", use_container_width=True):
+                        st.session_state.marker_queue = []
+                        st.rerun()
+                with col_go:
+                    st.info(f"👉 **Results** tab to run")
+            else:
+                st.info("Queue empty. Set sizes above and click 'Add to Queue'")
+
+            st.markdown("---")
+
             # Piece type config
             st.subheader("🧩 Piece Configuration")
             st.caption("Configure demand (pieces per garment) and flip option")
@@ -1107,14 +1306,10 @@ def main():
             # Summary
             st.markdown("---")
             st.subheader("📊 Summary")
-            
-            bundle_pieces = build_bundle_pieces(
-                grouped, st.session_state.piece_type_config, st.session_state.size_quantities
-            )
-            
+
             num_bundles = len(set(bp.bundle_id for bp in bundle_pieces))
             total_area = sum(bp.piece.area for bp in bundle_pieces)
-            
+
             s1, s2, s3, s4 = st.columns(4)
             s1.metric("Total Pieces", len(bundle_pieces))
             s2.metric("Garments", num_bundles)
@@ -1136,156 +1331,231 @@ def main():
             # Use same grouping as Configure tab
             is_aama = st.session_state.aama_grader is not None
             grouped = group_pieces_by_name(pieces) if is_aama else group_pieces_by_type(pieces)
-            col1, col2 = st.columns([1, 2])
-            
-            with col1:
-                st.subheader("Run Nesting")
-                
-                bundle_pieces = build_bundle_pieces(
-                    grouped, st.session_state.piece_type_config, st.session_state.size_quantities
-                )
-                
-                num_bundles = len(set(bp.bundle_id for bp in bundle_pieces))
-                flipped_count = sum(1 for bp in bundle_pieces if bp.is_flipped)
-                
-                st.markdown(f"**Pieces:** {len(bundle_pieces)}")
-                st.markdown(f"**Garments:** {num_bundles}")
-                if flipped_count > 0:
-                    st.caption(f"Including {flipped_count} flipped")
-                st.markdown(f"**Mode:** {orientation_mode}")
-                
-                st.markdown("---")
-                
-                if not bundle_pieces:
-                    st.warning("⚠️ No pieces! Set size quantities > 0.")
+
+            # Get available sizes
+            available_sizes_set = set()
+            for ptype, pieces_by_size in grouped.items():
+                for size in pieces_by_size.keys():
+                    if size:
+                        available_sizes_set.add(size)
+            display_sizes = [s for s in STANDARD_SIZES if s in available_sizes_set]
+            extra_sizes = sorted(available_sizes_set - set(STANDARD_SIZES))
+            display_sizes.extend(extra_sizes)
+
+            # === QUEUE PREVIEW & RUN SECTION ===
+            col_queue, col_params = st.columns([2, 1])
+
+            with col_queue:
+                st.subheader("📋 Marker Queue")
+                if st.session_state.marker_queue:
+                    st.markdown(f"**{len(st.session_state.marker_queue)} markers ready to nest:**")
+                    queue_df_data = []
+                    for i, (name, sq) in enumerate(st.session_state.marker_queue):
+                        ratio = "-".join(str(sq.get(s, 0)) for s in display_sizes)
+                        total_b = sum(sq.values())
+                        queue_df_data.append({
+                            "#": i + 1,
+                            "Ratio": ratio,
+                            "Bundles": total_b
+                        })
+                    st.dataframe(queue_df_data, use_container_width=True, hide_index=True,
+                                height=min(300, 35 * len(queue_df_data) + 38))
                 else:
-                    if st.button("🚀 Run Nesting", type="primary", use_container_width=True):
-                        
-                        if is_linked_mode:
-                            # Garment-Linked: try both 0° and 180°, pick best
-                            with st.spinner(f"Nesting with Garment-Linked mode (trying both orientations)..."):
-                                start_time = time.time()
-                                
-                                # Try 0° only
-                                sol_0 = run_nesting(bundle_pieces, fabric_width_mm, piece_buffer, 
-                                                   edge_buffer, time_limit // 2, [0])
-                                
-                                # Try 180° only
-                                sol_180 = run_nesting(bundle_pieces, fabric_width_mm, piece_buffer, 
-                                                     edge_buffer, time_limit // 2, [180])
-                                
-                                # Pick better solution
-                                if sol_0.utilization_percent >= sol_180.utilization_percent:
-                                    solution = sol_0
-                                    chosen = "0°"
-                                else:
-                                    solution = sol_180
-                                    chosen = "180°"
-                                
-                                elapsed = time.time() - start_time
-                                
-                            st.success(f"✅ Complete in {elapsed:.1f}s (Best: {chosen})")
+                    st.warning("No markers in queue. Go to **Configure** tab to add markers.")
+
+            with col_params:
+                st.subheader("⚙️ Nesting Params")
+                st.markdown(f"**Fabric Width:** {fabric_width_inches}\" ({fabric_width_mm:.0f}mm)")
+                st.markdown(f"**Piece Gap:** {piece_buffer}mm")
+                st.markdown(f"**Edge Buffer:** {edge_buffer}mm")
+                st.markdown(f"**Rotation Mode:** {orientation_mode}")
+                st.markdown(f"**Time/Marker:** {time_limit}s")
+
+            st.markdown("---")
+
+            # === RUN BUTTON ===
+            if st.session_state.marker_queue:
+                # Count unique ratios for display
+                unique_ratios = set("-".join(str(sq.get(s, 0)) for s in display_sizes)
+                                   for _, sq in st.session_state.marker_queue)
+                num_unique = len(unique_ratios)
+                num_total = len(st.session_state.marker_queue)
+                cache_note = f" ({num_unique} unique)" if num_unique < num_total else ""
+
+                if st.button(f"🚀 Run Nesting ({num_total} markers{cache_note})", type="primary", use_container_width=True):
+                    # Run markers sequentially with progress, caching duplicates
+                    progress_bar = st.progress(0)
+                    status_text = st.empty()
+                    results_container = st.empty()
+
+                    results = []
+                    result_cache = {}  # Cache by ratio string
+                    total_markers = len(st.session_state.marker_queue)
+                    cached_count = 0
+
+                    for i, (marker_name, sq) in enumerate(st.session_state.marker_queue):
+                        ratio_str = "-".join(str(sq.get(s, 0)) for s in display_sizes)
+                        progress_bar.progress(i / total_markers)
+
+                        # Check cache first
+                        if ratio_str in result_cache:
+                            # Reuse cached result with new marker name
+                            cached_result = result_cache[ratio_str]
+                            result = MarkerResult(
+                                name=marker_name,
+                                ratio_str=cached_result.ratio_str,
+                                size_quantities=cached_result.size_quantities.copy(),
+                                solution=cached_result.solution,
+                                bundle_pieces=cached_result.bundle_pieces,
+                                elapsed_time=0.0,  # No time spent
+                                error=cached_result.error
+                            )
+                            cached_count += 1
+                            status_text.markdown(f"**Marker {i+1}/{total_markers}:** `{ratio_str}` *(cached)*")
                         else:
-                            with st.spinner(f"Nesting {len(bundle_pieces)} pieces..."):
-                                start_time = time.time()
-                                solution = run_nesting(bundle_pieces, fabric_width_mm, piece_buffer, 
-                                                      edge_buffer, time_limit, allowed_rotations)
-                                elapsed = time.time() - start_time
-                            st.success(f"✅ Complete in {elapsed:.1f}s")
-                        
-                        st.session_state.solution = solution
-                        st.session_state.bundle_pieces = bundle_pieces
-                        st.rerun()
-            
-            with col2:
-                solution = st.session_state.solution
-                bundle_pieces = st.session_state.bundle_pieces
-                
-                if solution and bundle_pieces:
-                    st.subheader("Results")
-                    
+                            # Run nesting for new ratio
+                            status_text.markdown(f"**Nesting marker {i+1}/{total_markers}:** `{ratio_str}`")
+                            result = run_single_marker(
+                                marker_name, sq, grouped, st.session_state.piece_type_config,
+                                fabric_width_mm, piece_buffer, edge_buffer, time_limit, allowed_rotations
+                            )
+                            result_cache[ratio_str] = result
+
+                        results.append(result)
+
+                        # Show intermediate results table
+                        with results_container.container():
+                            interim_data = []
+                            for r in results:
+                                interim_data.append({
+                                    "Ratio": r.ratio_str,
+                                    "Length (m)": f"{r.length_mm/1000:.2f}" if not r.error else "ERR",
+                                    "Eff %": f"{r.utilization:.1f}" if not r.error else "-",
+                                    "Status": "✅" if not r.error else "❌",
+                                    "Cached": "♻️" if r.elapsed_time == 0 else ""
+                                })
+                            st.dataframe(interim_data, use_container_width=True, hide_index=True)
+
+                    progress_bar.progress(1.0)
+                    cache_msg = f" ({cached_count} from cache)" if cached_count > 0 else ""
+                    status_text.markdown(f"**✅ All {total_markers} markers complete!{cache_msg}**")
+
+                    st.session_state.marker_results = results
+                    st.session_state.selected_result_idx = 0
+                    time.sleep(0.5)
+                    st.rerun()
+            else:
+                st.button("🚀 Run Nesting (no markers)", disabled=True, use_container_width=True)
+
+            st.markdown("---")
+
+            # === RESULTS SECTION ===
+            st.subheader("📊 Results")
+
+            marker_results = st.session_state.marker_results
+
+            if marker_results:
+                # Build results table for display and export
+                results_table_data = []
+                for r in marker_results:
+                    results_table_data.append({
+                        "Ratio": r.ratio_str,
+                        "Length (m)": f"{r.length_mm/1000:.2f}" if not r.error else "-",
+                        "Length (yds)": f"{r.length_yards:.2f}" if not r.error else "-",
+                        "Eff %": f"{r.utilization:.1f}" if not r.error else "-",
+                        "Pieces": len(r.bundle_pieces),
+                        "Bundles": sum(r.size_quantities.values()),
+                        "Time (s)": f"{r.elapsed_time:.1f}"
+                    })
+
+                st.dataframe(results_table_data, use_container_width=True, hide_index=True)
+
+                # CSV Export
+                st.markdown("**Export Results:**")
+                csv_lines = [f"Ratio,Length(m),Length(yds),Eff%,Pieces,Bundles"]
+                for r in marker_results:
+                    if not r.error:
+                        csv_lines.append(f"{r.ratio_str},{r.length_mm/1000:.2f},{r.length_yards:.2f},{r.utilization:.1f},{len(r.bundle_pieces)},{sum(r.size_quantities.values())}")
+                csv_content = "\n".join(csv_lines)
+
+                exp_col1, exp_col2 = st.columns(2)
+                with exp_col1:
+                    st.download_button(
+                        "📥 Download Results CSV",
+                        data=csv_content,
+                        file_name="nesting_results.csv",
+                        mime="text/csv",
+                        use_container_width=True
+                    )
+                with exp_col2:
+                    # Summary stats
+                    valid_results = [r for r in marker_results if not r.error]
+                    if valid_results:
+                        avg_eff = sum(r.utilization for r in valid_results) / len(valid_results)
+                        total_length = sum(r.length_mm for r in valid_results) / 1000
+                        st.metric("Avg Efficiency", f"{avg_eff:.1f}%")
+
+                st.markdown("---")
+
+                # === INDIVIDUAL MARKER PREVIEW ===
+                st.subheader("🔍 Marker Preview")
+
+                marker_options = [f"{i+1}. {r.ratio_str} ({r.utilization:.1f}%)" if not r.error else f"{i+1}. {r.ratio_str} (ERROR)"
+                                 for i, r in enumerate(marker_results)]
+                selected_idx = st.selectbox(
+                    "Select marker to view",
+                    range(len(marker_results)),
+                    format_func=lambda x: marker_options[x],
+                    index=min(st.session_state.selected_result_idx, len(marker_results)-1),
+                    key="result_selector"
+                )
+                st.session_state.selected_result_idx = selected_idx
+
+                selected_result = marker_results[selected_idx]
+
+                if selected_result.error:
+                    st.error(f"Error: {selected_result.error}")
+                elif selected_result.solution:
+                    solution = selected_result.solution
+                    bundle_pieces_sel = selected_result.bundle_pieces
+
+                    # Metrics row
                     m1, m2, m3, m4 = st.columns(4)
                     m1.metric("Utilization", f"{solution.utilization_percent:.1f}%")
-                    m2.metric("Waste", f"{solution.waste_percent:.1f}%")
-                    m3.metric("Strip Length", f"{solution.strip_length/1000:.2f} m")
-                    m4.metric("Placements", solution.num_placements)
-                    
-                    # Compare with original
-                    if st.session_state.parse_result and st.session_state.parse_result.marker_info:
-                        orig_util = st.session_state.parse_result.marker_info.get('utilization_percent')
-                        if orig_util:
-                            delta = solution.utilization_percent - orig_util
-                            if delta > 0:
-                                st.success(f"📈 {delta:.1f}% better than original ({orig_util:.1f}%)")
-                            elif delta < 0:
-                                st.warning(f"📉 {abs(delta):.1f}% worse than original ({orig_util:.1f}%)")
-                    
-                    num_bundles = len(set(bp.bundle_id for bp in bundle_pieces))
-                    flipped_count = sum(1 for bp in bundle_pieces if bp.is_flipped)
-                    st.info(f"🎯 {num_bundles} garments" + (f" | 🔄 {flipped_count} flipped" if flipped_count else ""))
-                    
-                    # Visualization
-                    st.subheader("Nesting Layout")
-                    show_labels = st.checkbox("Show labels (Type-Size)", value=True)
-                    
-                    fig = plot_solution_with_bundles(solution, bundle_pieces, show_labels)
+                    m2.metric("Length", f"{selected_result.length_yards:.2f} yds")
+                    m3.metric("Length", f"{selected_result.length_mm/1000:.2f} m")
+                    m4.metric("Pieces", solution.num_placements)
+
+                    # Layout visualization
+                    show_labels = st.checkbox("Show piece labels", value=True, key="show_labels_preview")
+                    fig = plot_solution_with_bundles(solution, bundle_pieces_sel, show_labels)
                     st.pyplot(fig)
 
-                    # Save PNG before closing figure
+                    # Save PNG
                     png_buf = io.BytesIO()
                     fig.savefig(png_buf, format='png', dpi=150, bbox_inches='tight',
                                facecolor='white', edgecolor='none')
                     png_buf.seek(0)
                     plt.close()
 
-                    # Export
-                    st.subheader("📥 Export")
+                    # Export buttons for individual marker
                     exp1, exp2, exp3 = st.columns(3)
-
                     with exp1:
-                        svg_content = export_to_svg(solution, bundle_pieces)
-                        st.download_button("⬇️ Download SVG", data=svg_content,
-                                          file_name="nesting_result.svg", mime="image/svg+xml",
-                                          use_container_width=True)
-
+                        svg_content = export_to_svg(solution, bundle_pieces_sel)
+                        st.download_button("⬇️ SVG", data=svg_content,
+                                          file_name=f"marker_{selected_result.ratio_str.replace('-','_')}.svg",
+                                          mime="image/svg+xml", use_container_width=True)
                     with exp2:
-                        dxf_content = export_to_dxf(solution, bundle_pieces)
-                        st.download_button("⬇️ Download DXF", data=dxf_content,
-                                          file_name="nesting_result.dxf", mime="application/dxf",
-                                          use_container_width=True)
-
+                        dxf_content = export_to_dxf(solution, bundle_pieces_sel)
+                        st.download_button("⬇️ DXF", data=dxf_content,
+                                          file_name=f"marker_{selected_result.ratio_str.replace('-','_')}.dxf",
+                                          mime="application/dxf", use_container_width=True)
                     with exp3:
-                        # PNG Export with size ratio in filename
-                        size_parts = []
-                        for size in STANDARD_SIZES:
-                            qty = st.session_state.size_quantities.get(size, 0)
-                            if qty > 0:
-                                size_parts.append(f"{size}{qty}")
-                        ratio_str = "_".join(size_parts) if size_parts else "marker"
-                        png_filename = f"nest_{ratio_str}_{solution.utilization_percent:.0f}pct.png"
-
-                        st.download_button("📷 Download PNG", data=png_buf.getvalue(),
-                                          file_name=png_filename, mime="image/png",
-                                          use_container_width=True)
-                    
-                    # Placement details
-                    with st.expander("📋 Placement Details"):
-                        piece_map = {bp.piece.id: bp for bp in bundle_pieces}
-                        placement_data = []
-                        for p in solution.placements:
-                            bp = piece_map.get(p.piece_id)
-                            placement_data.append({
-                                "Bundle": bp.bundle_id if bp else "-",
-                                "Type": bp.piece_type if bp else "-",
-                                "Size": bp.size if bp else "-",
-                                "X (mm)": f"{p.x:.1f}",
-                                "Y (mm)": f"{p.y:.1f}",
-                                "Rotation": f"{p.rotation}°",
-                                "Flipped": "✓" if (bp and bp.is_flipped) else ""
-                            })
-                        st.dataframe(placement_data, use_container_width=True)
-                else:
-                    st.info("👈 Configure pieces, then click 'Run Nesting'")
+                        st.download_button("📷 PNG", data=png_buf.getvalue(),
+                                          file_name=f"marker_{selected_result.ratio_str.replace('-','_')}_{solution.utilization_percent:.0f}pct.png",
+                                          mime="image/png", use_container_width=True)
+            else:
+                st.info("No results yet. Add markers in the **Configure** tab and click **Run Nesting**.")
 
 
 if __name__ == "__main__":

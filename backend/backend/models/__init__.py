@@ -6,6 +6,7 @@ from .order import Order, OrderLine, OrderColor, SizeQuantity
 from .nesting import NestingJob, NestingJobResult
 from .marker import MarkerBank
 from .cutplan import Cutplan, CutplanMarker
+from .marker_layout import MarkerLayout
 from .cost import CostConfig
 
 __all__ = [
@@ -25,5 +26,6 @@ __all__ = [
     "MarkerBank",
     "Cutplan",
     "CutplanMarker",
+    "MarkerLayout",
     "CostConfig",
 ]

@@ -34,3 +34,12 @@ websockets>=12.0
 # Utils
 python-dotenv>=1.0.0
 httpx>=0.26.0
+
+# Nesting engine (garment-nester cross-project dependencies)
+spyrrow>=0.8                # CPU nesting solver (compiled Rust/jagua-rs)
+ezdxf>=1.0.0                # DXF file parsing and export
+shapely>=2.0.0              # Geometry operations for AAMA parser
+numpy>=1.24.0               # Array operations for GPU nesting
+pillow>=9.0.0               # Rasterization for GPU nesting
+scipy>=1.10.0               # Signal processing for GPU FFT nesting
+# cupy-cuda12x>=12.0.0      # GPU acceleration (optional, requires CUDA)

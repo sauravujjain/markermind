@@ -11,6 +11,8 @@ class CutplanStatus(str, enum.Enum):
     optimizing = "optimizing"
     ready = "ready"
     approved = "approved"
+    refining = "refining"
+    refined = "refined"
     in_production = "in_production"
     completed = "completed"
 
@@ -73,3 +75,4 @@ class CutplanMarker(Base, TimestampMixin):
     # Relationships
     cutplan = relationship("Cutplan", back_populates="markers")
     marker = relationship("MarkerBank", back_populates="cutplan_markers")
+    layout = relationship("MarkerLayout", back_populates="cutplan_marker", uselist=False, cascade="all, delete-orphan")

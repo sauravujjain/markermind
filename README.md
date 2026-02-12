@@ -151,6 +151,87 @@ UPLOAD_DIR=./uploads
 MAX_UPLOAD_SIZE_MB=100
 ```
 
+## Cross-Project Dependency: garment-nester
+
+MarkerMind depends on the `garment-nester` project at `/home/sarv/projects/garment-nester`.
+The backend adds it to `sys.path` at runtime to import `nesting_engine.*` modules.
+
+**Why this matters:** Pure Python modules (core, io, engine wrappers) are imported via
+`sys.path`, but **compiled native packages** like `spyrrow` must be `pip install`-ed
+directly into the backend venv. They can't be found via `sys.path` manipulation.
+
+### Nesting Dependencies (in backend venv)
+
+| Package | Type | Required For | Notes |
+|---------|------|--------------|-------|
+| `spyrrow>=0.8` | **Compiled (Rust)** | CPU nesting (SpyrrowEngine) | Must be pip-installed in backend venv |
+| `ezdxf>=1.0.0` | Python | DXF parsing and export | Used by AAMA parser + marker export |
+| `shapely>=2.0.0` | Compiled (C) | Geometry operations | Used by AAMA parser |
+| `numpy>=1.24.0` | Compiled (C) | GPU nesting rasterization | |
+| `pillow>=9.0.0` | Compiled (C) | GPU nesting rasterization | |
+| `scipy>=1.10.0` | Compiled (C) | GPU FFT nesting | |
+| `cupy-cuda12x` | Compiled (CUDA) | GPU acceleration | Optional, requires NVIDIA GPU + CUDA |
+
+### Pre-Startup Dependency Check
+
+Run this before starting the backend to verify all nesting dependencies are available:
+
+```bash
+cd backend
+source venv/bin/activate
+
+python -c "
+import sys
+ok = True
+for pkg in ['spyrrow', 'ezdxf', 'shapely', 'numpy', 'PIL', 'scipy']:
+    try:
+        mod = __import__(pkg)
+        ver = getattr(mod, '__version__', '?')
+        print(f'  OK  {pkg} ({ver})')
+    except ImportError:
+        print(f'  MISSING  {pkg}')
+        ok = True if pkg == 'cupy' else False  # cupy is optional
+
+# Check garment-nester path
+gn = '$(realpath ../../../garment-nester 2>/dev/null || echo /home/sarv/projects/garment-nester)'
+sys.path.insert(0, gn)
+try:
+    from nesting_engine.core.piece import Piece
+    print(f'  OK  nesting_engine (via {gn})')
+except ImportError:
+    print(f'  MISSING  nesting_engine at {gn}')
+    ok = False
+
+print()
+print('All dependencies OK!' if ok else 'MISSING DEPENDENCIES — run: pip install -r requirements.txt')
+"
+```
+
+If `spyrrow` is missing:
+```bash
+pip install spyrrow>=0.8
+```
+
+## Full Startup Sequence
+
+```bash
+# 1. Start infrastructure (PostgreSQL + Redis)
+cd /home/sarv/projects/MarkerMind
+docker-compose up -d
+
+# 2. Verify containers are running
+docker ps | grep -E "postgres|redis"
+
+# 3. Start backend
+cd backend
+source venv/bin/activate
+uvicorn backend.main:app --reload --port 8000
+
+# 4. Start frontend
+cd frontend
+npm run dev
+```
+
 ## Development
 
 ### Run Celery Worker (for background jobs)

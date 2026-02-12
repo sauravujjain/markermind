@@ -69,3 +69,41 @@ class CutplanComparisonResponse(BaseModel):
     cutplans: List[CutplanResponse]
     recommended_id: Optional[str] = None
     recommendation_reason: Optional[str] = None
+
+
+class RefinementRequest(BaseModel):
+    """Request to start CPU refinement (final nesting) for an approved cutplan."""
+    piece_buffer_mm: float = 2.0
+    edge_buffer_mm: float = 5.0
+    time_limit_s: float = 20.0
+    rotation_mode: str = "free"  # "free" or "nap_safe"
+
+
+class MarkerLayoutResponse(BaseModel):
+    """Response for a single refined marker layout."""
+    id: str
+    cutplan_marker_id: str
+    ratio_str: str
+    utilization: float
+    strip_length_mm: float
+    length_yards: float
+    computation_time_s: float
+    svg_preview: str
+    dxf_file_path: Optional[str] = None
+    piece_buffer_mm: Optional[float] = None
+    edge_buffer_mm: Optional[float] = None
+    time_limit_s: Optional[float] = None
+    rotation_mode: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+
+class RefinementStatusResponse(BaseModel):
+    """Response for refinement progress polling."""
+    status: str  # running, completed, failed, cancelled
+    progress: int  # 0-100
+    message: str
+    markers_total: int
+    markers_done: int
+    layouts: List[MarkerLayoutResponse] = []

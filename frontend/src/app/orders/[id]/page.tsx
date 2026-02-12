@@ -4,12 +4,12 @@ import { useEffect, useState } from 'react'
 import { useRouter, useParams } from 'next/navigation'
 import Link from 'next/link'
 import { useAuthStore } from '@/lib/auth-store'
-import { api, Order, Pattern, NestingJob, Cutplan, Fabric, PatternPiece } from '@/lib/api'
+import { api, Order, Pattern, NestingJob, Cutplan, Fabric, PatternPiece, RefinementConfig, RefinementStatus, MarkerLayout } from '@/lib/api'
 import { DashboardLayout } from '@/components/dashboard-layout'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { useToast } from '@/hooks/use-toast'
-import { ArrowLeft, Play, FileText, CheckCircle2, Clock, Package, ChevronDown, ChevronRight, Settings, AlertCircle, Loader2, Pencil, Eye, Layers, FlipHorizontal, Upload, Plus, XCircle } from 'lucide-react'
+import { ArrowLeft, Play, FileText, CheckCircle2, Clock, Package, ChevronDown, ChevronRight, Settings, AlertCircle, Loader2, Pencil, Eye, Layers, FlipHorizontal, Upload, Plus, XCircle, Download } from 'lucide-react'
 import { useRef } from 'react'
 import {
   Select,
@@ -66,6 +66,18 @@ export default function OrderDetailPage() {
   }>>({})
   const [editablePieces, setEditablePieces] = useState<Record<string, Record<string, { qty: number; leftQty: number; rightQty: number }>>>({})
   const [isPiecesEditMode, setIsPiecesEditMode] = useState(false)
+
+  // Final Nesting (Refinement) state
+  const [showRefinementConfig, setShowRefinementConfig] = useState(false)
+  const [refinementConfig, setRefinementConfig] = useState<RefinementConfig>({
+    piece_buffer_mm: 2.0,
+    edge_buffer_mm: 5.0,
+    time_limit_s: 20.0,
+    rotation_mode: 'free',
+  })
+  const [isRefining, setIsRefining] = useState(false)
+  const [refinementStatus, setRefinementStatus] = useState<RefinementStatus | null>(null)
+  const refinementPollingRef = useRef<NodeJS.Timeout | null>(null)
 
   // Pattern upload state
   const [isUploadingPattern, setIsUploadingPattern] = useState(false)
@@ -453,9 +465,99 @@ export default function OrderDetailPage() {
     }
   }
 
+  // --- Final Nesting (Refinement) ---
+  const handleStartRefinement = async (cutplanId: string) => {
+    setIsRefining(true)
+    setRefinementStatus(null)
+    try {
+      await api.startRefinement(cutplanId, refinementConfig)
+      toast({ title: 'Final nesting started' })
+      startRefinementPolling(cutplanId)
+    } catch (error) {
+      toast({
+        title: 'Failed to start final nesting',
+        description: error instanceof Error ? error.message : 'Please try again',
+        variant: 'destructive',
+      })
+      setIsRefining(false)
+    }
+  }
+
+  const startRefinementPolling = (cutplanId: string) => {
+    if (refinementPollingRef.current) clearInterval(refinementPollingRef.current)
+    refinementPollingRef.current = setInterval(async () => {
+      try {
+        const status = await api.getRefinementStatus(cutplanId)
+        setRefinementStatus(status)
+
+        if (status.status === 'completed' || status.status === 'failed' || status.status === 'cancelled') {
+          if (refinementPollingRef.current) clearInterval(refinementPollingRef.current)
+          setIsRefining(false)
+          loadData()
+          if (status.status === 'completed') {
+            toast({ title: 'Final nesting complete', description: status.message })
+          } else if (status.status === 'failed') {
+            toast({ title: 'Final nesting failed', description: status.message, variant: 'destructive' })
+          }
+        }
+      } catch (e) {
+        console.error('Refinement polling error:', e)
+      }
+    }, 2000)
+  }
+
+  const handleCancelRefinement = async (cutplanId: string) => {
+    try {
+      await api.cancelRefinement(cutplanId)
+      toast({ title: 'Cancellation requested' })
+    } catch (error) {
+      toast({ title: 'Failed to cancel', variant: 'destructive' })
+    }
+  }
+
+  const handleDownloadMarkers = async (cutplanId: string) => {
+    try {
+      const blob = await api.downloadMarkersDxf(cutplanId)
+      const url = window.URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = 'markers.zip'
+      document.body.appendChild(a)
+      a.click()
+      window.URL.revokeObjectURL(url)
+      document.body.removeChild(a)
+    } catch (error) {
+      toast({
+        title: 'Download failed',
+        description: error instanceof Error ? error.message : 'Please try again',
+        variant: 'destructive',
+      })
+    }
+  }
+
+  // Check if refinement is already running on load for an approved cutplan
+  useEffect(() => {
+    if (!isAuthenticated || !orderId) return
+    const approvedPlan = cutplans.find(c => c.status === 'approved' || c.status === 'refining' || c.status === 'refined')
+    if (approvedPlan && (approvedPlan.status === 'refining' || approvedPlan.status === 'refined')) {
+      api.getRefinementStatus(approvedPlan.id).then(status => {
+        setRefinementStatus(status)
+        if (status.status === 'running') {
+          setIsRefining(true)
+          startRefinementPolling(approvedPlan.id)
+        } else if (status.layouts.length > 0) {
+          setShowRefinementConfig(true)
+        }
+      }).catch(() => {})
+    }
+  }, [isAuthenticated, orderId, cutplans.length])
+
   // Cleanup cutplan polling on unmount
   useEffect(() => {
-    return () => { if (cutplanPollingRef.current) clearInterval(cutplanPollingRef.current) }
+    return () => {
+      if (cutplanPollingRef.current) clearInterval(cutplanPollingRef.current)
+      if (refinementPollingRef.current) clearInterval(refinementPollingRef.current)
+    }
   }, [])
 
   // Check if cutplan optimization is already running on load
@@ -647,18 +749,18 @@ export default function OrderDetailPage() {
                 </CardContent>
               </Card>
 
-              <Card className={order.status === 'completed' ? 'border-green-500' : ''}>
+              <Card className={cutplans.some(c => c.status === 'refined') ? 'border-green-500' : cutplans.some(c => c.status === 'refining') ? 'border-blue-500' : cutplans.some(c => c.status === 'approved') ? 'border-amber-500' : ''}>
                 <CardHeader className="pb-2">
                   <div className="flex items-center space-x-2">
-                    <div className={`w-7 h-7 rounded-full flex items-center justify-center text-xs ${order.status === 'completed' ? 'bg-green-100 text-green-600' : 'bg-gray-100 text-gray-400'}`}>
-                      {order.status === 'completed' ? <CheckCircle2 className="h-3.5 w-3.5" /> : '6'}
+                    <div className={`w-7 h-7 rounded-full flex items-center justify-center text-xs ${cutplans.some(c => c.status === 'refined') ? 'bg-green-100 text-green-600' : cutplans.some(c => c.status === 'refining') ? 'bg-blue-100 text-blue-600' : cutplans.some(c => c.status === 'approved') ? 'bg-amber-100 text-amber-600' : 'bg-gray-100 text-gray-400'}`}>
+                      {cutplans.some(c => c.status === 'refined') ? <CheckCircle2 className="h-3.5 w-3.5" /> : cutplans.some(c => c.status === 'refining') ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : '6'}
                     </div>
                     <CardTitle className="text-xs">Export</CardTitle>
                   </div>
                 </CardHeader>
                 <CardContent className="pt-0">
                   <p className="text-xs text-muted-foreground">
-                    {order.status === 'completed' ? 'Done' : 'Dockets'}
+                    {cutplans.some(c => c.status === 'refined') ? 'Ready' : cutplans.some(c => c.status === 'refining') ? 'Nesting...' : cutplans.some(c => c.status === 'approved') ? 'Refine' : 'Dockets'}
                   </p>
                 </CardContent>
               </Card>
@@ -2172,6 +2274,188 @@ export default function OrderDetailPage() {
           )
         })()}
 
+        {/* Final Nesting Section - shown after cutplan approval */}
+        {(() => {
+          const approvedPlan = cutplans.find(c => c.status === 'approved' || c.status === 'refining' || c.status === 'refined')
+          if (!approvedPlan) return null
+
+          const orderSizesSet = new Set<string>()
+          const seenColors = new Set<string>()
+          order.order_lines.forEach(line => {
+            if (seenColors.has(line.color_code)) return
+            seenColors.add(line.color_code)
+            line.size_quantities.forEach(sq => {
+              if (sq.quantity > 0) orderSizesSet.add(sq.size_code)
+            })
+          })
+          const sizes = Array.from(orderSizesSet).sort()
+
+          return (
+            <Card id="final-nesting-section" className="border-indigo-300 bg-indigo-50/30">
+              <CardHeader>
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <div className="h-10 w-10 rounded-xl bg-gradient-to-br from-indigo-500 to-indigo-600 flex items-center justify-center">
+                      <Layers className="h-5 w-5 text-white" />
+                    </div>
+                    <div>
+                      <CardTitle>Final Nesting</CardTitle>
+                      <CardDescription>
+                        CPU-refine approved markers with Spyrrow for production DXF export
+                      </CardDescription>
+                    </div>
+                  </div>
+                  {refinementStatus?.status === 'completed' && refinementStatus.layouts.length > 0 && (
+                    <Button onClick={() => handleDownloadMarkers(approvedPlan.id)}>
+                      <Download className="mr-2 h-4 w-4" />
+                      Download All DXF
+                    </Button>
+                  )}
+                </div>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                {/* Config panel */}
+                {!isRefining && (refinementStatus?.status !== 'completed' || !refinementStatus?.layouts?.length) && (
+                  <div className="space-y-4 p-4 bg-white rounded-lg border">
+                    <div className="grid grid-cols-4 gap-4">
+                      <div>
+                        <label className="text-xs font-medium text-muted-foreground block mb-1">Piece Buffer (mm)</label>
+                        <input
+                          type="number"
+                          value={refinementConfig.piece_buffer_mm}
+                          onChange={(e) => setRefinementConfig({ ...refinementConfig, piece_buffer_mm: parseFloat(e.target.value) || 2.0 })}
+                          className="w-full px-2 py-1.5 border rounded text-sm"
+                          min={0} max={10} step={0.5}
+                        />
+                      </div>
+                      <div>
+                        <label className="text-xs font-medium text-muted-foreground block mb-1">Edge Buffer (mm)</label>
+                        <input
+                          type="number"
+                          value={refinementConfig.edge_buffer_mm}
+                          onChange={(e) => setRefinementConfig({ ...refinementConfig, edge_buffer_mm: parseFloat(e.target.value) || 5.0 })}
+                          className="w-full px-2 py-1.5 border rounded text-sm"
+                          min={0} max={20} step={0.5}
+                        />
+                      </div>
+                      <div>
+                        <label className="text-xs font-medium text-muted-foreground block mb-1">Time/Marker (sec)</label>
+                        <input
+                          type="number"
+                          value={refinementConfig.time_limit_s}
+                          onChange={(e) => setRefinementConfig({ ...refinementConfig, time_limit_s: parseFloat(e.target.value) || 20 })}
+                          className="w-full px-2 py-1.5 border rounded text-sm"
+                          min={5} max={120} step={5}
+                        />
+                      </div>
+                      <div>
+                        <label className="text-xs font-medium text-muted-foreground block mb-1">Orientation</label>
+                        <select
+                          value={refinementConfig.rotation_mode}
+                          onChange={(e) => setRefinementConfig({ ...refinementConfig, rotation_mode: e.target.value })}
+                          className="w-full px-2 py-1.5 border rounded text-sm"
+                        >
+                          <option value="free">Free (0/180)</option>
+                          <option value="nap_safe">Nap-Safe (0 only)</option>
+                        </select>
+                      </div>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <p className="text-xs text-muted-foreground">
+                        {approvedPlan.markers.length} markers will be refined sequentially ({approvedPlan.markers.length * refinementConfig.time_limit_s}s max total)
+                      </p>
+                      <Button onClick={() => handleStartRefinement(approvedPlan.id)}>
+                        <Play className="mr-2 h-4 w-4" />
+                        Start Final Nesting
+                      </Button>
+                    </div>
+                  </div>
+                )}
+
+                {/* Progress section */}
+                {isRefining && refinementStatus && (
+                  <div className="space-y-3">
+                    <div className="flex items-center justify-between">
+                      <div className="text-sm font-medium">
+                        {refinementStatus.message}
+                      </div>
+                      <span className="text-sm font-medium">
+                        {refinementStatus.markers_done}/{refinementStatus.markers_total}
+                      </span>
+                    </div>
+                    <div className="w-full bg-indigo-100 rounded-full h-2">
+                      <div
+                        className="bg-indigo-500 h-2 rounded-full transition-all duration-500"
+                        style={{ width: `${Math.max(refinementStatus.progress, 2)}%` }}
+                      />
+                    </div>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="text-red-600 border-red-200 hover:bg-red-50"
+                      onClick={() => handleCancelRefinement(approvedPlan.id)}
+                    >
+                      <XCircle className="mr-2 h-4 w-4" />
+                      Stop
+                    </Button>
+                  </div>
+                )}
+
+                {/* Completed layouts */}
+                {refinementStatus && refinementStatus.layouts.length > 0 && (
+                  <div className="space-y-3">
+                    {refinementStatus.layouts.map((layout, idx) => {
+                      const ratioValues = layout.ratio_str.split('-').map(v => parseInt(v) || 0)
+                      const bundles = ratioValues.reduce((a, b) => a + b, 0)
+                      const utilPct = (layout.utilization * 100)
+                      return (
+                        <div key={layout.id} className="border rounded-lg overflow-hidden bg-white">
+                          <div className="px-4 py-2 bg-muted/30 flex items-center justify-between border-b">
+                            <div className="flex items-center gap-3">
+                              <span className="font-semibold text-sm">M{idx + 1}</span>
+                              <span className="font-mono text-xs text-muted-foreground">{layout.ratio_str}</span>
+                              <span className="text-xs bg-primary/10 text-primary px-2 py-0.5 rounded">{bundles} bundles</span>
+                            </div>
+                            <div className="flex items-center gap-4 text-xs">
+                              <span className={`font-medium ${utilPct >= 80 ? 'text-green-600' : utilPct >= 75 ? 'text-amber-600' : 'text-red-600'}`}>
+                                {utilPct.toFixed(1)}%
+                              </span>
+                              <span className="text-muted-foreground">{layout.length_yards.toFixed(2)} yd</span>
+                              <span className="text-muted-foreground">{layout.computation_time_s.toFixed(1)}s</span>
+                            </div>
+                          </div>
+                          {/* SVG Preview */}
+                          <div className="p-3 overflow-x-auto">
+                            <div
+                              className="min-w-[400px]"
+                              dangerouslySetInnerHTML={{ __html: layout.svg_preview }}
+                            />
+                          </div>
+                        </div>
+                      )
+                    })}
+
+                    {/* Re-run / Download buttons */}
+                    {!isRefining && refinementStatus.status === 'completed' && (
+                      <div className="flex items-center gap-3 pt-2">
+                        <Button onClick={() => handleDownloadMarkers(approvedPlan.id)}>
+                          <Download className="mr-2 h-4 w-4" />
+                          Download All Markers (DXF)
+                        </Button>
+                        <Button variant="outline" onClick={() => {
+                          setRefinementStatus(null)
+                        }}>
+                          Re-run with Different Settings
+                        </Button>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+          )
+        })()}
+
         {/* Spacer for sticky action bar */}
         <div className="h-20" />
       </div>
@@ -2234,8 +2518,29 @@ export default function OrderDetailPage() {
         }
         if (hasApprovedCutplan) {
           currentStep = 6
-          stepLabel = 'Complete'
-          nextAction = null
+          const hasRefinedCutplan = cutplans.some(c => c.status === 'refined')
+          const isRefiningNow = cutplans.some(c => c.status === 'refining')
+          if (hasRefinedCutplan) {
+            stepLabel = 'Export Ready'
+            nextAction = {
+              label: 'Download Markers',
+              onClick: () => {
+                const plan = cutplans.find(c => c.status === 'refined')
+                if (plan) handleDownloadMarkers(plan.id)
+              },
+            }
+          } else if (isRefiningNow) {
+            stepLabel = 'Final Nesting...'
+            nextAction = null
+          } else {
+            stepLabel = 'Final Nesting'
+            nextAction = {
+              label: 'Start Final Nesting',
+              onClick: () => {
+                document.getElementById('final-nesting-section')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+              },
+            }
+          }
         }
 
         return (

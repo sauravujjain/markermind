@@ -57,19 +57,21 @@ export default function SettingsPage() {
             </Card>
           </Link>
 
-          <Card className="opacity-60">
-            <CardHeader>
-              <div className="flex items-center space-x-3">
-                <div className="w-10 h-10 bg-gray-100 rounded-lg flex items-center justify-center">
-                  <DollarSign className="h-5 w-5 text-gray-400" />
+          <Link href="/settings/costs">
+            <Card className="hover:shadow-md transition-shadow cursor-pointer">
+              <CardHeader>
+                <div className="flex items-center space-x-3">
+                  <div className="w-10 h-10 bg-primary/10 rounded-lg flex items-center justify-center">
+                    <DollarSign className="h-5 w-5 text-primary" />
+                  </div>
+                  <div>
+                    <CardTitle className="text-lg">Cost Settings</CardTitle>
+                    <CardDescription>Configure cost parameters</CardDescription>
+                  </div>
                 </div>
-                <div>
-                  <CardTitle className="text-lg">Cost Settings</CardTitle>
-                  <CardDescription>Configure cost parameters (Coming soon)</CardDescription>
-                </div>
-              </div>
-            </CardHeader>
-          </Card>
+              </CardHeader>
+            </Card>
+          </Link>
 
           <Card className="opacity-60">
             <CardHeader>

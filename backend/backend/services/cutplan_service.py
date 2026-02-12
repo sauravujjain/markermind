@@ -4,7 +4,7 @@ from typing import Optional, List, Dict, Any
 from sqlalchemy.orm import Session
 
 from ..config import settings
-from ..models import Cutplan, CutplanMarker, Order, OrderLine, SizeQuantity, MarkerBank, CostConfig
+from ..models import Cutplan, CutplanMarker, Order, OrderLine, SizeQuantity, MarkerBank, CostConfig, Pattern, PatternFabricMapping
 
 from .ilp_solver_runner import optimize_cutplan, calculate_cutplan_costs
 
@@ -298,6 +298,41 @@ class CutplanService:
         cost_config = self.get_cost_config(db, customer_id)
         effective_fabric_cost = fabric_cost_per_yard if fabric_cost_per_yard is not None else cost_config.fabric_cost_per_yard
 
+        # Load perimeter_by_size from pattern parse_metadata
+        perimeter_for_material = None
+        try:
+            pattern = db.query(Pattern).filter(Pattern.id == pattern_id).first()
+            if pattern and pattern.parse_metadata:
+                perim_data = pattern.parse_metadata.get("perimeter_by_size", {})
+                if perim_data:
+                    # Find which material maps to this fabric_id
+                    mapping = db.query(PatternFabricMapping).filter(
+                        PatternFabricMapping.pattern_id == pattern_id,
+                        PatternFabricMapping.fabric_id == fabric_id,
+                    ).first()
+                    if mapping and mapping.material_name in perim_data:
+                        perimeter_for_material = perim_data[mapping.material_name]
+                    elif len(perim_data) == 1:
+                        # Single material — use it directly
+                        perimeter_for_material = list(perim_data.values())[0]
+        except Exception as e:
+            print(f"[CutplanService] Warning: could not load perimeter_by_size: {e}")
+
+        # Compute cutting cost per cm from input params
+        cutting_cost_per_cm = (
+            (cost_config.cutting_labor_cost_per_hour * cost_config.cutting_workers_per_cut)
+            / 3600.0
+        ) / cost_config.cutting_speed_cm_per_s
+
+        # Compute prep cost per meter from enabled paper layers
+        prep_cost_per_m = 0.0
+        if getattr(cost_config, 'prep_perf_paper_enabled', True):
+            prep_cost_per_m += getattr(cost_config, 'prep_perf_paper_cost_per_m', 0.1)
+        if getattr(cost_config, 'prep_underlayer_enabled', True):
+            prep_cost_per_m += getattr(cost_config, 'prep_underlayer_cost_per_m', 0.1)
+        if getattr(cost_config, 'prep_top_layer_enabled', True):
+            prep_cost_per_m += getattr(cost_config, 'prep_top_layer_cost_per_m', 0.05)
+
         # Track cutplans created incrementally
         cutplans = []
         completed_strategies = 0
@@ -324,8 +359,10 @@ class CutplanService:
                 max_ply_height=cost_config.max_ply_height,
                 spreading_cost_per_yard=cost_config.spreading_cost_per_yard,
                 spreading_cost_per_ply=getattr(cost_config, 'spreading_cost_per_ply', 0.013),
-                cutting_cost_per_inch=cost_config.cutting_cost_per_inch,
-                prep_cost_per_marker=cost_config.prep_cost_per_marker,
+                cutting_cost_per_cm=cutting_cost_per_cm,
+                prep_cost_per_meter=prep_cost_per_m,
+                perimeter_by_size=perimeter_for_material,
+                sizes=sizes,
             )
 
             # Update cutplan with summary
