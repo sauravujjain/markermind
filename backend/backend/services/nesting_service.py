@@ -223,10 +223,10 @@ class NestingService:
             dxf_path = resolve_path(pattern.dxf_file_path)
             rul_path = resolve_path(pattern.rul_file_path)
 
-            # Get sizes from pattern - filter out invalid sizes (those with X)
-            sizes = [s for s in pattern.available_sizes if 'X' not in s and s.isdigit()]
+            # Get sizes from pattern - accept all non-empty size strings as-is
+            sizes = [s.strip() for s in pattern.available_sizes if s and s.strip()]
             if not sizes:
-                raise ValueError("Pattern has no valid numeric sizes")
+                raise ValueError("Pattern has no valid sizes")
 
             # Progress wrapper
             def update_progress(progress: int, message: str):
