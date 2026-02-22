@@ -206,6 +206,78 @@ class GPUPacker:
         return base64.b64encode(png_bytes).decode('utf-8')
 
 
+def _detect_grain_axis(pieces) -> str:
+    """
+    Detect the predominant grain line axis across all pieces in a pattern.
+
+    Examines grain lines (Layer 7) from all pieces and determines whether
+    grain runs primarily along the DXF X-axis or Y-axis.
+
+    Returns:
+        'x' if grain is predominantly along DXF X-axis
+        'y' if grain is predominantly along DXF Y-axis
+        'y' as fallback if no grain lines found (preserves legacy behavior)
+    """
+    x_votes = 0
+    y_votes = 0
+
+    for piece in pieces:
+        if not piece.grain_line:
+            continue
+        gx = abs(piece.grain_line[1][0] - piece.grain_line[0][0])
+        gy = abs(piece.grain_line[1][1] - piece.grain_line[0][1])
+        if gx > gy:
+            x_votes += 1
+        elif gy > gx:
+            y_votes += 1
+        # Diagonal (gx == gy) doesn't vote
+
+    if x_votes == 0 and y_votes == 0:
+        return 'y'  # No grain lines found, default to legacy swap behavior
+
+    return 'x' if x_votes >= y_votes else 'y'
+
+
+def _orient_vertices_for_grain(
+    vertices: List[Tuple[float, float]],
+    grain_line: Optional[Tuple[Tuple[float, float], Tuple[float, float]]],
+    pattern_grain_axis: str,
+    unit_scale: float,
+) -> List[Tuple[float, float]]:
+    """
+    Transform piece vertices so the grain direction maps to the raster's
+    column axis (PIL x / fabric length direction).
+
+    The GPU nesting container is laid out as (strip_width, max_length) where
+    axis 1 (columns) runs along the fabric length. PIL polygon vertices use
+    (x, y) where x maps to columns. So the grain must end up as the first
+    coordinate of each vertex tuple.
+
+    Strategy:
+        - If grain runs along DXF Y: swap to (y, x) so grain → first coord
+        - If grain runs along DXF X: keep as (x, y) so grain → first coord
+        - Per-piece grain line overrides the pattern-level default
+    """
+    # Determine this piece's grain axis
+    piece_grain_axis = pattern_grain_axis  # default to pattern-level
+
+    if grain_line:
+        gx = abs(grain_line[1][0] - grain_line[0][0])
+        gy = abs(grain_line[1][1] - grain_line[0][1])
+        if gx > gy:
+            piece_grain_axis = 'x'
+        elif gy > gx:
+            piece_grain_axis = 'y'
+        # Diagonal: use pattern default
+
+    if piece_grain_axis == 'y':
+        # Grain along DXF Y → swap so Y becomes first coord (PIL x = fabric length)
+        return [(y * unit_scale, x * unit_scale) for x, y in vertices]
+    else:
+        # Grain along DXF X → keep as-is, X is already first coord
+        return [(x * unit_scale, y * unit_scale) for x, y in vertices]
+
+
 def load_pieces_for_material(
     dxf_path: str,
     rul_path: str,
@@ -216,6 +288,9 @@ def load_pieces_for_material(
 ) -> Dict[str, List[Dict]]:
     """
     Load and rasterize pieces for a specific material.
+
+    Automatically detects grain direction from the pattern's grain lines
+    and orients pieces so grain runs parallel to the fabric length.
 
     Args:
         dxf_path: Path to DXF file
@@ -235,6 +310,9 @@ def load_pieces_for_material(
     grader = AAMAGrader(pieces, rules)
     unit_scale = 25.4 if rules.header.units == 'ENGLISH' else 1.0
 
+    # Detect predominant grain axis for this pattern
+    pattern_grain_axis = _detect_grain_axis(pieces)
+
     pieces_by_size = {}
 
     for target_size in sizes:
@@ -249,7 +327,10 @@ def load_pieces_for_material(
             if orig_piece is None or orig_piece.material != material:
                 continue
 
-            vertices_mm = [(y * unit_scale, x * unit_scale) for x, y in gp.vertices]
+            # Orient vertices so grain direction maps to fabric length axis
+            vertices_mm = _orient_vertices_for_grain(
+                gp.vertices, gp.grain_line, pattern_grain_axis, unit_scale
+            )
             if len(vertices_mm) < 3:
                 continue
             if vertices_mm[0] != vertices_mm[-1]:
