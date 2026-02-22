@@ -1487,8 +1487,17 @@ export default function OrderDetailPage() {
                                     value={config.widthInches}
                                     onChange={(e) => setPerFabricConfig({
                                       ...perFabricConfig,
-                                      [activeNestingFabric]: { ...config, widthInches: parseFloat(e.target.value) || 60 }
+                                      [activeNestingFabric]: { ...config, widthInches: e.target.value === '' ? '' as any : parseFloat(e.target.value) }
                                     })}
+                                    onBlur={(e) => {
+                                      const v = parseFloat(e.target.value)
+                                      if (!v || isNaN(v)) {
+                                        setPerFabricConfig({
+                                          ...perFabricConfig,
+                                          [activeNestingFabric]: { ...config, widthInches: 60 }
+                                        })
+                                      }
+                                    }}
                                     className="w-16 px-2 py-1 border rounded text-sm"
                                     min={30}
                                     max={120}
@@ -1504,8 +1513,17 @@ export default function OrderDetailPage() {
                                   value={config.maxBundles}
                                   onChange={(e) => setPerFabricConfig({
                                     ...perFabricConfig,
-                                    [activeNestingFabric]: { ...config, maxBundles: parseInt(e.target.value) || 6 }
+                                    [activeNestingFabric]: { ...config, maxBundles: e.target.value === '' ? '' as any : parseInt(e.target.value) }
                                   })}
+                                  onBlur={(e) => {
+                                    const v = parseInt(e.target.value)
+                                    if (!v || isNaN(v)) {
+                                      setPerFabricConfig({
+                                        ...perFabricConfig,
+                                        [activeNestingFabric]: { ...config, maxBundles: 6 }
+                                      })
+                                    }
+                                  }}
                                   className="w-16 px-2 py-1 border rounded text-sm"
                                   min={1}
                                   max={10}
@@ -1521,8 +1539,17 @@ export default function OrderDetailPage() {
                                     value={config.maxMarkerLengthYards}
                                     onChange={(e) => setPerFabricConfig({
                                       ...perFabricConfig,
-                                      [activeNestingFabric]: { ...config, maxMarkerLengthYards: parseFloat(e.target.value) || 15 }
+                                      [activeNestingFabric]: { ...config, maxMarkerLengthYards: e.target.value === '' ? '' as any : parseFloat(e.target.value) }
                                     })}
+                                    onBlur={(e) => {
+                                      const v = parseFloat(e.target.value)
+                                      if (!v || isNaN(v)) {
+                                        setPerFabricConfig({
+                                          ...perFabricConfig,
+                                          [activeNestingFabric]: { ...config, maxMarkerLengthYards: 15 }
+                                        })
+                                      }
+                                    }}
                                     className={`w-16 px-2 py-1 border rounded text-sm ${config.maxBundles ? 'bg-muted/50 text-muted-foreground' : ''}`}
                                     min={5}
                                     max={30}
@@ -2397,6 +2424,17 @@ export default function OrderDetailPage() {
                     >
                       <XCircle className="mr-2 h-4 w-4" />
                       Stop
+                    </Button>
+                  </div>
+                )}
+
+                {/* Failed state */}
+                {!isRefining && refinementStatus?.status === 'failed' && (
+                  <div className="p-4 bg-red-50 border border-red-200 rounded-lg space-y-2">
+                    <div className="text-sm font-medium text-red-800">Final nesting failed</div>
+                    <div className="text-xs text-red-600">{refinementStatus.message}</div>
+                    <Button variant="outline" size="sm" onClick={() => setRefinementStatus(null)}>
+                      Try Again
                     </Button>
                   </div>
                 )}

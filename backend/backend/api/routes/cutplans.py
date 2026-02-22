@@ -1,3 +1,4 @@
+import logging
 from typing import List, Optional, Dict
 from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
 from fastapi.responses import StreamingResponse
@@ -7,6 +8,8 @@ import os
 import time
 import traceback
 import zipfile
+
+logger = logging.getLogger(__name__)
 
 from ...database import get_db, SessionLocal
 from ...config import settings, resolve_path
@@ -304,8 +307,11 @@ async def approve_cutplan(
     if not cutplan:
         raise HTTPException(status_code=404, detail="Cutplan not found")
 
-    if cutplan.status != "ready":
-        raise HTTPException(status_code=400, detail="Cutplan must be in ready status")
+    if cutplan.status not in ("ready", "approved"):
+        raise HTTPException(status_code=400, detail=f"Cutplan must be in ready or approved status (current: {cutplan.status})")
+
+    if cutplan.status == "approved":
+        return cutplan  # Already approved, idempotent
 
     cutplan = cutplan_service.approve_cutplan(db, cutplan_id)
     return cutplan
@@ -542,7 +548,9 @@ def execute_refinement_job(
             })
         db.commit()
 
-    except Exception as e:
+    except BaseException as e:
+        # BaseException catches pyo3_runtime.PanicException (from jagua-rs/Spyrrow
+        # panics) which does NOT inherit from Exception, only from BaseException.
         traceback.print_exc()
         elapsed = time.time() - _refinement_jobs.get(cutplan_id, {}).get("started_at", time.time())
         _refinement_jobs[cutplan_id] = {
@@ -644,7 +652,23 @@ async def get_refinement_status(
             ))
 
     if not job:
-        # No in-memory job, but might have completed layouts from a previous run
+        # No in-memory job — check for orphaned "refining" state
+        # This happens when the backend reloads (--reload) mid-refinement,
+        # wiping the in-memory _refinement_jobs dict while the DB stays "refining"
+        if cutplan.status == CutplanStatus.refining:
+            cutplan.status = CutplanStatus.approved
+            db.commit()
+            logger.warning(f"Reset orphaned 'refining' cutplan {cutplan_id} back to 'approved'")
+            return RefinementStatusResponse(
+                status="failed",
+                progress=0,
+                message="Refinement was interrupted (server reloaded). Please re-run.",
+                markers_total=len(cutplan_markers),
+                markers_done=len(layouts),
+                layouts=layouts,
+            )
+
+        # Completed layouts from a previous run
         return RefinementStatusResponse(
             status="idle" if not layouts else "completed",
             progress=100 if layouts else 0,

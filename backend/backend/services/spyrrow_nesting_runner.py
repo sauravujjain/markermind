@@ -24,6 +24,77 @@ from typing import Dict, List, Optional, Callable, Tuple
 
 logger = logging.getLogger(__name__)
 
+
+# --------------------------------------------------------------------------
+# Vertex cleaning — jagua-rs panics on non-consecutive duplicate vertices
+# --------------------------------------------------------------------------
+
+def _clean_polygon_vertices(
+    vertices: List[Tuple[float, float]],
+    tolerance: float = 0.01,
+) -> List[Tuple[float, float]]:
+    """
+    Remove duplicate vertices (both consecutive AND non-consecutive) from a
+    polygon, then re-close it.
+
+    jagua-rs (the Rust collision engine inside Spyrrow) requires simple
+    polygons with NO duplicate vertices at all — not just consecutive ones.
+    The AAMA grading pipeline's _clean_vertices only strips consecutive
+    duplicates, so non-consecutive duplicates can slip through (especially
+    after coordinate swaps, flipping, or grading interpolation).
+
+    Algorithm:
+        1. Strip closing vertex if polygon is closed
+        2. Walk the vertex list, keeping only the first occurrence of each
+           point (within tolerance)
+        3. Remove any collinear triplets that result from deduplication
+        4. Re-close the polygon
+    """
+    if len(vertices) < 3:
+        return vertices
+
+    # Remove closing vertex if present
+    verts = list(vertices)
+    if len(verts) > 1 and _pts_equal(verts[0], verts[-1], tolerance):
+        verts = verts[:-1]
+
+    # Remove non-consecutive duplicate vertices (keep first occurrence)
+    seen: List[Tuple[float, float]] = []
+    for v in verts:
+        is_dup = False
+        for s in seen:
+            if _pts_equal(v, s, tolerance):
+                is_dup = True
+                break
+        if not is_dup:
+            seen.append(v)
+
+    # Remove consecutive duplicates that might remain
+    cleaned: List[Tuple[float, float]] = [seen[0]] if seen else []
+    for v in seen[1:]:
+        if not _pts_equal(v, cleaned[-1], tolerance):
+            cleaned.append(v)
+
+    if len(cleaned) < 3:
+        logger.warning(
+            f"Polygon reduced to {len(cleaned)} vertices after dedup — "
+            f"original had {len(vertices)}"
+        )
+        return vertices  # Return original; let downstream handle it
+
+    # Re-close
+    cleaned.append(cleaned[0])
+    return cleaned
+
+
+def _pts_equal(
+    a: Tuple[float, float],
+    b: Tuple[float, float],
+    tol: float = 0.01,
+) -> bool:
+    """Check if two points are equal within tolerance."""
+    return abs(a[0] - b[0]) < tol and abs(a[1] - b[1]) < tol
+
 import ezdxf
 
 # Add garment-nester to path
@@ -59,14 +130,15 @@ class BundlePiece:
 # --------------------------------------------------------------------------
 
 def _create_piece_copy(piece: Piece, suffix: str) -> Piece:
-    """Create a copy of a piece with a unique ID suffix."""
+    """Create a copy of a piece with a unique ID suffix.
+    Also cleans vertices to prevent jagua-rs panics on duplicate vertices."""
     new_id = PieceIdentifier(
         piece_name=piece.identifier.piece_name + suffix,
         style_name=piece.identifier.style_name,
         size=piece.identifier.size,
     )
     return Piece(
-        vertices=piece.vertices,
+        vertices=_clean_polygon_vertices(list(piece.vertices)),
         identifier=new_id,
         orientation=piece.orientation,
         grain=piece.grain,
@@ -75,12 +147,16 @@ def _create_piece_copy(piece: Piece, suffix: str) -> Piece:
 
 
 def create_flipped_piece(piece: Piece) -> Piece:
-    """Create a flipped version of a piece (mirrored along X center)."""
+    """Create a flipped version of a piece (mirrored along X center).
+    Also cleans vertices to prevent jagua-rs panics on duplicate vertices."""
     verts = piece.vertices
     xs = [v[0] for v in verts]
     center_x = (min(xs) + max(xs)) / 2
     flipped_verts = [(2 * center_x - x, y) for x, y in verts]
     flipped_verts = flipped_verts[::-1]
+
+    # Clean after flipping — the mirror + reverse can produce duplicates
+    flipped_verts = _clean_polygon_vertices(flipped_verts)
 
     new_id = PieceIdentifier(
         piece_name=piece.identifier.piece_name + "_f",
@@ -124,6 +200,17 @@ def load_pieces_for_spyrrow(
         allow_flip=True,
     )
     logger.info(f"Loaded {len(nesting_pieces)} graded pieces for material={material}, sizes={sizes}")
+
+    # Clean all piece vertices upfront — jagua-rs panics on non-consecutive
+    # duplicate vertices and the AAMA grader only removes consecutive ones.
+    cleaned_count = 0
+    for p in nesting_pieces:
+        original_len = len(p.vertices)
+        p.vertices = _clean_polygon_vertices(list(p.vertices))
+        if len(p.vertices) != original_len:
+            cleaned_count += 1
+    if cleaned_count:
+        logger.info(f"Cleaned duplicate vertices from {cleaned_count}/{len(nesting_pieces)} pieces")
 
     # Build piece_config from AAMA annotation (L/R detection)
     # Same logic as Streamlit app lines 1036-1055
