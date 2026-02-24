@@ -1,40 +1,15 @@
 'use client'
 
-import { useEffect } from 'react'
-import { useRouter } from 'next/navigation'
-import { useAuthStore } from '@/lib/auth-store'
 import { DashboardLayout } from '@/components/dashboard-layout'
+import { AuthGuard } from '@/components/auth-guard'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { FileText, Package, Scissors, TrendingUp, Plus, Upload, ArrowRight, CheckCircle2, Loader2, Clock } from 'lucide-react'
 import Link from 'next/link'
 
 export default function DashboardPage() {
-  const router = useRouter()
-  const { isAuthenticated, isLoading, checkAuth } = useAuthStore()
-
-  useEffect(() => {
-    checkAuth()
-  }, [checkAuth])
-
-  useEffect(() => {
-    if (!isLoading && !isAuthenticated) {
-      router.push('/login')
-    }
-  }, [isLoading, isAuthenticated, router])
-
-  if (isLoading || !isAuthenticated) {
-    return (
-      <div className="min-h-screen flex items-center justify-center bg-background">
-        <div className="flex flex-col items-center gap-3">
-          <div className="w-10 h-10 border-3 border-primary/30 border-t-primary rounded-full animate-spin"></div>
-          <p className="text-sm text-muted-foreground">Loading...</p>
-        </div>
-      </div>
-    )
-  }
-
   return (
+    <AuthGuard>
     <DashboardLayout>
       <div className="space-y-8">
         {/* Header */}
@@ -256,5 +231,6 @@ export default function DashboardPage() {
         </Card>
       </div>
     </DashboardLayout>
+    </AuthGuard>
   )
 }

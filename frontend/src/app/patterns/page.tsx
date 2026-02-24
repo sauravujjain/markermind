@@ -1,10 +1,9 @@
 'use client'
 
 import { useEffect, useState, useCallback } from 'react'
-import { useRouter } from 'next/navigation'
-import { useAuthStore } from '@/lib/auth-store'
 import { api, Pattern } from '@/lib/api'
 import { DashboardLayout } from '@/components/dashboard-layout'
+import { AuthGuard } from '@/components/auth-guard'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
@@ -14,8 +13,6 @@ import { useDropzone } from 'react-dropzone'
 import { Upload, Package, CheckCircle2, XCircle, FileUp, Loader2, File } from 'lucide-react'
 
 export default function PatternsPage() {
-  const router = useRouter()
-  const { isAuthenticated, isLoading: authLoading, checkAuth } = useAuthStore()
   const { toast } = useToast()
   const [patterns, setPatterns] = useState<Pattern[]>([])
   const [isLoading, setIsLoading] = useState(true)
@@ -25,20 +22,8 @@ export default function PatternsPage() {
   const [rulFile, setRulFile] = useState<File | null>(null)
 
   useEffect(() => {
-    checkAuth()
-  }, [checkAuth])
-
-  useEffect(() => {
-    if (!authLoading && !isAuthenticated) {
-      router.push('/login')
-    }
-  }, [authLoading, isAuthenticated, router])
-
-  useEffect(() => {
-    if (isAuthenticated) {
-      loadPatterns()
-    }
-  }, [isAuthenticated])
+    loadPatterns()
+  }, [])
 
   const loadPatterns = async () => {
     try {
@@ -123,18 +108,8 @@ export default function PatternsPage() {
     }
   }
 
-  if (authLoading || !isAuthenticated) {
-    return (
-      <div className="min-h-screen flex items-center justify-center bg-background">
-        <div className="flex flex-col items-center gap-3">
-          <Loader2 className="w-8 h-8 text-primary animate-spin" />
-          <p className="text-sm text-muted-foreground">Loading...</p>
-        </div>
-      </div>
-    )
-  }
-
   return (
+    <AuthGuard>
     <DashboardLayout>
       <div className="space-y-8">
         <div>
@@ -324,5 +299,6 @@ export default function PatternsPage() {
         </div>
       </div>
     </DashboardLayout>
+    </AuthGuard>
   )
 }

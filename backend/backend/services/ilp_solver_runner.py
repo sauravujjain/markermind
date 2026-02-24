@@ -143,13 +143,48 @@ class CutPlan:
 def generate_all_1_2_bundle_markers(
     sizes: List[str],
     efficiency_lookup: Optional[Dict[str, float]] = None,
+    length_lookup: Optional[Dict[str, float]] = None,
 ) -> List[Marker]:
     """
     Generate all possible 1-bundle and 2-bundle markers.
-    Use efficiencies from lookup where available.
+    Use efficiencies and lengths from lookup where available.
+
+    For markers not in the lookup, length is estimated from the average
+    length-per-bundle of known markers with the same bundle count.
     """
     if efficiency_lookup is None:
         efficiency_lookup = {}
+    if length_lookup is None:
+        length_lookup = {}
+
+    # Compute average length-per-bundle from known markers for fallback estimation
+    avg_length_per_bundle = {1: 0.0, 2: 0.0}
+    for bc in [1, 2]:
+        lengths = []
+        for ratio_str, length_yd in length_lookup.items():
+            if length_yd > 0:
+                parts = ratio_str.split("-")
+                total = sum(int(x) for x in parts)
+                if total == bc:
+                    lengths.append(length_yd)
+        if lengths:
+            avg_length_per_bundle[bc] = sum(lengths) / len(lengths)
+
+    # Global fallback: average across all known markers
+    all_known = [ly for ly in length_lookup.values() if ly > 0]
+    global_avg_per_bundle = 0.0
+    if all_known:
+        total_bundles = 0
+        total_length = 0.0
+        for ratio_str, length_yd in length_lookup.items():
+            if length_yd > 0:
+                parts = ratio_str.split("-")
+                bc = sum(int(x) for x in parts)
+                if bc > 0:
+                    total_bundles += bc
+                    total_length += length_yd
+        if total_bundles > 0:
+            global_avg_per_bundle = total_length / total_bundles
 
     markers = []
 
@@ -158,11 +193,16 @@ def generate_all_1_2_bundle_markers(
         ratio = {s: (1 if s == size else 0) for s in sizes}
         ratio_str = "-".join(str(ratio[s]) for s in sizes)
         eff = efficiency_lookup.get(ratio_str, 0.70)
+        length_yd = length_lookup.get(ratio_str, 0.0)
+        if length_yd <= 0:
+            # Estimate from average 1-bundle length, or global average
+            length_yd = avg_length_per_bundle.get(1, 0.0) or (global_avg_per_bundle * 1)
         markers.append(Marker(
             ratio=ratio,
             ratio_str=ratio_str,
             efficiency=eff,
             bundle_count=1,
+            length_yards=length_yd,
         ))
 
     # 2-bundle markers
@@ -172,11 +212,16 @@ def generate_all_1_2_bundle_markers(
             ratio[size] += 1
         ratio_str = "-".join(str(ratio[s]) for s in sizes)
         eff = efficiency_lookup.get(ratio_str, 0.75)
+        length_yd = length_lookup.get(ratio_str, 0.0)
+        if length_yd <= 0:
+            # Estimate from average 2-bundle length, or global average
+            length_yd = avg_length_per_bundle.get(2, 0.0) or (global_avg_per_bundle * 2)
         markers.append(Marker(
             ratio=ratio,
             ratio_str=ratio_str,
             efficiency=eff,
             bundle_count=2,
+            length_yards=length_yd,
         ))
 
     return markers
@@ -460,7 +505,8 @@ def optimize_cutplan(
 
     # Generate all 1-2 bundle markers for completeness
     efficiency_lookup = {m.ratio_str: m.efficiency for m in marker_objects}
-    small_markers = generate_all_1_2_bundle_markers(sizes, efficiency_lookup)
+    length_lookup = {m.ratio_str: m.length_yards for m in marker_objects}
+    small_markers = generate_all_1_2_bundle_markers(sizes, efficiency_lookup, length_lookup)
 
     # Combine (avoiding duplicates)
     existing_ratios = {m.ratio_str for m in marker_objects}

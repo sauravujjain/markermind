@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, ForeignKey, Integer, Float, Enum as SQLEnum, Text, Boolean
+from sqlalchemy import Column, String, ForeignKey, Integer, Float, Enum as SQLEnum, Text, Boolean, JSON
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 from ..database import Base
@@ -32,6 +32,8 @@ class NestingJob(Base, TimestampMixin):
     max_bundle_count = Column(Integer, default=6)
     top_n_results = Column(Integer, default=10)  # Top N results per bundle count
     full_coverage = Column(Boolean, default=False)  # If True, evaluate ALL ratios (brute force)
+    gpu_scale = Column(Float, default=0.15)  # Rasterization resolution (px/mm). 0.15=fast, 0.3=demo quality
+    selected_sizes = Column(JSON, nullable=True)  # Optional subset of pattern sizes to nest (list of strings)
 
     # Relationships
     order = relationship("Order", back_populates="nesting_jobs")
@@ -51,6 +53,7 @@ class NestingJobResult(Base, TimestampMixin):
     efficiency = Column(Float, nullable=False)  # 0-100%
     length_yards = Column(Float, nullable=False)
     length_mm = Column(Float)
+    svg_preview = Column(Text)  # SVG string of marker layout (vector preview)
 
     # Relationships
     job = relationship("NestingJob", back_populates="results")

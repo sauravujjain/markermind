@@ -63,6 +63,7 @@ class CutplanMarker(Base, TimestampMixin):
     id = Column(UUID(as_uuid=False), primary_key=True, default=generate_uuid)
     cutplan_id = Column(UUID(as_uuid=False), ForeignKey("cutplans.id"), nullable=False)
     marker_id = Column(UUID(as_uuid=False), ForeignKey("marker_bank.id"))
+    marker_label = Column(String(10))  # Stable label: "M1", "M2", etc.
     ratio_str = Column(String(50), nullable=False)  # Denormalized for convenience
     efficiency = Column(Float)
     length_yards = Column(Float)

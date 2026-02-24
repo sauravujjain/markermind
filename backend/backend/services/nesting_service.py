@@ -48,7 +48,9 @@ class NestingService:
         fabric_width_inches: float,
         max_bundle_count: int = 6,
         top_n_results: int = 10,
-        full_coverage: bool = False
+        full_coverage: bool = False,
+        gpu_scale: float = 0.15,
+        selected_sizes: list = None,
     ) -> NestingJob:
         """Create a new nesting job."""
         job = NestingJob(
@@ -58,6 +60,8 @@ class NestingService:
             max_bundle_count=max_bundle_count,
             top_n_results=top_n_results,
             full_coverage=full_coverage,
+            gpu_scale=gpu_scale,
+            selected_sizes=selected_sizes,
         )
         db.add(job)
         db.commit()
@@ -223,10 +227,13 @@ class NestingService:
             dxf_path = resolve_path(pattern.dxf_file_path)
             rul_path = resolve_path(pattern.rul_file_path)
 
-            # Get sizes from pattern - filter out invalid sizes (those with X)
-            sizes = [s for s in pattern.available_sizes if 'X' not in s and s.isdigit()]
+            # Get sizes: use selected_sizes from job if provided, otherwise all pattern sizes
+            if job.selected_sizes:
+                sizes = [s for s in job.selected_sizes if s in pattern.available_sizes]
+            else:
+                sizes = list(pattern.available_sizes)
             if not sizes:
-                raise ValueError("Pattern has no valid numeric sizes")
+                raise ValueError("Pattern has no available sizes")
 
             # Progress wrapper
             def update_progress(progress: int, message: str):
@@ -260,7 +267,8 @@ class NestingService:
                 db.refresh(job)
                 return job.status == "cancelled"
 
-            update_progress(5, f"Starting GPU nesting for {material}...")
+            gpu_scale = job.gpu_scale or 0.15
+            update_progress(5, f"Starting GPU nesting for {material} (scale={gpu_scale} px/mm)...")
 
             # Run GPU nesting with callbacks for preview and incremental results
             nesting_results = run_nesting_for_material(
@@ -271,6 +279,7 @@ class NestingService:
                 fabric_width_inches=job.fabric_width_inches,
                 max_bundle_count=job.max_bundle_count,
                 top_n=job.top_n_results,
+                gpu_scale=gpu_scale,
                 progress_callback=update_progress,
                 preview_callback=update_preview,
                 preview_interval_seconds=0.5,
@@ -280,6 +289,7 @@ class NestingService:
             )
 
             # Results already saved incrementally, now add to marker bank
+            # and update SVG previews (generated at end of nesting)
             for bundle_count, bundle_results in nesting_results.items():
                 for rank, result in enumerate(bundle_results, 1):
                     # Add to marker bank (results already saved to job)
@@ -296,6 +306,16 @@ class NestingService:
                             "job_id": job.id,
                         }
                     )
+
+                    # Update SVG preview on the DB result record
+                    svg_preview = result.get('svg_preview')
+                    if svg_preview:
+                        db_result = db.query(NestingJobResult).filter(
+                            NestingJobResult.nesting_job_id == job.id,
+                            NestingJobResult.ratio_str == result['ratio_str'],
+                        ).first()
+                        if db_result:
+                            db_result.svg_preview = svg_preview
 
             # Mark job complete
             job.status = "completed"

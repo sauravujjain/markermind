@@ -1,14 +1,15 @@
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, status, WebSocket, WebSocketDisconnect, BackgroundTasks
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload, defer
 import asyncio
 import json
 import traceback
 
 from ...database import get_db, SessionLocal
-from ...schemas.nesting import NestingJobCreate, NestingJobResponse, NestingJobResultResponse
+from ...schemas.nesting import NestingJobCreate, NestingJobResponse, NestingJobListResponse, NestingJobResultResponse, TestMarkerRequest, TestMarkerResponse
 from ...models import User, NestingJob, NestingJobResult, MarkerBank, Pattern, Order
 from ...services.nesting_service import NestingService
+from ...config import resolve_path
 from ..deps import get_current_user
 
 router = APIRouter(prefix="/nesting", tags=["nesting"])
@@ -72,6 +73,9 @@ async def create_nesting_job(
     if not pattern.is_parsed:
         raise HTTPException(status_code=400, detail="Pattern must be parsed first")
 
+    # Clamp gpu_scale to safe range (0.05 - 1.0 px/mm)
+    gpu_scale = max(0.05, min(1.0, job_data.gpu_scale))
+
     # Create job
     job = nesting_service.create_job(
         db=db,
@@ -81,6 +85,8 @@ async def create_nesting_job(
         max_bundle_count=job_data.max_bundle_count,
         top_n_results=job_data.top_n_results,
         full_coverage=job_data.full_coverage,
+        gpu_scale=gpu_scale,
+        selected_sizes=job_data.selected_sizes,
     )
 
     # Update order status to pending_nesting
@@ -133,7 +139,9 @@ async def get_nesting_job(
     db: Session = Depends(get_db)
 ):
     """Get nesting job status and results."""
-    job = db.query(NestingJob).join(Pattern).filter(
+    job = db.query(NestingJob).options(
+        joinedload(NestingJob.results)
+    ).join(Pattern).filter(
         NestingJob.id == job_id,
         Pattern.customer_id == current_user.customer_id
     ).first()
@@ -142,7 +150,7 @@ async def get_nesting_job(
     return job
 
 
-@router.get("/jobs", response_model=List[NestingJobResponse])
+@router.get("/jobs", response_model=List[NestingJobListResponse])
 async def list_nesting_jobs(
     order_id: Optional[str] = None,
     status: Optional[str] = None,
@@ -151,8 +159,10 @@ async def list_nesting_jobs(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """List nesting jobs."""
-    query = db.query(NestingJob).join(Pattern).filter(
+    """List nesting jobs. SVG previews are excluded for performance."""
+    query = db.query(NestingJob).options(
+        joinedload(NestingJob.results).defer(NestingJobResult.svg_preview)
+    ).join(Pattern).filter(
         Pattern.customer_id == current_user.customer_id
     )
     if order_id:
@@ -161,7 +171,14 @@ async def list_nesting_jobs(
         query = query.filter(NestingJob.status == status)
 
     jobs = query.order_by(NestingJob.created_at.desc()).offset(skip).limit(limit).all()
-    return jobs
+    # De-duplicate from joinedload cartesian product
+    seen = set()
+    unique_jobs = []
+    for j in jobs:
+        if j.id not in seen:
+            seen.add(j.id)
+            unique_jobs.append(j)
+    return unique_jobs
 
 
 @router.delete("/jobs/{job_id}")
@@ -303,6 +320,115 @@ async def get_job_preview(
         "preview_base64": preview['preview_base64'],
         "timestamp": preview['timestamp'],
     }
+
+
+@router.post("/test-marker", response_model=TestMarkerResponse)
+async def test_marker(
+    request: TestMarkerRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Run a quick single-ratio CPU (Spyrrow) nest for diagnostic purposes. No DB writes."""
+    import time as _time
+    from ...services.spyrrow_nesting_runner import (
+        load_pieces_for_spyrrow, nest_single_marker, export_marker_svg,
+    )
+
+    # Verify pattern exists and belongs to customer
+    pattern = db.query(Pattern).filter(
+        Pattern.id == request.pattern_id,
+        Pattern.customer_id == current_user.customer_id
+    ).first()
+    if not pattern:
+        raise HTTPException(status_code=404, detail="Pattern not found")
+
+    if not pattern.is_parsed:
+        raise HTTPException(status_code=400, detail="Pattern must be parsed first")
+
+    if not pattern.dxf_file_path or not pattern.rul_file_path:
+        raise HTTPException(status_code=400, detail="Pattern DXF or RUL file not available")
+
+    # Validate size_bundles
+    total_bundles = sum(request.size_bundles.values())
+    if total_bundles < 1 or total_bundles > 8:
+        raise HTTPException(status_code=400, detail="Total bundles must be between 1 and 8")
+
+    # Validate requested sizes exist in pattern
+    valid_sizes = set(pattern.available_sizes)
+    for size in request.size_bundles:
+        if size not in valid_sizes:
+            raise HTTPException(status_code=400, detail=f"Size '{size}' not available in pattern")
+
+    # Validate parameters
+    time_limit = max(1.0, min(60.0, request.time_limit))
+    piece_buffer_mm = max(0.0, min(10.0, request.piece_buffer_mm))
+    edge_buffer_mm = max(0.0, min(20.0, request.edge_buffer_mm))
+    orientation = request.orientation if request.orientation in ("free", "nap_one_way") else "free"
+
+    # Determine material — use request material or first available
+    if not pattern.available_materials:
+        raise HTTPException(status_code=400, detail="Pattern has no materials")
+    if request.material:
+        if request.material.upper() not in [m.upper() for m in pattern.available_materials]:
+            raise HTTPException(status_code=400, detail=f"Material '{request.material}' not available in pattern")
+        material = request.material.upper()
+    else:
+        material = pattern.available_materials[0]
+
+    # Resolve file paths
+    dxf_path = resolve_path(pattern.dxf_file_path)
+    rul_path = resolve_path(pattern.rul_file_path)
+
+    # Get full sizes list for ratio_str ordering (all sizes in pattern order)
+    sizes = list(pattern.available_sizes)
+
+    # Determine allowed rotations based on orientation
+    allowed_rotations = [0, 180] if orientation == "free" else [0]
+
+    fabric_width_mm = request.fabric_width_inches * 25.4
+
+    try:
+        t0 = _time.time()
+
+        # Load and grade pieces
+        nesting_pieces, piece_config = load_pieces_for_spyrrow(
+            dxf_path, rul_path, material, sizes, allowed_rotations=allowed_rotations,
+        )
+
+        # Run Spyrrow solver for this single ratio
+        solution_data = nest_single_marker(
+            ratio=request.size_bundles,
+            nesting_pieces=nesting_pieces,
+            piece_config=piece_config,
+            fabric_width_mm=fabric_width_mm,
+            piece_buffer_mm=piece_buffer_mm,
+            edge_buffer_mm=edge_buffer_mm,
+            time_limit=time_limit,
+        )
+
+        computation_time_ms = (_time.time() - t0) * 1000
+
+        # Generate SVG preview
+        svg_preview = export_marker_svg(solution_data, fabric_width_mm)
+
+        # Build ratio_str in canonical order (matching full sizes list)
+        ratio_str = '-'.join(str(request.size_bundles.get(s, 0)) for s in sizes)
+
+        piece_count = len(solution_data.get('bundle_pieces', []))
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Nesting failed: {str(e)}")
+
+    return TestMarkerResponse(
+        efficiency=solution_data['utilization'],
+        length_mm=solution_data['strip_length_mm'],
+        length_yards=solution_data['length_yards'],
+        piece_count=piece_count,
+        bundle_count=total_bundles,
+        ratio_str=ratio_str,
+        computation_time_ms=computation_time_ms,
+        svg_preview=svg_preview,
+    )
 
 
 @router.get("/markers", response_model=List[dict])

@@ -17,7 +17,7 @@ class Settings(BaseSettings):
 
     # App
     debug: bool = True
-    cors_origins: List[str] = ["http://localhost:3000"]
+    cors_origins: List[str] = ["*"]  # Accepts any origin; restrict in production via .env
 
     # File Upload
     upload_dir: str = "./uploads"

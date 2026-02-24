@@ -247,6 +247,67 @@ def parse_annotation(annotation: Optional[str]) -> PieceQuantity:
     return result
 
 
+def parse_quantity_field(quantity_str: Optional[str]) -> Optional[PieceQuantity]:
+    """
+    Parse the DXF 'Quantity:' metadata field (separate from annotation).
+
+    Supported formats:
+    - "1,1" -> has_left_right=True, left_qty=1, right_qty=1, total=2
+    - "2,2" -> has_left_right=True, left_qty=2, right_qty=2, total=4
+    - "2"   -> total=2, no L/R
+    - "3"   -> total=3, no L/R
+    - "1"   -> total=1, no L/R (default, returns None to indicate no override)
+
+    The "N,M" format means N left copies and M right copies (L/R pair).
+
+    Args:
+        quantity_str: The raw quantity string from DXF TEXT metadata, or None
+
+    Returns:
+        PieceQuantity if the field provides useful info beyond the default,
+        or None if the field is absent, empty, or just "1" (no override needed).
+    """
+    if not quantity_str:
+        return None
+
+    quantity_str = quantity_str.strip()
+    if not quantity_str:
+        return None
+
+    # Pattern: "N,M" — L/R pair with N left, M right
+    comma_match = re.match(r'^(\d+)\s*,\s*(\d+)$', quantity_str)
+    if comma_match:
+        left_qty = int(comma_match.group(1))
+        right_qty = int(comma_match.group(2))
+        total = left_qty + right_qty
+        if total <= 1:
+            return None  # No override needed
+        return PieceQuantity(
+            total=total,
+            has_left_right=True,
+            left_qty=left_qty,
+            right_qty=right_qty,
+            raw=quantity_str,
+        )
+
+    # Pattern: plain integer "N"
+    int_match = re.match(r'^(\d+)$', quantity_str)
+    if int_match:
+        total = int(int_match.group(1))
+        if total <= 1:
+            return None  # No override needed
+        return PieceQuantity(
+            total=total,
+            has_left_right=False,
+            left_qty=0,
+            right_qty=0,
+            raw=quantity_str,
+        )
+
+    logger.debug(f"Unknown quantity format: '{quantity_str}'")
+    return None
+
+
 def detect_lr_type(piece_name: str, quantity: PieceQuantity) -> LRType:
     """
     Determine how L/R is handled for this piece.
@@ -564,7 +625,6 @@ class AAMADXFParser:
             raise FileNotFoundError(f"DXF file not found: {dxf_path}")
 
         self.doc = ezdxf.readfile(str(self.dxf_path))
-        self._global_grade_point_counter = 0  # Track global rule IDs
 
     def parse(self) -> List[AAMAPiece]:
         """
@@ -573,7 +633,6 @@ class AAMADXFParser:
         Returns:
             List of AAMAPiece objects
         """
-        self._global_grade_point_counter = 0
         pieces = []
 
         # Iterate through all blocks
@@ -586,9 +645,10 @@ class AAMADXFParser:
             if piece is not None:
                 pieces.append(piece)
 
+        total_gp = sum(p.num_grade_points for p in pieces)
         logger.info(
             f"Parsed {len(pieces)} pieces with "
-            f"{self._global_grade_point_counter} total grade points "
+            f"{total_gp} boundary grade points "
             f"from {self.dxf_path.name}"
         )
 
@@ -604,13 +664,12 @@ class AAMADXFParser:
             logger.debug(f"Skipping block {block_name}: no valid boundary")
             return None
 
-        # Extract grade points (Layer 2)
-        grade_point_coords = self._extract_grade_points(block)
-
-        # Match grade points to vertices and assign rule IDs
-        grade_points = self._match_grade_points_to_vertices(
-            vertices, grade_point_coords
-        )
+        # Extract boundary grade points using entity-order + explicit rule IDs.
+        # This walks the block entities in order, tracking which geometry layer
+        # is the "current parent".  Grade points (Layer 2 turn points and
+        # Layer 3 curve points) that follow the Layer 1 boundary POLYLINE are
+        # boundary grade points; those following Layer 8/14 geometry are not.
+        grade_points = self._extract_boundary_grade_points(block, vertices)
 
         # Extract metadata from TEXT entities
         metadata = self._extract_piece_metadata(block)
@@ -632,6 +691,24 @@ class AAMADXFParser:
         # Parse annotation to extract quantity and material info
         annotation_str = metadata.get('annotation')
         parsed_qty = parse_annotation(annotation_str)
+
+        # Apply Quantity: metadata field as override when annotation parsing
+        # didn't detect L/R or a higher quantity.  The DXF TEXT "Quantity: 1,1"
+        # means 1 left + 1 right (L/R pair), "Quantity: 2" means 2 copies, etc.
+        qty_field = metadata.get('quantity')
+        if qty_field:
+            qty_override = parse_quantity_field(qty_field)
+            if qty_override is not None:
+                # Override if annotation gave us defaults (total=1, no L/R)
+                if not parsed_qty.has_left_right and parsed_qty.total <= 1:
+                    # Preserve material from annotation if available
+                    qty_override.material = parsed_qty.material or qty_override.material
+                    qty_override.raw = f"{annotation_str} [qty:{qty_field}]" if annotation_str else qty_field
+                    parsed_qty = qty_override
+                    logger.debug(
+                        f"Piece '{piece_name}': quantity overridden by Quantity field "
+                        f"'{qty_field}' → total={parsed_qty.total}, L/R={parsed_qty.has_left_right}"
+                    )
 
         # Use material from metadata, falling back to annotation-derived material
         material = metadata.get('material') or parsed_qty.material
@@ -684,56 +761,131 @@ class AAMADXFParser:
 
         return vertices
 
-    def _extract_grade_points(self, block) -> List[Tuple[float, float]]:
-        """Extract POINT entities from Layer 2 within a block."""
-        points = []
+    # Layers whose geometry (POLYLINE / LINE) defines gradeable features.
+    # Grade points (Layer 2/3) appearing AFTER one of these geometries
+    # belong to that feature.
+    _GEOMETRY_LAYERS = {'1', '8', '14'}
 
-        for entity in block:
-            if entity.dxftype() != 'POINT':
-                continue
+    # Grade point POINT layers (turn points = 2, curve points = 3).
+    _GRADE_POINT_LAYERS = {'2', '3'}
 
-            layer = entity.dxf.layer if hasattr(entity.dxf, 'layer') else ''
-            if layer != '2':
-                continue
+    # Tolerance for matching a grade point coordinate to a boundary vertex.
+    TOLERANCE = 0.01
 
-            try:
-                x = entity.dxf.location.x
-                y = entity.dxf.location.y
-                points.append((x, y))
-            except Exception as e:
-                logger.debug(f"Error extracting point: {e}")
-                continue
+    @staticmethod
+    def _parse_rule_id_text(text: str) -> Optional[int]:
+        """Parse a rule ID from a Layer 2/3 TEXT entity like '# 315'."""
+        m = re.match(r'#\s*(\d+)', text.strip())
+        return int(m.group(1)) if m else None
 
-        return points
-
-    def _match_grade_points_to_vertices(
+    def _extract_boundary_grade_points(
         self,
-        vertices: List[Tuple[float, float]],
-        grade_point_coords: List[Tuple[float, float]]
+        block,
+        boundary_vertices: List[Tuple[float, float]],
     ) -> List[GradePoint]:
         """
-        Match grade point coordinates to vertex indices.
+        Extract grade points that belong to the boundary (Layer 1).
 
-        Grade points are POINT entities whose coordinates match
-        a VERTEX coordinate within tolerance. Each grade point gets
-        a globally unique rule ID.
+        Uses the AAMA DXF entity ordering convention: within each block,
+        geometry entities (POLYLINE/LINE on Layers 1, 8, 14) are followed
+        immediately by their associated grade point POINT+TEXT pairs on
+        Layers 2 and 3.  This means we can determine which feature a grade
+        point belongs to simply by tracking which geometry entity precedes
+        it — no distance heuristics needed.
+
+        Rule IDs are read from the paired TEXT entity (e.g. "# 315")
+        rather than relying on a fragile global sequential counter.
+
+        Layer 2 = turn points (sharp corners).
+        Layer 3 = curve points (smooth curves).
+        Both are valid boundary grade points when they follow Layer 1
+        geometry.
         """
-        grade_points = []
+        # -- Pass 1: collect all entities with types and layers ----------
+        entities = []
+        for entity in block:
+            try:
+                layer = entity.dxf.layer if hasattr(entity.dxf, 'layer') else ''
+                etype = entity.dxftype()
+                entities.append((entity, etype, layer))
+            except Exception:
+                continue
 
-        for gp_x, gp_y in grade_point_coords:
-            # Find matching vertex
-            for idx, (vx, vy) in enumerate(vertices):
-                if (abs(gp_x - vx) < self.TOLERANCE and
-                    abs(gp_y - vy) < self.TOLERANCE):
+        # -- Pass 2: walk in order, track current parent geometry layer ---
+        # Before any geometry is seen, we are in "no parent" state.
+        current_parent_layer: Optional[str] = None
+        # Pending POINT waiting for its paired TEXT with the rule ID.
+        pending_point: Optional[Tuple[float, float]] = None
 
-                    self._global_grade_point_counter += 1
-                    grade_points.append(GradePoint(
-                        vertex_index=idx,
-                        x=vx,
-                        y=vy,
-                        rule_id=self._global_grade_point_counter
-                    ))
-                    break
+        grade_points: List[GradePoint] = []
+        claimed_vertices: set = set()
+
+        for entity, etype, layer in entities:
+            # -- Geometry entity: update current parent --
+            if layer in self._GEOMETRY_LAYERS and etype in (
+                'POLYLINE', 'LWPOLYLINE', 'LINE',
+            ):
+                current_parent_layer = layer
+                pending_point = None  # reset
+                continue
+
+            # -- Grade point POINT entity --
+            if etype == 'POINT' and layer in self._GRADE_POINT_LAYERS:
+                if current_parent_layer != '1':
+                    # Not a boundary grade point — skip
+                    pending_point = None
+                    continue
+                try:
+                    pending_point = (
+                        entity.dxf.location.x, entity.dxf.location.y
+                    )
+                except Exception:
+                    pending_point = None
+                continue
+
+            # -- Grade point TEXT entity (paired with preceding POINT) --
+            if etype in ('TEXT', 'MTEXT') and layer in self._GRADE_POINT_LAYERS:
+                if pending_point is None:
+                    continue
+                # Extract rule ID from text like "# 315"
+                try:
+                    text = (
+                        entity.dxf.text.strip()
+                        if etype == 'TEXT'
+                        else entity.text.strip()
+                    )
+                except Exception:
+                    pending_point = None
+                    continue
+
+                rule_id = self._parse_rule_id_text(text)
+                if rule_id is None:
+                    pending_point = None
+                    continue
+
+                # Match this grade point to the closest boundary vertex
+                gp_x, gp_y = pending_point
+                best_idx: Optional[int] = None
+                best_dist = float('inf')
+                for idx, (vx, vy) in enumerate(boundary_vertices):
+                    d = abs(gp_x - vx) + abs(gp_y - vy)  # Manhattan
+                    if d < best_dist:
+                        best_dist = d
+                        best_idx = idx
+
+                if best_idx is not None and best_dist < self.TOLERANCE * 2:
+                    if best_idx not in claimed_vertices:
+                        grade_points.append(GradePoint(
+                            vertex_index=best_idx,
+                            x=boundary_vertices[best_idx][0],
+                            y=boundary_vertices[best_idx][1],
+                            rule_id=rule_id,
+                        ))
+                        claimed_vertices.add(best_idx)
+                    # else: vertex already has a grade point — skip duplicate
+
+                pending_point = None
+                continue
 
         # Sort by vertex index for consistent ordering
         grade_points.sort(key=lambda gp: gp.vertex_index)
@@ -939,19 +1091,26 @@ class AAMAGrader:
         # Pre-compute cumulative distances along boundary
         cumulative_distances = self._calculate_cumulative_distances(vertices)
 
-        # Build lookup for grade point indices and their deltas
-        gp_indices = sorted([gp.vertex_index for gp in grade_points])
+        # Build lookup for grade point indices and their deltas.
+        # IMPORTANT: When multiple grade points match the same vertex (due to
+        # loose tolerance matching), keep only the FIRST match.  The first
+        # match is the tightest-tolerance hit and therefore most likely to be
+        # the correct rule for that vertex.  Overwriting with later (looser)
+        # matches causes wild delta jumps → jagged graded outlines.
         gp_deltas = {}  # vertex_index -> (dx, dy)
 
         size_index = self.rules.header.size_list.index(target_size)
 
         for gp in grade_points:
+            if gp.vertex_index in gp_deltas:
+                continue  # Already have a delta for this vertex — keep first
             if gp.rule_id in self.rules.rules:
                 delta = self.rules.rules[gp.rule_id].get_delta(size_index)
                 gp_deltas[gp.vertex_index] = delta
             else:
-                # Rule not found, use zero delta
                 gp_deltas[gp.vertex_index] = (0.0, 0.0)
+
+        gp_indices = sorted(gp_deltas.keys())
 
         # Apply deltas to each vertex
         new_vertices = []
@@ -1139,6 +1298,15 @@ def load_aama_pattern(
     rul_parser = AAMARuleParser(rul_path)
     rules = rul_parser.parse()
 
+    # Post-parse validation
+    total_rul_rules = rules.num_rules
+    boundary_gp_count = sum(p.num_grade_points for p in pieces)
+
+    logger.info(
+        f"Grading: {boundary_gp_count} boundary grade points across "
+        f"{len(pieces)} pieces, {total_rul_rules} RUL rules"
+    )
+
     return pieces, rules
 
 
@@ -1194,11 +1362,9 @@ def grade_to_nesting_pieces(
         graded = grader.grade(target_size)
 
         for gp in graded:
-            # Convert vertices to mm
-            # AAMA DXF files use a different coordinate convention than standard DXF
-            # Swap (x, y) → (y, x) to transpose for proper strip packing orientation
-            # This ensures pieces extend horizontally (along X) in the nesting visualization
-            vertices_mm = [(y * to_mm, x * to_mm) for x, y in gp.vertices]
+            # Convert vertices to mm (no coordinate swap — grain runs along
+            # DXF X which maps directly to nesting X / strip length)
+            vertices_mm = [(x * to_mm, y * to_mm) for x, y in gp.vertices]
 
             # Clean vertices (remove consecutive duplicates)
             vertices_mm = _clean_vertices(vertices_mm)
@@ -1235,17 +1401,16 @@ def grade_to_nesting_pieces(
                 allow_flip=allow_flip
             )
 
-            # Create grain constraint
-            # Also swap grain line coordinates to match the vertex swap
+            # Create grain constraint (no swap needed)
             grain = GrainConstraint(direction=GrainDirection.LENGTHWISE)
             if gp.grain_line:
                 grain.grain_line_start = (
-                    gp.grain_line[0][1] * to_mm,  # Swapped: y becomes x
-                    gp.grain_line[0][0] * to_mm   # Swapped: x becomes y
+                    gp.grain_line[0][0] * to_mm,
+                    gp.grain_line[0][1] * to_mm,
                 )
                 grain.grain_line_end = (
-                    gp.grain_line[1][1] * to_mm,  # Swapped: y becomes x
-                    gp.grain_line[1][0] * to_mm   # Swapped: x becomes y
+                    gp.grain_line[1][0] * to_mm,
+                    gp.grain_line[1][1] * to_mm,
                 )
 
             try:
@@ -1540,10 +1705,9 @@ def grade_material_to_nesting_pieces(
                 None
             )
 
-            # Convert vertices to mm
-            # AAMA DXF files use a different coordinate convention than standard DXF
-            # Swap (x, y) → (y, x) to transpose for proper strip packing orientation
-            vertices_mm = [(y * to_mm, x * to_mm) for x, y in gp.vertices]
+            # Convert vertices to mm (no coordinate swap — grain runs along
+            # DXF X which maps directly to nesting X / strip length)
+            vertices_mm = [(x * to_mm, y * to_mm) for x, y in gp.vertices]
             vertices_mm = _clean_vertices(vertices_mm)
 
             if len(vertices_mm) < 3:
@@ -1584,17 +1748,16 @@ def grade_material_to_nesting_pieces(
                 allow_flip=piece_allow_flip
             )
 
-            # Create grain constraint
-            # Also swap grain line coordinates to match the vertex swap
+            # Create grain constraint (no swap needed)
             grain = GrainConstraint(direction=GrainDirection.LENGTHWISE)
             if gp.grain_line:
                 grain.grain_line_start = (
-                    gp.grain_line[0][1] * to_mm,  # Swapped: y becomes x
-                    gp.grain_line[0][0] * to_mm   # Swapped: x becomes y
+                    gp.grain_line[0][0] * to_mm,
+                    gp.grain_line[0][1] * to_mm,
                 )
                 grain.grain_line_end = (
-                    gp.grain_line[1][1] * to_mm,  # Swapped: y becomes x
-                    gp.grain_line[1][0] * to_mm   # Swapped: x becomes y
+                    gp.grain_line[1][0] * to_mm,
+                    gp.grain_line[1][1] * to_mm,
                 )
 
             try:

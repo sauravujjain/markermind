@@ -27,6 +27,7 @@ class CutplanMarkerResponse(BaseModel):
     id: str
     cutplan_id: str
     marker_id: Optional[str]
+    marker_label: Optional[str] = None
     ratio_str: str
     efficiency: Optional[float]
     length_yards: Optional[float]
@@ -83,6 +84,7 @@ class MarkerLayoutResponse(BaseModel):
     """Response for a single refined marker layout."""
     id: str
     cutplan_marker_id: str
+    marker_label: Optional[str] = None
     ratio_str: str
     utilization: float
     strip_length_mm: float

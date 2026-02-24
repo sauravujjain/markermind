@@ -260,6 +260,13 @@ class ApiClient {
     return this.request<{ message: string; status: string }>(`/nesting/jobs/${jobId}/cancel`, { method: 'POST' })
   }
 
+  async testMarker(request: TestMarkerRequest): Promise<TestMarkerResponse> {
+    return this.request<TestMarkerResponse>('/nesting/test-marker', {
+      method: 'POST',
+      body: JSON.stringify(request),
+    })
+  }
+
   async getMarkers(patternId?: string, fabricId?: string) {
     const params = new URLSearchParams()
     if (patternId) params.set('pattern_id', patternId)
@@ -329,6 +336,19 @@ class ApiClient {
     if (token) headers['Authorization'] = `Bearer ${token}`
 
     const response = await fetch(`${API_URL}/cutplans/${cutplanId}/download-markers`, { headers })
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}))
+      throw new Error(error.detail || 'Download failed')
+    }
+    return response.blob()
+  }
+
+  async downloadOrderExcel(orderId: string): Promise<Blob> {
+    const token = this.getToken()
+    const headers: Record<string, string> = {}
+    if (token) headers['Authorization'] = `Bearer ${token}`
+
+    const response = await fetch(`${API_URL}/export/order/${orderId}/excel`, { headers })
     if (!response.ok) {
       const error = await response.json().catch(() => ({}))
       throw new Error(error.detail || 'Download failed')
@@ -461,6 +481,7 @@ export interface NestingJobCreate {
   max_bundle_count?: number
   top_n_results?: number
   full_coverage?: boolean
+  gpu_scale?: number  // px/mm resolution. 0.15=fast (default), 0.3=demo quality
 }
 
 export interface NestingJob {
@@ -475,6 +496,7 @@ export interface NestingJob {
   max_bundle_count: number
   top_n_results: number
   full_coverage: boolean
+  gpu_scale: number
   results: NestingJobResult[]
   created_at: string
   updated_at: string
@@ -489,6 +511,7 @@ export interface NestingJobResult {
   efficiency: number
   length_yards: number
   length_mm?: number
+  svg_preview?: string
 }
 
 export interface Marker {
@@ -499,6 +522,28 @@ export interface Marker {
   efficiency: number
   length_yards: number
   source_type: string
+}
+
+export interface TestMarkerRequest {
+  pattern_id: string
+  fabric_width_inches: number
+  size_bundles: Record<string, number>
+  material?: string           // e.g., "SHELL" — defaults to first available
+  time_limit?: number         // seconds (1-60, default 10)
+  piece_buffer_mm?: number    // gap between pieces in mm (0-10, default 2)
+  edge_buffer_mm?: number     // gap from edge in mm (0-20, default 5)
+  orientation?: string        // "free" or "nap_one_way" (default "free")
+}
+
+export interface TestMarkerResponse {
+  efficiency: number
+  length_mm: number
+  length_yards: number
+  piece_count: number
+  bundle_count: number
+  ratio_str: string
+  computation_time_ms: number
+  svg_preview: string | null
 }
 
 export interface CutplanOptimizeRequest {
@@ -536,6 +581,7 @@ export interface CutplanMarker {
   id: string
   cutplan_id: string
   marker_id?: string
+  marker_label?: string
   ratio_str: string
   efficiency?: number
   length_yards?: number
@@ -599,6 +645,7 @@ export interface RefinementConfig {
 export interface MarkerLayout {
   id: string
   cutplan_marker_id: string
+  marker_label?: string
   ratio_str: string
   utilization: number
   strip_length_mm: number

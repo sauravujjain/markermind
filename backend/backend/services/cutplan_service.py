@@ -78,8 +78,23 @@ class CutplanService:
         return flat_demand
 
     def get_order_sizes(self, db: Session, order_id: str, color_code: Optional[str] = None) -> List[str]:
-        """Get list of sizes in the order, sorted."""
+        """Get list of sizes in the order, in canonical pattern order."""
         demand = self.get_flat_demand(db, order_id, color_code=color_code)
+        demand_sizes = set(demand.keys())
+
+        # Try to use the pattern's available_sizes for canonical ordering
+        order = db.query(Order).filter(Order.id == order_id).first()
+        if order and order.pattern_id:
+            pattern = db.query(Pattern).filter(Pattern.id == order.pattern_id).first()
+            if pattern and pattern.available_sizes:
+                # Return sizes in pattern order, filtered to those in demand
+                ordered = [s for s in pattern.available_sizes if s in demand_sizes]
+                # Append any demand sizes not in pattern (shouldn't happen, but safe)
+                for s in sorted(demand_sizes):
+                    if s not in ordered:
+                        ordered.append(s)
+                return ordered
+
         return sorted(demand.keys())
 
     def get_available_markers(
@@ -333,6 +348,9 @@ class CutplanService:
         if getattr(cost_config, 'prep_top_layer_enabled', True):
             prep_cost_per_m += getattr(cost_config, 'prep_top_layer_cost_per_m', 0.05)
 
+        # Build marker_bank lookup: ratio_str -> MarkerBank.id
+        marker_bank_lookup = {m.ratio_str: m.id for m in markers}
+
         # Track cutplans created incrementally
         cutplans = []
         completed_strategies = 0
@@ -348,9 +366,9 @@ class CutplanService:
                 solver_type="single_color",
             )
 
-            # Save markers
+            # Save markers with stable labels and MarkerBank links
             selected_markers = option.get("markers", [])
-            self.save_cutplan_markers(db, cutplan, selected_markers)
+            self.save_cutplan_markers(db, cutplan, selected_markers, marker_bank_lookup=marker_bank_lookup)
 
             # Calculate and save costs
             costs = calculate_cutplan_costs(
@@ -451,13 +469,25 @@ class CutplanService:
         self,
         db: Session,
         cutplan: Cutplan,
-        selected_markers: List[Dict]
+        selected_markers: List[Dict],
+        marker_bank_lookup: Optional[Dict[str, str]] = None,
     ):
-        """Save selected markers to cutplan."""
-        for marker_data in selected_markers:
+        """Save selected markers to cutplan with stable labels.
+
+        Args:
+            marker_bank_lookup: Optional dict of ratio_str -> MarkerBank.id
+                                for linking cutplan markers to their GPU source.
+        """
+        for idx, marker_data in enumerate(selected_markers):
+            label = f"M{idx + 1}"
+            marker_id = marker_data.get("marker_id")
+            if not marker_id and marker_bank_lookup:
+                marker_id = marker_bank_lookup.get(marker_data["ratio_str"])
+
             cm = CutplanMarker(
                 cutplan_id=cutplan.id,
-                marker_id=marker_data.get("marker_id"),
+                marker_id=marker_id,
+                marker_label=label,
                 ratio_str=marker_data["ratio_str"],
                 efficiency=marker_data.get("efficiency"),
                 length_yards=marker_data.get("length_yards"),
