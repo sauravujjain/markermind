@@ -477,16 +477,23 @@ def _recalculate_cutplan_costs(db: Session, cutplan: Cutplan, customer_id: str):
         total_cuts += marker_cuts
 
         # Cutting cost: perimeter * cuts * rate
-        ratios = [int(x) for x in marker.ratio_str.split("-")]
-        if perimeter_by_size and ordered_sizes and len(ordered_sizes) == len(ratios):
-            marker_perimeter_cm = 0.0
-            for i, count in enumerate(ratios):
-                if count > 0:
-                    size = ordered_sizes[i]
-                    marker_perimeter_cm += perimeter_by_size.get(size, AVG_PERIMETER_PER_BUNDLE_CM) * count
-        else:
-            bundle_count = sum(ratios)
-            marker_perimeter_cm = bundle_count * AVG_PERIMETER_PER_BUNDLE_CM
+        # Prefer marker-level perimeter (from CPU refinement or GPU nesting)
+        marker_perimeter_cm = None
+        if marker.marker and marker.marker.extra_data:
+            marker_perimeter_cm = marker.marker.extra_data.get("perimeter_cm")
+
+        if not marker_perimeter_cm or marker_perimeter_cm <= 0:
+            # Fallback to ratio × perimeter_by_size approach
+            ratios = [int(x) for x in marker.ratio_str.split("-")]
+            if perimeter_by_size and ordered_sizes and len(ordered_sizes) == len(ratios):
+                marker_perimeter_cm = 0.0
+                for i, count in enumerate(ratios):
+                    if count > 0:
+                        size = ordered_sizes[i]
+                        marker_perimeter_cm += perimeter_by_size.get(size, AVG_PERIMETER_PER_BUNDLE_CM) * count
+            else:
+                bundle_count = sum(ratios)
+                marker_perimeter_cm = bundle_count * AVG_PERIMETER_PER_BUNDLE_CM
 
         cutting_cost += marker_perimeter_cm * marker_cuts * cutting_cost_per_cm
 
@@ -567,7 +574,7 @@ def execute_refinement_job(
         dxf_path = resolve_path(pattern.dxf_file_path)
         rul_path = resolve_path(pattern.rul_file_path) if pattern.rul_file_path else None
 
-        if not rul_path:
+        if not rul_path and pattern.file_type != "dxf_only":
             raise ValueError("Pattern RUL file required for graded nesting")
 
         # Determine material and fabric width from order lines + nesting job
@@ -668,6 +675,18 @@ def execute_refinement_job(
                 rotation_mode=rotation_mode,
             )
             db.add(layout)
+
+            # Update MarkerBank.extra_data with CPU-computed perimeter_cm
+            cpu_perimeter_cm = result.get('perimeter_cm', 0)
+            if cpu_perimeter_cm > 0 and marker_record.marker_id:
+                marker_bank = db.query(MarkerBank).filter(
+                    MarkerBank.id == marker_record.marker_id
+                ).first()
+                if marker_bank:
+                    extra = marker_bank.extra_data or {}
+                    extra["perimeter_cm"] = cpu_perimeter_cm
+                    marker_bank.extra_data = extra
+
             db.commit()
 
         def cancel_cb():
@@ -700,10 +719,11 @@ def execute_refinement_job(
         else:
             cutplan.status = CutplanStatus.refined
 
-            # Re-load cutplan with markers+layouts for cost recalculation
+            # Re-load cutplan with markers+layouts+marker_bank for cost recalculation
             db.expire_all()
             cutplan = db.query(Cutplan).options(
                 joinedload(Cutplan.markers).joinedload(CutplanMarker.layout),
+                joinedload(Cutplan.markers).joinedload(CutplanMarker.marker),
                 joinedload(Cutplan.order),
             ).filter(Cutplan.id == cutplan_id).first()
             cutplan.status = CutplanStatus.refined

@@ -153,12 +153,13 @@ class ApiClient {
     return this.request<Pattern>(`/patterns/${id}`)
   }
 
-  async uploadPattern(name: string, fileType: string, dxfFile: File, rulFile?: File) {
+  async uploadPattern(name: string, fileType: string, dxfFile: File, rulFile?: File, sizeNames?: string) {
     const formData = new FormData()
     formData.append('name', name)
     formData.append('file_type', fileType)
     formData.append('dxf_file', dxfFile)
     if (rulFile) formData.append('rul_file', rulFile)
+    if (sizeNames) formData.append('size_names', sizeNames)
 
     const token = this.getToken()
     const response = await fetch(`${API_URL}/patterns/upload`, {

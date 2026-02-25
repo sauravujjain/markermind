@@ -46,6 +46,7 @@ class Marker:
     efficiency: float          # 0.0 - 1.0
     bundle_count: int          # total bundles in marker
     length_yards: float = 0.0  # estimated length in yards
+    perimeter_cm: float = 0.0  # total piece perimeter in cm (computed post-nesting)
 
     def produces(self, plies: int, sizes: List[str]) -> Dict[str, int]:
         """Calculate garments produced for given plies."""
@@ -132,6 +133,7 @@ class CutPlan:
                     "efficiency": a.marker.efficiency,
                     "length_yards": a.marker.length_yards,
                     "bundle_count": a.marker.bundle_count,
+                    "perimeter_cm": a.marker.perimeter_cm,
                     "total_plies": a.plies,
                     "cuts": a.cuts,
                 }
@@ -309,6 +311,7 @@ def markers_from_nesting_results(
             efficiency=result.get("efficiency", 0.75),
             bundle_count=result.get("bundle_count", sum(ratio.values())),
             length_yards=result.get("length_yards", 0.0),
+            perimeter_cm=result.get("perimeter_cm") or 0.0,
         ))
 
     return markers
@@ -628,18 +631,22 @@ def calculate_cutplan_costs(
         marker_plies = m.get("total_plies", 0)
         marker_cuts = (marker_plies + max_ply_height - 1) // max_ply_height if marker_plies > 0 else 0
 
-        # Compute marker perimeter from actual per-size perimeters
-        if perimeter_by_size and sizes and len(sizes) == len(ratio_counts):
-            marker_perimeter_cm = 0.0
-            for i, count in enumerate(ratio_counts):
-                if count > 0:
-                    size = sizes[i]
-                    size_perim = perimeter_by_size.get(size, AVG_PERIMETER_PER_BUNDLE_CM)
-                    marker_perimeter_cm += size_perim * count
-        else:
-            # Fallback: estimate from bundle count
-            bundle_count = m.get("bundle_count", sum(ratio_counts))
-            marker_perimeter_cm = bundle_count * AVG_PERIMETER_PER_BUNDLE_CM
+        # Prefer marker-level perimeter (computed post-nesting from actual placed pieces)
+        marker_perimeter_cm = m.get("perimeter_cm") or 0.0
+
+        if marker_perimeter_cm <= 0:
+            # Fallback: compute from per-size perimeters (pattern parse data)
+            if perimeter_by_size and sizes and len(sizes) == len(ratio_counts):
+                marker_perimeter_cm = 0.0
+                for i, count in enumerate(ratio_counts):
+                    if count > 0:
+                        size = sizes[i]
+                        size_perim = perimeter_by_size.get(size, AVG_PERIMETER_PER_BUNDLE_CM)
+                        marker_perimeter_cm += size_perim * count
+            else:
+                # Last resort: estimate from bundle count
+                bundle_count = m.get("bundle_count", sum(ratio_counts))
+                marker_perimeter_cm = bundle_count * AVG_PERIMETER_PER_BUNDLE_CM
 
         cutting_cost += marker_perimeter_cm * marker_cuts * cutting_cost_per_cm
 

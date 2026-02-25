@@ -33,6 +33,7 @@ export default function CutplanPage() {
     nestingJobs,
     cutplans,
     hasNestingResults,
+    orderSizes,
     loadData,
   } = useOrderContext()
 
@@ -251,22 +252,8 @@ export default function CutplanPage() {
 
   if (!order) return null
 
-  // Get sizes from order demand
-  const orderSizesSet = new Set<string>()
-  const seenColors = new Set<string>()
-  order.order_lines.forEach(line => {
-    if (seenColors.has(line.color_code)) return
-    seenColors.add(line.color_code)
-    line.size_quantities.forEach(sq => {
-      if (sq.quantity > 0) orderSizesSet.add(sq.size_code)
-    })
-  })
-  const patternForOrder = patterns.find(p => p.id === order.pattern_id)
-  const sizes = patternForOrder?.available_sizes
-    ? patternForOrder.available_sizes.filter(s => orderSizesSet.has(s)).concat(
-        Array.from(orderSizesSet).filter(s => !patternForOrder.available_sizes.includes(s)).sort()
-      )
-    : Array.from(orderSizesSet).sort()
+  // Sizes in Excel column order (from context, backed by sort_order in DB)
+  const sizes = orderSizes
 
   // Empty state — no nesting results
   if (!hasNestingResults) {

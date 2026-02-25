@@ -34,6 +34,8 @@ export default function OrderDetailPage() {
     fabrics,
     patternPieces,
     currentPattern,
+    hasNestingResults,
+    orderSizes,
     loadData,
   } = useOrderContext()
 
@@ -41,9 +43,11 @@ export default function OrderDetailPage() {
   const [activeFabricTab, setActiveFabricTab] = useState<string>('')
   const [showPatternUpload, setShowPatternUpload] = useState(false)
   const [patternUploadName, setPatternUploadName] = useState('')
+  const [uploadFileType, setUploadFileType] = useState<'aama' | 'dxf_only'>('aama')
   const [selectedDxfFile, setSelectedDxfFile] = useState<File | null>(null)
   const [selectedRulFile, setSelectedRulFile] = useState<File | null>(null)
   const [isUploadingPattern, setIsUploadingPattern] = useState(false)
+  const [sizeNames, setSizeNames] = useState('')
   const [showPieces, setShowPieces] = useState(false)
   const dxfInputRef = useRef<HTMLInputElement>(null)
   const rulInputRef = useRef<HTMLInputElement>(null)
@@ -73,9 +77,10 @@ export default function OrderDetailPage() {
     try {
       const newPattern = await api.uploadPattern(
         patternUploadName.trim(),
-        'aama',
+        uploadFileType,
         selectedDxfFile,
-        selectedRulFile || undefined
+        uploadFileType === 'aama' ? (selectedRulFile || undefined) : undefined,
+        uploadFileType === 'dxf_only' ? (sizeNames.trim() || allSizes.join(', ')) : undefined
       )
 
       toast({ title: 'Pattern uploaded successfully' })
@@ -86,8 +91,10 @@ export default function OrderDetailPage() {
       // Reset upload form
       setShowPatternUpload(false)
       setPatternUploadName('')
+      setUploadFileType('aama')
       setSelectedDxfFile(null)
       setSelectedRulFile(null)
+      setSizeNames('')
 
       loadData()
     } catch (error) {
@@ -103,16 +110,8 @@ export default function OrderDetailPage() {
 
   if (!order) return null
 
-  // Get sizes for the table
-  const allSizesSet = new Set(
-    order.order_lines.flatMap(line => line.size_quantities.map(sq => sq.size_code))
-  )
-  const patternForSizes = patterns.find(p => p.id === order.pattern_id)
-  const allSizes = patternForSizes?.available_sizes
-    ? patternForSizes.available_sizes.filter(s => allSizesSet.has(s)).concat(
-        Array.from(allSizesSet).filter(s => !patternForSizes.available_sizes.includes(s)).sort()
-      )
-    : Array.from(allSizesSet).sort()
+  // Sizes in Excel column order (from context, backed by sort_order in DB)
+  const allSizes = orderSizes
 
   // Get colors for first fabric (same for all fabrics)
   const firstFabricLines = order.order_lines.filter(l => l.fabric_code === orderFabricCodes[0])
@@ -262,6 +261,50 @@ export default function OrderDetailPage() {
                   </div>
 
                   <div>
+                    <label className="text-xs font-medium text-muted-foreground block mb-1">Pattern Type</label>
+                    <div className="flex gap-1 p-0.5 bg-muted/50 rounded-md mb-1">
+                      <button
+                        type="button"
+                        onClick={() => { setUploadFileType('aama'); setSelectedRulFile(null) }}
+                        className={`flex-1 px-2 py-1.5 text-xs font-medium rounded transition-all ${
+                          uploadFileType === 'aama'
+                            ? 'bg-background shadow-sm text-foreground'
+                            : 'text-muted-foreground hover:text-foreground'
+                        }`}
+                      >
+                        AAMA (DXF + RUL)
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => { setUploadFileType('dxf_only'); setSelectedRulFile(null) }}
+                        className={`flex-1 px-2 py-1.5 text-xs font-medium rounded transition-all ${
+                          uploadFileType === 'dxf_only'
+                            ? 'bg-background shadow-sm text-foreground'
+                            : 'text-muted-foreground hover:text-foreground'
+                        }`}
+                      >
+                        DXF Only
+                      </button>
+                    </div>
+                    {uploadFileType === 'dxf_only' && (
+                      <p className="text-[11px] text-muted-foreground mb-1">Pre-sized pieces — no grading file needed</p>
+                    )}
+                  </div>
+
+                  {uploadFileType === 'dxf_only' && (
+                    <div>
+                      <label className="text-xs font-medium text-muted-foreground block mb-1">Size Names (from order, editable)</label>
+                      <input
+                        type="text"
+                        value={sizeNames || allSizes.join(', ')}
+                        onChange={(e) => setSizeNames(e.target.value)}
+                        className="w-full px-3 py-2 border rounded-md text-sm"
+                      />
+                      <p className="text-[11px] text-muted-foreground mt-1">Auto-filled from order sizes — edit if pattern sizes differ</p>
+                    </div>
+                  )}
+
+                  <div>
                     <label className="text-xs font-medium text-muted-foreground block mb-1">DXF File (required)</label>
                     <input
                       ref={dxfInputRef}
@@ -282,6 +325,7 @@ export default function OrderDetailPage() {
                     </button>
                   </div>
 
+                  {uploadFileType === 'aama' && (
                   <div>
                     <label className="text-xs font-medium text-muted-foreground block mb-1">RUL File (optional)</label>
                     <input
@@ -302,6 +346,7 @@ export default function OrderDetailPage() {
                       {selectedRulFile ? selectedRulFile.name : 'Choose RUL file (sizes)...'}
                     </button>
                   </div>
+                  )}
 
                   <div className="flex gap-2 pt-2">
                     <Button
@@ -326,8 +371,10 @@ export default function OrderDetailPage() {
                       onClick={() => {
                         setShowPatternUpload(false)
                         setPatternUploadName('')
+                        setUploadFileType('aama')
                         setSelectedDxfFile(null)
                         setSelectedRulFile(null)
+                        setSizeNames('')
                       }}
                     >
                       Cancel
@@ -336,7 +383,8 @@ export default function OrderDetailPage() {
                 </div>
               )}
 
-              {/* Pattern Selector */}
+              {/* Pattern Selector - only show when no pattern is assigned */}
+              {!order.pattern_id && (
               <div className="space-y-2">
                 <label className="text-xs font-medium text-muted-foreground block">Select Existing Pattern</label>
                 <Select
@@ -377,6 +425,7 @@ export default function OrderDetailPage() {
                   </SelectContent>
                 </Select>
               </div>
+              )}
 
               {order.pattern_id && (
                 <div className="space-y-3">
@@ -396,14 +445,41 @@ export default function OrderDetailPage() {
                           </p>
                         </div>
                       </div>
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        onClick={() => setShowPieces(!showPieces)}
-                      >
-                        <ChevronDown className={`h-4 w-4 transition-transform ${showPieces ? 'rotate-180' : ''}`} />
-                        {showPieces ? 'Hide' : 'Show'} Pieces
-                      </Button>
+                      <div className="flex items-center gap-1">
+                        {!hasNestingResults ? (
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={async () => {
+                              try {
+                                await api.updateOrder(orderId, { pattern_id: null as any })
+                                toast({ title: 'Pattern removed' })
+                                setShowPieces(false)
+                                loadData()
+                              } catch (error) {
+                                toast({
+                                  title: 'Failed to change pattern',
+                                  description: error instanceof Error ? error.message : 'Please try again',
+                                  variant: 'destructive',
+                                })
+                              }
+                            }}
+                            className="text-xs"
+                          >
+                            Change Pattern
+                          </Button>
+                        ) : (
+                          <span className="text-xs text-muted-foreground">Pattern locked after nesting</span>
+                        )}
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => setShowPieces(!showPieces)}
+                        >
+                          <ChevronDown className={`h-4 w-4 transition-transform ${showPieces ? 'rotate-180' : ''}`} />
+                          {showPieces ? 'Hide' : 'Show'} Pieces
+                        </Button>
+                      </div>
                     </div>
                   </div>
 
@@ -453,7 +529,7 @@ export default function OrderDetailPage() {
                 </div>
               )}
 
-              {patterns.filter(p => p.is_parsed).length === 0 && (
+              {!order.pattern_id && patterns.filter(p => p.is_parsed).length === 0 && (
                 <div className="text-center py-2">
                   <p className="text-sm text-muted-foreground mb-2">No patterns available</p>
                   <Link href="/patterns">

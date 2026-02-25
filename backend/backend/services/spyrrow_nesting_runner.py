@@ -101,6 +101,23 @@ from nesting_engine.core.instance import Container, NestingItem, NestingInstance
 from nesting_engine.core.piece import Piece, PieceIdentifier, OrientationConstraint
 
 
+def _compute_perimeter_mm(vertices_mm: List[Tuple[float, float]]) -> float:
+    """Sum of edge lengths for a closed polygon. Returns mm."""
+    if len(vertices_mm) < 2:
+        return 0.0
+    perim = 0.0
+    for i in range(len(vertices_mm) - 1):
+        x1, y1 = vertices_mm[i]
+        x2, y2 = vertices_mm[i + 1]
+        perim += math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
+    # Close if not already closed
+    if vertices_mm[0] != vertices_mm[-1]:
+        x1, y1 = vertices_mm[-1]
+        x2, y2 = vertices_mm[0]
+        perim += math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
+    return perim
+
+
 # --------------------------------------------------------------------------
 # BundlePiece (same dataclass as Streamlit app)
 # --------------------------------------------------------------------------
@@ -167,7 +184,7 @@ def create_flipped_piece(piece: Piece) -> Piece:
 
 def load_pieces_for_spyrrow(
     dxf_path: str,
-    rul_path: str,
+    rul_path: Optional[str],
     material: str,
     sizes: List[str],
     allowed_rotations: List[int] = [0, 180],
@@ -175,12 +192,36 @@ def load_pieces_for_spyrrow(
     """
     Load graded pieces via grade_material_to_nesting_pieces().
 
+    For DXF-only patterns (rul_path is None), uses load_dxf_pieces_by_size()
+    instead.
+
     Returns:
         (nesting_pieces, piece_config)
         - nesting_pieces: List[Piece] — one per piece-name × size
         - piece_config: {piece_name: {demand: int, flipped: bool}}
           Mirrors the Streamlit app's piece_type_config.
     """
+    # DXF-only path: no RUL grading, pieces already sized in DXF
+    if rul_path is None or not Path(rul_path).exists():
+        from nesting_engine.io.dxf_parser import load_dxf_pieces_by_size
+        nesting_pieces, piece_config, _ = load_dxf_pieces_by_size(
+            dxf_path, sizes, rotations=allowed_rotations,
+        )
+        logger.info(f"Loaded {len(nesting_pieces)} DXF-only pieces for sizes={sizes}")
+
+        # Clean vertices (same as AAMA path)
+        cleaned_count = 0
+        for p in nesting_pieces:
+            original_len = len(p.vertices)
+            p.vertices = _clean_polygon_vertices(list(p.vertices))
+            if len(p.vertices) != original_len:
+                cleaned_count += 1
+        if cleaned_count:
+            logger.info(f"Cleaned duplicate vertices from {cleaned_count}/{len(nesting_pieces)} pieces")
+
+        return nesting_pieces, piece_config
+
+    # AAMA path (existing logic)
     nesting_pieces = grade_material_to_nesting_pieces(
         dxf_path, rul_path,
         material=material,
@@ -406,10 +447,20 @@ def nest_single_marker(
 
     length_yards = solution.strip_length / 914.4  # 1 yard = 914.4 mm
 
+    # Compute total perimeter from placed pieces (vertices already in mm)
+    piece_map = {bp.piece.id: bp for bp in bundle_pieces}
+    total_perimeter_mm = 0.0
+    for placement in solution.placements:
+        bp = piece_map.get(placement.piece_id)
+        if bp:
+            total_perimeter_mm += _compute_perimeter_mm(list(bp.piece.vertices))
+    perimeter_cm = total_perimeter_mm / 10.0
+
     return {
         'utilization': solution.utilization_percent / 100.0,
         'strip_length_mm': solution.strip_length,
         'length_yards': length_yards,
+        'perimeter_cm': perimeter_cm,
         'solution': solution,
         'bundle_pieces': bundle_pieces,
         'computation_time_s': elapsed,
@@ -695,6 +746,7 @@ def refine_cutplan_markers(
             'utilization': solution_data['utilization'],
             'strip_length_mm': solution_data['strip_length_mm'],
             'length_yards': solution_data['length_yards'],
+            'perimeter_cm': solution_data.get('perimeter_cm', 0.0),
             'computation_time_s': solution_data['computation_time_s'],
             'svg_preview': svg_preview,
             'dxf_bytes': dxf_bytes,

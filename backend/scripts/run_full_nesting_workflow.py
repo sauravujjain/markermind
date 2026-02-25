@@ -28,10 +28,9 @@ from collections import defaultdict
 import numpy as np
 from PIL import Image, ImageDraw
 
-# Add garment-nester to path
-GARMENT_NESTER_PATH = Path("/home/sarv/projects/garment-nester")
-sys.path.insert(0, str(GARMENT_NESTER_PATH))
-sys.path.insert(0, str(GARMENT_NESTER_PATH / "scripts"))
+# Add MarkerMind project root to path so nesting_engine is importable
+PROJECT_ROOT = Path(__file__).parent.parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
 
 from nesting_engine.io.aama_parser import load_aama_pattern, AAMAGrader
 
@@ -51,8 +50,8 @@ except ImportError:
 # Configuration
 # =============================================================================
 
-DXF_PATH = GARMENT_NESTER_PATH / "data/dxf-amaa/23583 PROD 1 L 0 W 0 25FEB22.dxf"
-RUL_PATH = GARMENT_NESTER_PATH / "data/dxf-amaa/23583 PROD 1 L 0 W 0 25FEB22.rul"
+DXF_PATH = PROJECT_ROOT / "data/dxf-amaa/23583 PROD 1 L 0 W 0 25FEB22.dxf"
+RUL_PATH = PROJECT_ROOT / "data/dxf-amaa/23583 PROD 1 L 0 W 0 25FEB22.rul"
 OUTPUT_DIR = Path("/home/sarv/projects/MarkerMind/backend/experiment_results")
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 

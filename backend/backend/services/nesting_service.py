@@ -138,9 +138,17 @@ class NestingService:
                 existing.length_yards = length_yards
                 existing.length_mm = length_mm
                 existing.source_type = source_type
-                existing.metadata = metadata or {}
+                existing.extra_data = metadata or {}
                 db.commit()
                 db.refresh(existing)
+            elif metadata and metadata.get("perimeter_cm"):
+                # Even if efficiency isn't better, update perimeter_cm if we have it
+                existing_data = existing.extra_data or {}
+                if not existing_data.get("perimeter_cm"):
+                    existing_data["perimeter_cm"] = metadata["perimeter_cm"]
+                    existing.extra_data = existing_data
+                    db.commit()
+                    db.refresh(existing)
             return existing
 
         marker = MarkerBank(
@@ -151,7 +159,7 @@ class NestingService:
             length_yards=length_yards,
             length_mm=length_mm,
             source_type=source_type,
-            metadata=metadata or {},
+            extra_data=metadata or {},
         )
         db.add(marker)
         db.commit()
@@ -220,12 +228,14 @@ class NestingService:
                 raise ValueError(f"No fabric record found for material {material}")
 
             # Get pattern file paths (convert relative to absolute)
-            if not pattern.dxf_file_path or not pattern.rul_file_path:
-                raise ValueError("Pattern DXF or RUL file not available")
+            if not pattern.dxf_file_path:
+                raise ValueError("Pattern DXF file not available")
+            if not pattern.rul_file_path and pattern.file_type != "dxf_only":
+                raise ValueError("Pattern RUL file not available")
 
             from ..config import resolve_path
             dxf_path = resolve_path(pattern.dxf_file_path)
-            rul_path = resolve_path(pattern.rul_file_path)
+            rul_path = resolve_path(pattern.rul_file_path) if pattern.rul_file_path else None
 
             # Get sizes: use selected_sizes from job if provided, otherwise all pattern sizes
             if job.selected_sizes:
@@ -304,6 +314,7 @@ class NestingService:
                         metadata={
                             "bundle_count": bundle_count,
                             "job_id": job.id,
+                            "perimeter_cm": result.get('perimeter_cm', 0),
                         }
                     )
 

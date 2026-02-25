@@ -24,7 +24,7 @@ interface OrderContextValue {
   // Derived helpers
   currentPattern: Pattern | null
   orderFabricCodes: string[]
-  orderSizes: Set<string>
+  orderSizes: string[]
   isConfigured: boolean
   hasNestingResults: boolean
   hasCutplans: boolean
@@ -122,9 +122,16 @@ export function OrderProvider({ children }: { children: ReactNode }) {
     ? Array.from(new Set(order.order_lines.map(line => line.fabric_code)))
     : []
 
-  const orderSizes = new Set<string>()
+  // Preserve size order from backend (which reflects Excel column order via sort_order)
+  const orderSizesSet = new Set<string>()
+  const orderSizes: string[] = []
   order?.order_lines.forEach(line => {
-    line.size_quantities.forEach(sq => orderSizes.add(sq.size_code))
+    line.size_quantities.forEach(sq => {
+      if (!orderSizesSet.has(sq.size_code)) {
+        orderSizesSet.add(sq.size_code)
+        orderSizes.push(sq.size_code)
+      }
+    })
   })
 
   const orderFabricsInPattern = currentPattern

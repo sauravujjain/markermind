@@ -10,6 +10,7 @@ class FileType(str, enum.Enum):
     AAMA = "aama"  # AAMA/ASTM DXF format
     GERBER = "gerber"
     LECTRA = "lectra"
+    DXF_ONLY = "dxf_only"  # Pre-sized pieces in DXF, no RUL grading needed
 
 
 class Pattern(Base, TimestampMixin):

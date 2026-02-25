@@ -206,6 +206,7 @@ class CutplanService:
                     "efficiency": m.efficiency,
                     "length_yards": m.length_yards,
                     "bundle_count": sum(int(x) for x in m.ratio_str.split("-")),
+                    "perimeter_cm": (m.extra_data or {}).get("perimeter_cm"),
                 }
                 for m in markers
             ]
@@ -299,6 +300,7 @@ class CutplanService:
                 "efficiency": m.efficiency,
                 "length_yards": m.length_yards,
                 "bundle_count": sum(int(x) for x in m.ratio_str.split("-")),
+                "perimeter_cm": (m.extra_data or {}).get("perimeter_cm"),
             }
             for m in markers
         ]

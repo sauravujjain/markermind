@@ -74,7 +74,7 @@ class OrderLine(Base, TimestampMixin):
     # Relationships
     order = relationship("Order", back_populates="order_lines")
     fabric = relationship("Fabric", back_populates="order_lines")
-    size_quantities = relationship("SizeQuantity", back_populates="order_line", cascade="all, delete-orphan")
+    size_quantities = relationship("SizeQuantity", back_populates="order_line", cascade="all, delete-orphan", order_by="SizeQuantity.sort_order")
 
 
 class SizeQuantity(Base, TimestampMixin):
@@ -85,6 +85,7 @@ class SizeQuantity(Base, TimestampMixin):
     order_line_id = Column(UUID(as_uuid=False), ForeignKey("order_lines.id"), nullable=False)
     size_code = Column(String(20), nullable=False)  # e.g., "M", "L", "42", "46"
     quantity = Column(Integer, default=0, nullable=False)
+    sort_order = Column(Integer, default=0, nullable=False)  # Preserves column order from Excel import
 
     # Relationships
     order_line = relationship("OrderLine", back_populates="size_quantities")

@@ -345,8 +345,10 @@ async def test_marker(
     if not pattern.is_parsed:
         raise HTTPException(status_code=400, detail="Pattern must be parsed first")
 
-    if not pattern.dxf_file_path or not pattern.rul_file_path:
-        raise HTTPException(status_code=400, detail="Pattern DXF or RUL file not available")
+    if not pattern.dxf_file_path:
+        raise HTTPException(status_code=400, detail="Pattern DXF file not available")
+    if not pattern.rul_file_path and pattern.file_type != "dxf_only":
+        raise HTTPException(status_code=400, detail="Pattern RUL file not available")
 
     # Validate size_bundles
     total_bundles = sum(request.size_bundles.values())
@@ -377,7 +379,7 @@ async def test_marker(
 
     # Resolve file paths
     dxf_path = resolve_path(pattern.dxf_file_path)
-    rul_path = resolve_path(pattern.rul_file_path)
+    rul_path = resolve_path(pattern.rul_file_path) if pattern.rul_file_path else None
 
     # Get full sizes list for ratio_str ordering (all sizes in pattern order)
     sizes = list(pattern.available_sizes)

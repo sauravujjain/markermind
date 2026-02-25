@@ -35,7 +35,10 @@ export default function ConfigurePage() {
   } = useOrderContext()
 
   // Local state
-  const [selectedSizes, setSelectedSizes] = useState<string[]>([])
+  // Sizes are auto-determined from the intersection of order sizes and pattern sizes
+  const selectedSizes = currentPattern
+    ? currentPattern.available_sizes.filter(s => orderSizes.includes(s))
+    : []
   const [materialMappings, setMaterialMappings] = useState<Record<string, string>>({})
   const [perFabricConfig, setPerFabricConfig] = useState<Record<string, {
     widthInches: number
@@ -59,13 +62,6 @@ export default function ConfigurePage() {
   // Initialize local state from context data
   useEffect(() => {
     if (!order || !currentPattern) return
-
-    // Get order sizes
-    const orderSizesList = Array.from(orderSizes)
-
-    // Select pattern sizes that match order sizes
-    const matchingSizes = currentPattern.available_sizes.filter(s => orderSizesList.includes(s))
-    setSelectedSizes(matchingSizes.length > 0 ? matchingSizes : currentPattern.available_sizes)
 
     // Initialize material mappings from pattern's fabric_mappings
     const mappings: Record<string, string> = {}
@@ -359,76 +355,25 @@ export default function ConfigurePage() {
               </div>
             </div>
 
-            {/* Size Selection */}
-            <div className="space-y-3 pt-4 border-t">
-              <div className="flex items-center justify-between">
-                <div>
-                  <h4 className="font-medium text-sm mb-1">Size Selection</h4>
-                  <p className="text-xs text-muted-foreground">
-                    Pattern: {pattern.available_sizes.length} sizes • Selected: {selectedSizes.length} sizes
-                  </p>
-                </div>
-                <div className="flex gap-2">
-                  <button
-                    onClick={() => {
-                      const orderSizesList = Array.from(orderSizes)
-                      setSelectedSizes(pattern.available_sizes.filter(s => orderSizesList.includes(s)))
-                    }}
-                    className="text-xs text-primary hover:underline"
-                  >
-                    Select Order Sizes
-                  </button>
-                  <button
-                    onClick={() => setSelectedSizes([...pattern.available_sizes])}
-                    className="text-xs text-primary hover:underline"
-                  >
-                    Select All
-                  </button>
-                  <button
-                    onClick={() => setSelectedSizes([])}
-                    className="text-xs text-muted-foreground hover:underline"
-                  >
-                    Clear
-                  </button>
-                </div>
-              </div>
-              <div className="flex flex-wrap gap-2">
-                {pattern.available_sizes.map((size) => {
-                  const inOrder = orderSizes.has(size)
-                  const isSelected = selectedSizes.includes(size)
-                  return (
-                    <button
-                      key={size}
-                      onClick={() => {
-                        if (isSelected) {
-                          setSelectedSizes(selectedSizes.filter(s => s !== size))
-                        } else {
-                          setSelectedSizes([...selectedSizes, size])
-                        }
-                      }}
-                      className={`px-2.5 py-1 rounded-md text-xs font-medium transition-all ${
-                        isSelected
-                          ? 'bg-green-100 text-green-700 border border-green-300 ring-1 ring-green-300'
-                          : inOrder
-                          ? 'bg-muted hover:bg-muted/80 text-foreground border border-border'
-                          : 'bg-muted/50 text-muted-foreground border border-border/50 hover:bg-muted'
-                      }`}
-                    >
-                      {size}
-                      {!inOrder && !isSelected && <span className="ml-1 opacity-60">(extra)</span>}
-                    </button>
-                  )
-                })}
-                {Array.from(orderSizes).filter(s => !pattern.available_sizes.includes(s)).map((size) => (
-                  <div
-                    key={size}
-                    className="px-2.5 py-1 rounded-md text-xs font-medium bg-red-100 text-red-700 border border-red-200"
-                  >
-                    {size} (missing in pattern!)
+            {/* Size Summary */}
+            {(() => {
+              const missingSizes = orderSizes.filter(s => !pattern.available_sizes.includes(s))
+              return missingSizes.length > 0 ? (
+                <div className="pt-4 border-t">
+                  <div className="flex flex-wrap gap-2 items-center">
+                    <span className="text-xs font-medium text-red-700">Sizes missing in pattern:</span>
+                    {missingSizes.map((size) => (
+                      <span
+                        key={size}
+                        className="px-2.5 py-1 rounded-md text-xs font-medium bg-red-100 text-red-700 border border-red-200"
+                      >
+                        {size}
+                      </span>
+                    ))}
                   </div>
-                ))}
-              </div>
-            </div>
+                </div>
+              ) : null
+            })()}
 
             {/* Nesting Preview - Tabbed by Fabric */}
             <div className="space-y-4 pt-4 border-t">

@@ -5,6 +5,7 @@ Extracted and parameterized from scripts/gpu_20260118_ga_ratio_optimizer.py
 for integration into the MarkerMind backend services.
 """
 
+import math
 import sys
 import time
 import random
@@ -205,9 +206,52 @@ class GPUPacker:
         return base64.b64encode(png_bytes).decode('utf-8')
 
 
+def _rasterize_vertices(
+    vertices_mm: List[Tuple[float, float]],
+    gpu_scale: float,
+    piece_buffer: float,
+) -> Tuple[np.ndarray, float, List[Tuple[float, float]]]:
+    """
+    Rasterize a piece polygon and return (raster, area, vertices_mm_norm).
+
+    Shared helper for both AAMA and DXF-only piece loading paths.
+    """
+    verts = np.array(vertices_mm)
+    min_xy = verts.min(axis=0)
+    verts_scaled = (verts - min_xy) * gpu_scale + piece_buffer
+    max_xy = verts_scaled.max(axis=0)
+    width = int(np.ceil(max_xy[0])) + int(np.ceil(piece_buffer * 2))
+    height = int(np.ceil(max_xy[1])) + int(np.ceil(piece_buffer * 2))
+
+    img = Image.new('L', (width, height), 0)
+    ImageDraw.Draw(img).polygon([tuple(p) for p in verts_scaled], fill=1)
+    raster = np.array(img, dtype=np.float32)
+    area = float(np.sum(raster))
+
+    vertices_mm_norm = [(v[0] - float(min_xy[0]), v[1] - float(min_xy[1])) for v in vertices_mm]
+    return raster, area, vertices_mm_norm
+
+
+def _compute_perimeter_mm(vertices_mm: List[Tuple[float, float]]) -> float:
+    """Sum of edge lengths for a closed polygon. Returns mm."""
+    if len(vertices_mm) < 2:
+        return 0.0
+    perim = 0.0
+    for i in range(len(vertices_mm) - 1):
+        x1, y1 = vertices_mm[i]
+        x2, y2 = vertices_mm[i + 1]
+        perim += math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
+    # Close if not already closed
+    if vertices_mm[0] != vertices_mm[-1]:
+        x1, y1 = vertices_mm[-1]
+        x2, y2 = vertices_mm[0]
+        perim += math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
+    return perim
+
+
 def load_pieces_for_material(
     dxf_path: str,
-    rul_path: str,
+    rul_path: Optional[str],
     material: str,
     sizes: List[str],
     gpu_scale: float = DEFAULT_GPU_SCALE,
@@ -218,7 +262,7 @@ def load_pieces_for_material(
 
     Args:
         dxf_path: Path to DXF file
-        rul_path: Path to RUL file
+        rul_path: Path to RUL file (None for DXF-only patterns)
         material: Material code to filter (e.g., "SO1", "SHELL")
         sizes: List of sizes to load
         gpu_scale: Rasterization resolution (px/mm)
@@ -229,6 +273,10 @@ def load_pieces_for_material(
     """
     if not _init_gpu():
         raise RuntimeError("GPU not available")
+
+    # DXF-only path: no RUL grading, pieces already sized in DXF
+    if rul_path is None or not Path(rul_path).exists():
+        return _load_pieces_dxf_only(dxf_path, sizes, gpu_scale, piece_buffer)
 
     pieces, rules = load_aama_pattern(dxf_path, rul_path)
     grader = AAMAGrader(pieces, rules)
@@ -254,25 +302,11 @@ def load_pieces_for_material(
             if vertices_mm[0] != vertices_mm[-1]:
                 vertices_mm.append(vertices_mm[0])
 
-            # Rasterize
-            verts = np.array(vertices_mm)
-            min_xy = verts.min(axis=0)
-            verts_scaled = (verts - min_xy) * gpu_scale + piece_buffer
-            max_xy = verts_scaled.max(axis=0)
-            width = int(np.ceil(max_xy[0])) + int(np.ceil(piece_buffer * 2))
-            height = int(np.ceil(max_xy[1])) + int(np.ceil(piece_buffer * 2))
-
-            img = Image.new('L', (width, height), 0)
-            ImageDraw.Draw(img).polygon([tuple(p) for p in verts_scaled], fill=1)
-            raster = np.array(img, dtype=np.float32)
-            area = float(np.sum(raster))
+            raster, area, vertices_mm_norm = _rasterize_vertices(vertices_mm, gpu_scale, piece_buffer)
 
             demand = orig_piece.quantity.total
             if orig_piece.quantity.has_left_right:
                 demand = orig_piece.quantity.left_qty + orig_piece.quantity.right_qty
-
-            # Store vertices in mm (for SVG preview) and pixel offset
-            vertices_mm_norm = [(v[0] - float(min_xy[0]), v[1] - float(min_xy[1])) for v in vertices_mm]
 
             pieces_by_size[target_size].append({
                 'name': gp.name,
@@ -285,6 +319,50 @@ def load_pieces_for_material(
                 'demand': demand,
                 'vertices_mm': vertices_mm_norm,  # normalized to origin, in mm
             })
+
+    return pieces_by_size
+
+
+def _load_pieces_dxf_only(
+    dxf_path: str,
+    sizes: List[str],
+    gpu_scale: float,
+    piece_buffer: float,
+) -> Dict[str, List[Dict]]:
+    """Load and rasterize pieces from a DXF-only pattern (no RUL)."""
+    from nesting_engine.io.dxf_parser import load_dxf_pieces_by_size
+
+    nesting_pieces, piece_config, _ = load_dxf_pieces_by_size(dxf_path, sizes)
+
+    pieces_by_size: Dict[str, List[Dict]] = {}
+
+    for piece in nesting_pieces:
+        size = piece.identifier.size
+        if not size:
+            continue
+
+        vertices_mm = list(piece.vertices)
+        if len(vertices_mm) < 3:
+            continue
+        if vertices_mm[0] != vertices_mm[-1]:
+            vertices_mm.append(vertices_mm[0])
+
+        raster, area, vertices_mm_norm = _rasterize_vertices(vertices_mm, gpu_scale, piece_buffer)
+
+        if size not in pieces_by_size:
+            pieces_by_size[size] = []
+
+        pieces_by_size[size].append({
+            'name': piece.identifier.piece_name,
+            'size': size,
+            'raster': raster,
+            'raster_gpu': cp.asarray(raster),
+            'raster_180': np.rot90(raster, 2),
+            'raster_180_gpu': cp.asarray(np.rot90(raster, 2)),
+            'area': area,
+            'demand': 1,  # Each DXF polyline is a unique piece instance
+            'vertices_mm': vertices_mm_norm,
+        })
 
     return pieces_by_size
 
@@ -317,15 +395,15 @@ def evaluate_ratio(
     strip_width_px: int,
     gpu_scale: float,
     capture_preview: bool = False,
-) -> Tuple[float, float, Optional[str]]:
+) -> Tuple[float, float, Optional[str], float]:
     """
-    Evaluate a single ratio and return (efficiency, length_yards, preview_base64).
+    Evaluate a single ratio and return (efficiency, length_yards, preview_base64, perimeter_cm).
 
     Args:
         capture_preview: If True, capture and return the container as base64 PNG
 
     Returns:
-        Tuple of (efficiency, length_yards, preview_base64 or None)
+        Tuple of (efficiency, length_yards, preview_base64 or None, perimeter_cm)
     """
     packer.reset()
 
@@ -340,13 +418,14 @@ def evaluate_ratio(
                     pieces_list.append(p)
 
     if not pieces_list:
-        return 0.0, 0.0, None
+        return 0.0, 0.0, None, 0.0
 
     # Sort by area descending
     pieces_list.sort(key=lambda p: -p['area'])
 
     placed_area = 0.0
     current_length = 0
+    total_perimeter_mm = 0.0
 
     for p in pieces_list:
         result, raster = packer.find_best_position(p['raster_gpu'], p['raster_180_gpu'], current_length)
@@ -356,9 +435,10 @@ def evaluate_ratio(
         packer.place(raster, result['x'], result['y'])
         placed_area += p['area']
         current_length = max(current_length, result['x'] + result['pw'])
+        total_perimeter_mm += _compute_perimeter_mm(p['vertices_mm'])
 
     if current_length == 0:
-        return 0.0, 0.0, None
+        return 0.0, 0.0, None, 0.0
 
     strip_area = strip_width_px * current_length
     efficiency = placed_area / strip_area
@@ -371,7 +451,8 @@ def evaluate_ratio(
     if capture_preview:
         preview_base64 = packer.get_container_base64(current_length)
 
-    return efficiency, length_yards, preview_base64
+    perimeter_cm = total_perimeter_mm / 10.0
+    return efficiency, length_yards, preview_base64, perimeter_cm
 
 
 def evaluate_ratio_with_svg(
@@ -380,14 +461,14 @@ def evaluate_ratio_with_svg(
     packer: GPUPacker,
     strip_width_px: int,
     gpu_scale: float,
-) -> Tuple[float, float, str]:
+) -> Tuple[float, float, str, float]:
     """
     Evaluate a ratio AND produce an SVG preview from original polygon vertices.
 
     This is expensive — only call for final best results, not during screening.
 
     Returns:
-        Tuple of (efficiency, length_yards, svg_string)
+        Tuple of (efficiency, length_yards, svg_string, perimeter_cm)
     """
     packer.reset()
 
@@ -401,12 +482,13 @@ def evaluate_ratio_with_svg(
                     pieces_list.append(p)
 
     if not pieces_list:
-        return 0.0, 0.0, ''
+        return 0.0, 0.0, '', 0.0
 
     pieces_list.sort(key=lambda p: -p['area'])
 
     placed_area = 0.0
     current_length = 0
+    total_perimeter_mm = 0.0
     placements = []
 
     for p in pieces_list:
@@ -417,6 +499,7 @@ def evaluate_ratio_with_svg(
         packer.place(raster, result['x'], result['y'])
         placed_area += p['area']
         current_length = max(current_length, result['x'] + result['pw'])
+        total_perimeter_mm += _compute_perimeter_mm(p['vertices_mm'])
 
         is_rotated = (raster is not p['raster_gpu'])
         placements.append({
@@ -427,7 +510,7 @@ def evaluate_ratio_with_svg(
         })
 
     if current_length == 0:
-        return 0.0, 0.0, ''
+        return 0.0, 0.0, '', 0.0
 
     strip_area = strip_width_px * current_length
     efficiency = placed_area / strip_area
@@ -437,7 +520,8 @@ def evaluate_ratio_with_svg(
     strip_length_mm = current_length / gpu_scale
     svg = _generate_placement_svg(placements, fabric_width_mm, strip_length_mm, gpu_scale)
 
-    return efficiency, length_yards, svg
+    perimeter_cm = total_perimeter_mm / 10.0
+    return efficiency, length_yards, svg, perimeter_cm
 
 
 def _generate_placement_svg(
@@ -631,7 +715,7 @@ def run_nesting_for_material(
                 current_time = time.time()
                 should_capture = preview_callback and (current_time - last_preview_time >= preview_interval_seconds)
 
-                eff, length, preview = evaluate_ratio(
+                eff, length, preview, perim_cm = evaluate_ratio(
                     pieces_by_size, ratio, packer, strip_width_px, gpu_scale,
                     capture_preview=should_capture
                 )
@@ -647,6 +731,7 @@ def run_nesting_for_material(
                     'efficiency': eff,
                     'length_yards': length,
                     'bundle_count': bundle_count,
+                    'perimeter_cm': perim_cm,
                 })
                 evaluated_count += 1
 
@@ -696,10 +781,11 @@ def run_nesting_for_material(
             r = bc_results[0]
             ratio = r.get('ratio')
             if ratio:
-                _, _, svg = evaluate_ratio_with_svg(
+                _, _, svg, perim_cm = evaluate_ratio_with_svg(
                     pieces_by_size, ratio, packer, strip_width_px, gpu_scale
                 )
                 r['svg_preview'] = svg
+                r['perimeter_cm'] = perim_cm
 
     total_saved = sum(len(v) for v in all_results.values())
     if progress_callback:
@@ -756,6 +842,7 @@ def _run_island_ga(
         )
         best['bundle_count'] = bundle_count
         best['ratio_str'] = ratio_to_str(best['ratio'], sizes)
+        best.setdefault('perimeter_cm', 0.0)
         island_bests.append(best)
 
     # Sort by efficiency
@@ -781,6 +868,7 @@ def _run_island_ga(
                     'efficiency': r['efficiency'],
                     'length_yards': r.get('length_yards', 0.0),
                     'bundle_count': bundle_count,
+                    'perimeter_cm': r.get('perimeter_cm', 0.0),
                 }
                 final_results.append(result)
                 included_keys.add(key)
@@ -820,12 +908,12 @@ def _run_island_ga_single(
             current_time = time.time()
             should_capture = preview_callback and (current_time - last_preview_time[0] >= preview_interval_seconds)
 
-            eff, length, preview = evaluate_ratio(
+            eff, length, preview, perim_cm = evaluate_ratio(
                 pieces_by_size, ratio, packer, strip_width_px, gpu_scale,
                 capture_preview=should_capture
             )
             eval_count += 1
-            global_cache[key] = {'ratio': dict(ratio), 'efficiency': eff, 'length_yards': length}
+            global_cache[key] = {'ratio': dict(ratio), 'efficiency': eff, 'length_yards': length, 'perimeter_cm': perim_cm}
 
             if should_capture and preview:
                 ratio_str = ratio_to_str(ratio, sizes)
