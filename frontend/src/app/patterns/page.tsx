@@ -18,7 +18,7 @@ export default function PatternsPage() {
   const [isLoading, setIsLoading] = useState(true)
   const [isUploading, setIsUploading] = useState(false)
   const [patternName, setPatternName] = useState('')
-  const [fileType, setFileType] = useState<'aama' | 'dxf_only'>('aama')
+  const [fileType, setFileType] = useState<'aama' | 'dxf_only' | 'vt_dxf'>('aama')
   const [dxfFile, setDxfFile] = useState<File | null>(null)
   const [rulFile, setRulFile] = useState<File | null>(null)
   const [sizeNames, setSizeNames] = useState('')
@@ -82,6 +82,7 @@ export default function PatternsPage() {
     setIsUploading(true)
     try {
       const pattern = await api.uploadPattern(patternName, fileType, dxfFile, fileType === 'aama' ? (rulFile || undefined) : undefined, fileType === 'dxf_only' && sizeNames.trim() ? sizeNames.trim() : undefined)
+
       toast({
         title: 'Pattern uploaded',
         description: 'Now parsing pattern file...',
@@ -134,7 +135,7 @@ export default function PatternsPage() {
                 <div>
                   <CardTitle className="text-lg">Upload Pattern</CardTitle>
                   <CardDescription>
-                    Upload AAMA/ASTM or DXF-only pattern files
+                    Upload AAMA/ASTM, DXF-only, or VT DXF pattern files
                   </CardDescription>
                 </div>
               </div>
@@ -178,9 +179,23 @@ export default function PatternsPage() {
                     >
                       DXF Only
                     </button>
+                    <button
+                      type="button"
+                      onClick={() => { setFileType('vt_dxf'); setRulFile(null); setSizeNames('') }}
+                      className={`flex-1 px-3 py-2 text-sm font-medium rounded-md transition-all ${
+                        fileType === 'vt_dxf'
+                          ? 'bg-background shadow-sm text-foreground'
+                          : 'text-muted-foreground hover:text-foreground'
+                      }`}
+                    >
+                      VT DXF (Graded)
+                    </button>
                   </div>
                   {fileType === 'dxf_only' && (
                     <p className="text-xs text-muted-foreground">Pre-sized pieces in DXF — no grading file needed</p>
+                  )}
+                  {fileType === 'vt_dxf' && (
+                    <p className="text-xs text-muted-foreground">Optitex Graded Nest — sizes auto-detected from piece names</p>
                   )}
                 </div>
 

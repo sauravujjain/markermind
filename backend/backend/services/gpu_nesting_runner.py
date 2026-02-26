@@ -256,6 +256,7 @@ def load_pieces_for_material(
     sizes: List[str],
     gpu_scale: float = DEFAULT_GPU_SCALE,
     piece_buffer: float = DEFAULT_PIECE_BUFFER,
+    file_type: Optional[str] = None,
 ) -> Dict[str, List[Dict]]:
     """
     Load and rasterize pieces for a specific material.
@@ -267,12 +268,17 @@ def load_pieces_for_material(
         sizes: List of sizes to load
         gpu_scale: Rasterization resolution (px/mm)
         piece_buffer: Gap between pieces in pixels
+        file_type: Pattern file type ("aama", "dxf_only", "vt_dxf")
 
     Returns:
         Dictionary mapping size -> list of piece dicts with rasters
     """
     if not _init_gpu():
         raise RuntimeError("GPU not available")
+
+    # VT DXF path: Optitex Graded Nest format
+    if file_type == "vt_dxf":
+        return _load_pieces_vt_dxf(dxf_path, sizes, gpu_scale, piece_buffer)
 
     # DXF-only path: no RUL grading, pieces already sized in DXF
     if rul_path is None or not Path(rul_path).exists():
@@ -361,6 +367,54 @@ def _load_pieces_dxf_only(
             'raster_180_gpu': cp.asarray(np.rot90(raster, 2)),
             'area': area,
             'demand': 1,  # Each DXF polyline is a unique piece instance
+            'vertices_mm': vertices_mm_norm,
+        })
+
+    return pieces_by_size
+
+
+def _load_pieces_vt_dxf(
+    dxf_path: str,
+    sizes: List[str],
+    gpu_scale: float,
+    piece_buffer: float,
+) -> Dict[str, List[Dict]]:
+    """Load and rasterize pieces from a VT DXF (Optitex Graded Nest) pattern."""
+    from nesting_engine.io.vt_dxf_parser import parse_vt_dxf
+
+    pieces, all_sizes, piece_quantities, _material = parse_vt_dxf(dxf_path)
+
+    pieces_by_size: Dict[str, List[Dict]] = {}
+
+    for piece in pieces:
+        size = piece.identifier.size
+        if not size or size not in sizes:
+            continue
+
+        vertices_mm = list(piece.vertices)
+        if len(vertices_mm) < 3:
+            continue
+        if vertices_mm[0] != vertices_mm[-1]:
+            vertices_mm.append(vertices_mm[0])
+
+        raster, area, vertices_mm_norm = _rasterize_vertices(vertices_mm, gpu_scale, piece_buffer)
+
+        # Demand from piece_quantities (qty=2 means L/R pair)
+        piece_name = piece.identifier.piece_name
+        demand = piece_quantities.get(piece_name, 1)
+
+        if size not in pieces_by_size:
+            pieces_by_size[size] = []
+
+        pieces_by_size[size].append({
+            'name': piece_name,
+            'size': size,
+            'raster': raster,
+            'raster_gpu': cp.asarray(raster),
+            'raster_180': np.rot90(raster, 2),
+            'raster_180_gpu': cp.asarray(np.rot90(raster, 2)),
+            'area': area,
+            'demand': demand,
             'vertices_mm': vertices_mm_norm,
         })
 
@@ -621,6 +675,7 @@ def run_nesting_for_material(
     full_coverage: bool = False,
     result_callback: Optional[Callable[[int, List[Dict]], None]] = None,
     cancel_check: Optional[Callable[[], bool]] = None,
+    file_type: Optional[str] = None,
 ) -> Dict[int, List[Dict]]:
     """
     Run GPU nesting for a specific material.
@@ -655,7 +710,7 @@ def run_nesting_for_material(
         progress_callback(0, f"Loading pieces for material {material}...")
 
     pieces_by_size = load_pieces_for_material(
-        dxf_path, rul_path, material, sizes, gpu_scale
+        dxf_path, rul_path, material, sizes, gpu_scale, file_type=file_type
     )
 
     if not pieces_by_size:

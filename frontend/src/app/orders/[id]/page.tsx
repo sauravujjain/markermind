@@ -43,7 +43,7 @@ export default function OrderDetailPage() {
   const [activeFabricTab, setActiveFabricTab] = useState<string>('')
   const [showPatternUpload, setShowPatternUpload] = useState(false)
   const [patternUploadName, setPatternUploadName] = useState('')
-  const [uploadFileType, setUploadFileType] = useState<'aama' | 'dxf_only'>('aama')
+  const [uploadFileType, setUploadFileType] = useState<'aama' | 'dxf_only' | 'vt_dxf'>('aama')
   const [selectedDxfFile, setSelectedDxfFile] = useState<File | null>(null)
   const [selectedRulFile, setSelectedRulFile] = useState<File | null>(null)
   const [isUploadingPattern, setIsUploadingPattern] = useState(false)
@@ -285,9 +285,23 @@ export default function OrderDetailPage() {
                       >
                         DXF Only
                       </button>
+                      <button
+                        type="button"
+                        onClick={() => { setUploadFileType('vt_dxf'); setSelectedRulFile(null); setSizeNames('') }}
+                        className={`flex-1 px-2 py-1.5 text-xs font-medium rounded transition-all ${
+                          uploadFileType === 'vt_dxf'
+                            ? 'bg-background shadow-sm text-foreground'
+                            : 'text-muted-foreground hover:text-foreground'
+                        }`}
+                      >
+                        VT DXF
+                      </button>
                     </div>
                     {uploadFileType === 'dxf_only' && (
                       <p className="text-[11px] text-muted-foreground mb-1">Pre-sized pieces — no grading file needed</p>
+                    )}
+                    {uploadFileType === 'vt_dxf' && (
+                      <p className="text-[11px] text-muted-foreground mb-1">Optitex Graded Nest — sizes auto-detected</p>
                     )}
                   </div>
 

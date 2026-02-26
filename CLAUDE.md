@@ -104,6 +104,26 @@ Update this checklist as new requirements are identified during development.
 
 ---
 
+## CRITICAL: Primary User Interface
+
+**The order detail page (`orders/[id]/page.tsx`) is the PRIMARY user workflow.** All pattern upload, nesting, and cutplan operations happen from within an order context — not from the standalone `/patterns` page.
+
+**User flow:**
+1. Create/import an order → lands on `/orders/[id]`
+2. Upload pattern **from the order page** (inline upload form)
+3. Assign pattern to order
+4. Run GPU nesting
+5. Generate cutplan
+6. Review and approve
+
+**Pattern upload lives in two places:**
+- **`orders/[id]/page.tsx`** — PRIMARY. This is where users upload patterns during their workflow. Any new parser options or upload UI changes MUST be added here first.
+- **`patterns/page.tsx`** — SECONDARY. Standalone pattern library page. Keep in sync but this is not the main user path.
+
+When adding new features to pattern upload (new parser types, new fields, etc.), always update `orders/[id]/page.tsx` first — that's what users actually see.
+
+---
+
 ## Project Overview
 
 A 2D irregular nesting engine for garment manufacturing, targeting state-of-the-art material utilization using the Spyrrow heuristic as the core solver.
@@ -236,6 +256,7 @@ Before any PR:
 | `io/aama_parser.py` | AAMA/ASTM DXF+RUL grading parser | When needed |
 | `io/dxf_text_parser.py` | Text-label DXF parser (Gerber-style) | When needed |
 | `io/dxf_block_parser.py` | Block-based production DXF parser | When needed |
+| `io/vt_dxf_parser.py` | Optitex Graded Nest DXF parser (VT format) | When needed |
 | `io/dxf_parser.py` | Orchestrator, backward-compat re-exports | Rarely |
 | `apps/app.py` | UI | Freely |
 | `scripts/gpu_*_ga_ratio_optimizer.py` | GPU raster nesting & ratio optimization | When needed |
@@ -255,6 +276,7 @@ For in-depth algorithm documentation, see:
 | [`docs/gpu_nesting.md`](docs/gpu_nesting.md) | GPU raster nesting algorithm: FFT convolution, piece placement, sorting strategies, island GA |
 | [`docs/cutplan_optimizer.md`](docs/cutplan_optimizer.md) | ILP cutplan optimization: single-color, multicolor joint, two-stage solvers |
 | [`docs/cutting_costs.md`](docs/cutting_costs.md) | Cost calculation methodology: fabric, spreading, cutting, prep costs |
+| [`docs/production_deployment.md`](docs/production_deployment.md) | **Production deployment guide**: GCP architecture, Cloud Run GPU, multi-tenant subdomain routing, pricing, cost analysis |
 
 ## GPU Raster Nesting (Fast Marker Algorithm)
 

@@ -65,6 +65,10 @@ class PatternService:
             if pattern.file_type == "dxf_only":
                 return self._parse_dxf_only(db, pattern, dxf_path, size_names=size_names)
 
+            # VT DXF branch: Optitex Graded Nest (one DXF per material, sizes in blocks)
+            if pattern.file_type == "vt_dxf":
+                return self._parse_vt_dxf(db, pattern, dxf_path)
+
             # Import the parser functions
             from nesting_engine.io.aama_parser import load_aama_pattern, AAMAGrader
 
@@ -335,6 +339,114 @@ class PatternService:
             mapping = PatternFabricMapping(
                 pattern_id=pattern.id,
                 material_name="MAIN",
+            )
+            db.add(mapping)
+
+        db.commit()
+        db.refresh(pattern)
+
+        return {
+            "success": True,
+            "sizes": sizes,
+            "materials": materials,
+            "piece_count": len(pieces),
+            "metadata": pattern.parse_metadata,
+        }
+
+    def _parse_vt_dxf(self, db: Session, pattern: Pattern, dxf_path: str) -> Dict[str, Any]:
+        """Parse an Optitex Graded Nest DXF (VT format)."""
+        import math
+        from nesting_engine.io.vt_dxf_parser import parse_vt_dxf
+
+        pieces, sizes, piece_quantities, material = parse_vt_dxf(dxf_path)
+        materials = [material]
+
+        # Build piece details for UI (same structure as AAMA/DXF-only paths)
+        piece_details = []
+        for piece in pieces:
+            verts = list(piece.vertices)
+            piece_name = piece.identifier.piece_name
+            size = piece.identifier.size
+            qty = piece_quantities.get(piece_name, 1)
+
+            if verts:
+                xs = [v[0] for v in verts]
+                ys = [v[1] for v in verts]
+                bbox = {
+                    "min_x": min(xs), "max_x": max(xs),
+                    "min_y": min(ys), "max_y": max(ys),
+                    "width": max(xs) - min(xs),
+                    "height": max(ys) - min(ys),
+                }
+                preview_verts = verts
+                if len(preview_verts) > 50:
+                    step = len(preview_verts) // 50
+                    preview_verts = preview_verts[::step]
+                simplified_vertices = [
+                    [v[0] - bbox["min_x"], v[1] - bbox["min_y"]]
+                    for v in preview_verts
+                ]
+            else:
+                bbox = None
+                simplified_vertices = None
+
+            piece_details.append({
+                "name": f"{piece_name}_{size}",
+                "material": material,
+                "quantity": qty,
+                "has_left_right": qty >= 2,
+                "left_qty": qty // 2 if qty >= 2 else 0,
+                "right_qty": qty // 2 if qty >= 2 else 0,
+                "has_grain_line": piece.grain is not None,
+                "bbox": bbox,
+                "vertices": simplified_vertices,
+            })
+
+        pieces_by_material = {material: piece_details}
+
+        # Compute perimeter_by_size (vertices already in mm)
+        perimeter_by_size = {material: {}}
+        for size in sizes:
+            total_perimeter = 0.0
+            for piece in pieces:
+                if piece.identifier.size != size:
+                    continue
+                verts = list(piece.vertices)
+                piece_name = piece.identifier.piece_name
+                qty = piece_quantities.get(piece_name, 1)
+                if len(verts) >= 3:
+                    perim = 0.0
+                    for i in range(len(verts)):
+                        x1, y1 = verts[i]
+                        x2, y2 = verts[(i + 1) % len(verts)]
+                        perim += math.sqrt((x2 - x1)**2 + (y2 - y1)**2)
+                    # Convert mm to cm, multiply by demand
+                    total_perimeter += perim * 0.1 * qty
+            perimeter_by_size[material][size] = round(total_perimeter, 2)
+
+        # Update pattern record
+        pattern.is_parsed = True
+        pattern.available_sizes = sizes
+        pattern.available_materials = materials
+        pattern.parse_metadata = {
+            "piece_count": len(pieces),
+            "sizes": sizes,
+            "materials": materials,
+            "pieces": piece_details,
+            "pieces_by_material": pieces_by_material,
+            "perimeter_by_size": perimeter_by_size,
+            "piece_quantities": piece_quantities,
+        }
+
+        # Create fabric mapping
+        existing = db.query(PatternFabricMapping).filter(
+            PatternFabricMapping.pattern_id == pattern.id,
+            PatternFabricMapping.material_name == material
+        ).first()
+        if not existing:
+            mapping = PatternFabricMapping(
+                pattern_id=pattern.id,
+                material_name=material,
             )
             db.add(mapping)
 

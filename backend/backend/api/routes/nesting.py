@@ -347,7 +347,7 @@ async def test_marker(
 
     if not pattern.dxf_file_path:
         raise HTTPException(status_code=400, detail="Pattern DXF file not available")
-    if not pattern.rul_file_path and pattern.file_type != "dxf_only":
+    if not pattern.rul_file_path and pattern.file_type not in ("dxf_only", "vt_dxf"):
         raise HTTPException(status_code=400, detail="Pattern RUL file not available")
 
     # Validate size_bundles
@@ -395,6 +395,7 @@ async def test_marker(
         # Load and grade pieces
         nesting_pieces, piece_config = load_pieces_for_spyrrow(
             dxf_path, rul_path, material, sizes, allowed_rotations=allowed_rotations,
+            file_type=pattern.file_type,
         )
 
         # Run Spyrrow solver for this single ratio

@@ -188,12 +188,13 @@ def load_pieces_for_spyrrow(
     material: str,
     sizes: List[str],
     allowed_rotations: List[int] = [0, 180],
+    file_type: Optional[str] = None,
 ) -> Tuple[List[Piece], Dict[str, dict]]:
     """
     Load graded pieces via grade_material_to_nesting_pieces().
 
     For DXF-only patterns (rul_path is None), uses load_dxf_pieces_by_size()
-    instead.
+    instead. For VT DXF patterns, uses parse_vt_dxf().
 
     Returns:
         (nesting_pieces, piece_config)
@@ -201,6 +202,10 @@ def load_pieces_for_spyrrow(
         - piece_config: {piece_name: {demand: int, flipped: bool}}
           Mirrors the Streamlit app's piece_type_config.
     """
+    # VT DXF path: Optitex Graded Nest format
+    if file_type == "vt_dxf":
+        return _load_pieces_vt_dxf_for_spyrrow(dxf_path, sizes, allowed_rotations)
+
     # DXF-only path: no RUL grading, pieces already sized in DXF
     if rul_path is None or not Path(rul_path).exists():
         from nesting_engine.io.dxf_parser import load_dxf_pieces_by_size
@@ -260,6 +265,51 @@ def load_pieces_for_spyrrow(
             demand = aama_piece.quantity.total if aama_piece else 1
             flipped = False
         piece_config[piece_name] = {'demand': demand, 'flipped': flipped}
+
+    return nesting_pieces, piece_config
+
+
+def _load_pieces_vt_dxf_for_spyrrow(
+    dxf_path: str,
+    sizes: List[str],
+    allowed_rotations: List[int] = [0, 180],
+) -> Tuple[List[Piece], Dict[str, dict]]:
+    """Load pieces from a VT DXF (Optitex Graded Nest) for Spyrrow nesting."""
+    from nesting_engine.io.vt_dxf_parser import parse_vt_dxf
+
+    all_pieces, all_sizes, piece_quantities, _material = parse_vt_dxf(
+        dxf_path, rotations=allowed_rotations,
+    )
+
+    # Filter to requested sizes
+    target_set = set(sizes)
+    nesting_pieces = [p for p in all_pieces if p.identifier.size in target_set]
+
+    logger.info(f"Loaded {len(nesting_pieces)} VT DXF pieces for sizes={sizes}")
+
+    # Clean vertices
+    cleaned_count = 0
+    for p in nesting_pieces:
+        original_len = len(p.vertices)
+        p.vertices = _clean_polygon_vertices(list(p.vertices))
+        if len(p.vertices) != original_len:
+            cleaned_count += 1
+    if cleaned_count:
+        logger.info(f"Cleaned duplicate vertices from {cleaned_count}/{len(nesting_pieces)} pieces")
+
+    # Build piece_config from quantities
+    # qty=2 means L/R pair -> demand=1 per side, flipped=True
+    # qty=1 means single piece -> demand=1, flipped=False
+    piece_config: Dict[str, dict] = {}
+    for p in nesting_pieces:
+        piece_name = p.identifier.piece_name
+        if piece_name in piece_config:
+            continue
+        qty = piece_quantities.get(piece_name, 1)
+        if qty >= 2:
+            piece_config[piece_name] = {'demand': qty // 2, 'flipped': True}
+        else:
+            piece_config[piece_name] = {'demand': qty, 'flipped': False}
 
     return nesting_pieces, piece_config
 
@@ -682,6 +732,7 @@ def refine_cutplan_markers(
     rotation_mode: str = "free",
     progress_callback: Optional[Callable] = None,
     cancel_check: Optional[Callable] = None,
+    file_type: Optional[str] = None,
 ) -> List[Dict]:
     """
     Refine all markers in a cutplan sequentially with Spyrrow.
@@ -701,6 +752,7 @@ def refine_cutplan_markers(
     # Load pieces once for all markers
     nesting_pieces, piece_config = load_pieces_for_spyrrow(
         dxf_path, rul_path, material, sizes, allowed_rotations,
+        file_type=file_type,
     )
 
     total = len(markers)

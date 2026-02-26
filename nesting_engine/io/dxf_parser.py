@@ -29,6 +29,7 @@ from nesting_engine.io.dxf_text_parser import (
     load_pieces_from_dxf,
 )
 from nesting_engine.io.dxf_block_parser import parse_block_dxf
+from nesting_engine.io.vt_dxf_parser import parse_vt_dxf
 
 logger = logging.getLogger(__name__)
 

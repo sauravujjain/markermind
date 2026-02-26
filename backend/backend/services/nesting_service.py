@@ -230,7 +230,7 @@ class NestingService:
             # Get pattern file paths (convert relative to absolute)
             if not pattern.dxf_file_path:
                 raise ValueError("Pattern DXF file not available")
-            if not pattern.rul_file_path and pattern.file_type != "dxf_only":
+            if not pattern.rul_file_path and pattern.file_type not in ("dxf_only", "vt_dxf"):
                 raise ValueError("Pattern RUL file not available")
 
             from ..config import resolve_path
@@ -296,6 +296,7 @@ class NestingService:
                 full_coverage=job.full_coverage or False,
                 result_callback=save_incremental_results,
                 cancel_check=check_cancelled,
+                file_type=pattern.file_type,
             )
 
             # Results already saved incrementally, now add to marker bank

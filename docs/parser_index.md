@@ -11,6 +11,7 @@ Reference for all CAD format parsers in MarkerMind. When encountering a new file
 | AAMA/ASTM DXF+RUL | `nesting_engine/io/aama_parser.py` | `load_aama_pattern()` | DXF + RUL | Production |
 | Block-based DXF | `nesting_engine/io/dxf_block_parser.py` | `parse_block_dxf()` | DXF only | Production |
 | Text-label DXF (Gerber-style) | `nesting_engine/io/dxf_text_parser.py` | `DXFParser.parse()` | DXF only | Production |
+| VT DXF (Graded Nest) | `nesting_engine/io/vt_dxf_parser.py` | `parse_vt_dxf()` | DXF only | Production |
 | Orchestrator (tries all) | `nesting_engine/io/dxf_parser.py` | `load_dxf_pieces_by_size()` | DXF only | Production |
 | Gerber native | `backend/models/pattern.py` | N/A | TBD | Enum only |
 | Lectra | `backend/models/pattern.py` | N/A | TBD | Enum only |
@@ -231,6 +232,69 @@ pieces, result = load_pieces_from_dxf("marker.dxf")
 
 ---
 
+## Format 4: VT DXF (Optitex Graded Nest)
+
+**File:** `nesting_engine/io/vt_dxf_parser.py` -> `parse_vt_dxf()`
+**FileType enum:** `vt_dxf`
+**Frontend workflow:** User uploads DXF, selects "VT DXF (Graded)" -- no RUL or size names needed
+
+### What it is
+
+Optitex "Graded Nest" export where each material gets its own DXF file, and all sizes are pre-graded as separate blocks. Every block has TEXT annotations identifying piece name, size, quantity, and material. No companion RUL file needed.
+
+### DXF structure
+
+- One DXF per material (e.g., `25528-101.dxf`, `25528-201.dxf`)
+- Blocks come in pairs: primary (odd) + shadow (even) -- shadow blocks are skipped
+- **Primary blocks** have 8 TEXT annotations: `Piece Name:`, `Size:`, `Quantity:`, `Material:`, `Annotation:`, `Style Name:`, `Sample Size`, `Quality:`
+- **Shadow blocks** have only 2 TEXT annotations: `Piece Name:`, `Size:` (with `-1` suffix) -- these are filtered out by checking for missing `Quantity:` annotation
+- Layer 1 POLYLINE: piece boundary vertices
+- Layer 7 LINE: grain direction
+
+### Piece name format
+
+`PieceNum_SizeLabel` (e.g., `4_M` -> piece `4`, size `M`). Parser uses `rsplit("_", 1)` to handle piece names that might contain underscores.
+
+### Quantity handling
+
+- `Quantity: 1` -- single piece per bundle
+- `Quantity: 2` -- piece needs a mirrored copy (L/R pair). The DXF only contains one shape; the nesting engine creates the mirror.
+
+### Unit detection
+
+Coordinates are in centimetres. Parser detects by sampling Layer 1 POLYLINE vertices:
+- Max coordinate < 1000 -> cm (x10 for mm)
+- Max coordinate >= 2000 -> mm (x1)
+
+### Size ordering
+
+Sizes are sorted into canonical garment order: XXS, XS, S, M, L, XL, 2XL, 3XL, 4XL, 5XL.
+
+### Entry points
+
+```python
+from nesting_engine.io.vt_dxf_parser import parse_vt_dxf
+
+pieces, sizes, piece_quantities = parse_vt_dxf("25528-101.dxf")
+# pieces: 56 Piece objects (8 shapes x 7 sizes)
+# sizes: ['XS', 'S', 'M', 'L', 'XL', '2XL', '3XL']
+# piece_quantities: {'1': 1, '2': 1, '3': 1, '4': 2, '5': 1, '6': 2, '7': 2, '8': 2}
+```
+
+### What it outputs
+
+- `available_sizes`: Auto-detected and sorted (e.g., XS..3XL)
+- `available_materials`: Single material per file, extracted from filename
+- `piece_quantities`: `{piece_name: qty}` -- used by nesting runners for L/R pair handling
+
+### Limitations
+
+- One material per DXF file (by design)
+- Shadow block filtering assumes "Quantity:" is only in primary blocks
+- Piece name parsing assumes `_` separates piece number from size label
+
+---
+
 ## Format routing
 
 ### Backend decision tree
@@ -247,6 +311,12 @@ pattern.file_type
 │   ├── Step 2: If 0 pieces found, try _parse_block_dxf()
 │   ├── Size names: From user input or auto-generated SIZE_N
 │   └── Materials: Always "MAIN"
+│
+├── "vt_dxf"
+│   ├── Uses: vt_dxf_parser.parse_vt_dxf(dxf)
+│   ├── Sizes: Auto-detected from piece names (PieceNum_SizeLabel)
+│   ├── Materials: Extracted from filename or annotations
+│   └── Quantities: From Quantity annotation (qty=2 → L/R pair)
 │
 ├── "gerber"  (NOT IMPLEMENTED)
 │   └── Enum exists in FileType, no parser

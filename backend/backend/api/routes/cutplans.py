@@ -574,7 +574,7 @@ def execute_refinement_job(
         dxf_path = resolve_path(pattern.dxf_file_path)
         rul_path = resolve_path(pattern.rul_file_path) if pattern.rul_file_path else None
 
-        if not rul_path and pattern.file_type != "dxf_only":
+        if not rul_path and pattern.file_type not in ("dxf_only", "vt_dxf"):
             raise ValueError("Pattern RUL file required for graded nesting")
 
         # Determine material and fabric width from order lines + nesting job
@@ -705,6 +705,7 @@ def execute_refinement_job(
             rotation_mode=rotation_mode,
             progress_callback=progress_cb,
             cancel_check=cancel_cb,
+            file_type=pattern.file_type,
         )
 
         elapsed = time.time() - _refinement_jobs[cutplan_id]["started_at"]
