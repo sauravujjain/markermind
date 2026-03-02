@@ -268,6 +268,28 @@ class ApiClient {
     })
   }
 
+  async getTestMarkers(patternId: string, orderId?: string) {
+    const params = new URLSearchParams()
+    params.set('pattern_id', patternId)
+    if (orderId) params.set('order_id', orderId)
+    return this.request<SavedTestMarkerResult[]>(`/nesting/test-markers?${params.toString()}`)
+  }
+
+  async getTestMarker(id: string) {
+    return this.request<SavedTestMarkerResult>(`/nesting/test-markers/${id}`)
+  }
+
+  async deleteTestMarker(id: string) {
+    return this.request<{ message: string }>(`/nesting/test-markers/${id}`, { method: 'DELETE' })
+  }
+
+  async updateTestMarkerNotes(id: string, notes: string) {
+    return this.request<SavedTestMarkerResult>(`/nesting/test-markers/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ notes }),
+    })
+  }
+
   async getMarkers(patternId?: string, fabricId?: string) {
     const params = new URLSearchParams()
     if (patternId) params.set('pattern_id', patternId)
@@ -530,21 +552,65 @@ export interface TestMarkerRequest {
   fabric_width_inches: number
   size_bundles: Record<string, number>
   material?: string           // e.g., "SHELL" — defaults to first available
-  time_limit?: number         // seconds (1-60, default 10)
-  piece_buffer_mm?: number    // gap between pieces in mm (0-10, default 2)
-  edge_buffer_mm?: number     // gap from edge in mm (0-20, default 5)
+  time_limit?: number         // max seconds per marker (default 120, early stop)
+  piece_buffer_mm?: number    // gap between pieces in mm (default 0)
+  edge_buffer_mm?: number     // gap from edge in mm (default 0)
   orientation?: string        // "free" or "nap_one_way" (default "free")
+  quadtree_depth?: number     // collision detection depth 3-5 (default 5)
+  early_termination?: boolean // stop when no improvement (default true)
+  exploration_time_s?: number | null  // custom explore time (seconds)
+  compression_time_s?: number | null  // custom compress time (seconds)
+  order_id?: string | null            // optional order context
+  use_cloud?: boolean                 // run on Modal cloud (default false)
+  seed_screening?: boolean            // run 6 seeds × 10s to find best seed
 }
 
 export interface TestMarkerResponse {
+  id: string | null
   efficiency: number
   length_mm: number
   length_yards: number
+  fabric_width_mm: number
   piece_count: number
   bundle_count: number
   ratio_str: string
   computation_time_ms: number
   svg_preview: string | null
+  exploration_time_s: number | null
+  compression_time_s: number | null
+  use_cloud?: boolean
+  seed_used?: number | null
+  seed_screening?: boolean
+}
+
+export interface SavedTestMarkerResult {
+  id: string
+  pattern_id: string
+  order_id: string | null
+  ratio_str: string
+  size_bundles: Record<string, number>
+  bundle_count: number
+  material: string | null
+  efficiency: number
+  length_mm: number
+  length_yards: number
+  fabric_width_mm: number
+  piece_count: number
+  computation_time_ms: number
+  svg_preview?: string | null  // only included in single-item fetch
+  time_limit_s: number
+  quadtree_depth: number
+  early_termination: boolean
+  piece_buffer_mm: number
+  edge_buffer_mm: number
+  orientation: string
+  exploration_time_s: number | null
+  compression_time_s: number | null
+  use_cloud?: boolean
+  seed_used?: number | null
+  seed_screening?: boolean
+  notes: string | null
+  created_at: string
 }
 
 export interface CutplanOptimizeRequest {
@@ -640,7 +706,13 @@ export interface RefinementConfig {
   piece_buffer_mm: number
   edge_buffer_mm: number
   time_limit_s: number
-  rotation_mode: string  // "free" or "nap_safe"
+  rotation_mode: string  // "free" or "nap_one_way"
+  quadtree_depth: number
+  early_termination: boolean
+  exploration_time_s?: number | null  // custom explore time (seconds), null = auto
+  compression_time_s?: number | null  // custom compress time (seconds), null = auto
+  seed_screening?: boolean            // run 6 seeds × 10s to find best seed
+  use_cloud?: boolean                 // run on Modal cloud
 }
 
 export interface MarkerLayout {

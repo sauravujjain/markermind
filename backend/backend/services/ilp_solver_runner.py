@@ -281,18 +281,25 @@ def filter_markers_for_ilp(
 def markers_from_nesting_results(
     nesting_results: List[Dict],
     sizes: List[str],
+    pattern_sizes: Optional[List[str]] = None,
 ) -> List[Marker]:
     """
     Convert nesting job results to Marker objects.
 
+    Handles the case where the pattern has more sizes than the order demands.
+    E.g., pattern has 7 sizes (XS..3XL) but order only demands 6 (XS..2XL).
+    GPU nesting ratio strings use all pattern sizes, so we map and trim them.
+
     Args:
         nesting_results: List of dicts with ratio_str, efficiency, length_yards, bundle_count
-        sizes: List of size codes in order
+        sizes: List of size codes in order (from order demand)
+        pattern_sizes: Optional list of all sizes in the pattern (for ratio_str parsing)
 
     Returns:
         List of Marker objects
     """
     markers = []
+    order_sizes_set = set(sizes)
 
     for result in nesting_results:
         ratio_str = result.get("ratio_str", "")
@@ -300,10 +307,21 @@ def markers_from_nesting_results(
             continue
 
         ratio_parts = ratio_str.split("-")
-        if len(ratio_parts) != len(sizes):
-            continue
 
-        ratio = {size: int(ratio_parts[i]) for i, size in enumerate(sizes)}
+        if len(ratio_parts) == len(sizes):
+            # Exact match — parse directly
+            ratio = {size: int(ratio_parts[i]) for i, size in enumerate(sizes)}
+        elif pattern_sizes and len(ratio_parts) == len(pattern_sizes):
+            # Pattern has extra sizes not in order — map and filter
+            full_ratio = {size: int(ratio_parts[i]) for i, size in enumerate(pattern_sizes)}
+            # Skip markers that use sizes not in the order (can't fulfill those)
+            has_extra = any(full_ratio[s] > 0 for s in pattern_sizes if s not in order_sizes_set)
+            if has_extra:
+                continue
+            ratio = {s: full_ratio[s] for s in sizes}
+            ratio_str = "-".join(str(ratio[s]) for s in sizes)
+        else:
+            continue  # Truly incompatible
 
         markers.append(Marker(
             ratio=ratio,
@@ -482,6 +500,7 @@ def optimize_cutplan(
     penalty: float = 5.0,
     strategy_callback: Optional[Callable[[str, Dict], None]] = None,
     cancel_check: Optional[Callable[[], bool]] = None,
+    pattern_sizes: Optional[List[str]] = None,
 ) -> List[Dict]:
     """
     Run ILP optimization with multiple strategies.
@@ -494,6 +513,8 @@ def optimize_cutplan(
         penalty: Penalty for balanced objective
         strategy_callback: Called after each strategy completes with (strategy_name, result_dict)
         cancel_check: Returns True if job should be cancelled
+        pattern_sizes: Optional list of all sizes in the pattern (for ratio_str parsing
+                       when pattern has more sizes than the order demands)
 
     Returns:
         List of cutplan option dicts with cost breakdowns
@@ -502,9 +523,12 @@ def optimize_cutplan(
         options = ["max_efficiency", "balanced", "min_markers"]
 
     print(f"[ILP] Starting optimization: {len(markers)} raw markers, {len(options)} strategies, demand={demand}")
+    if pattern_sizes and len(pattern_sizes) != len(sizes):
+        print(f"[ILP] Pattern has {len(pattern_sizes)} sizes {pattern_sizes}, order has {len(sizes)} sizes {sizes} — remapping ratio strings")
 
     # Convert markers to Marker objects
-    marker_objects = markers_from_nesting_results(markers, sizes)
+    marker_objects = markers_from_nesting_results(markers, sizes, pattern_sizes=pattern_sizes)
+    print(f"[ILP] Parsed {len(marker_objects)} markers from {len(markers)} raw results")
 
     # Generate all 1-2 bundle markers for completeness
     efficiency_lookup = {m.ratio_str: m.efficiency for m in marker_objects}

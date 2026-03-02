@@ -94,17 +94,26 @@ class NestingEngine(ABC):
 class SpyrrowConfig:
     """
     Configuration for the Spyrrow solver.
-    
+
     Attributes:
-        time_limit: Maximum computation time in seconds
+        time_limit: Maximum computation time in seconds (used as total_computation_time
+            when exploration_time/compression_time are not set)
         num_workers: Number of parallel threads (0 = auto)
         seed: Random seed for reproducibility (None = random)
-        early_termination: Stop early if optimal found
+        early_termination: Stop early when no improvement found
+        quadtree_depth: Collision detection quadtree depth (3-5, default 4)
+        min_items_separation: Minimum distance between pieces in mm (None = touching)
+        exploration_time: Explicit exploration phase time in seconds (None = use time_limit * 80%)
+        compression_time: Explicit compression phase time in seconds (None = use time_limit * 20%)
     """
     time_limit: float = 60.0
     num_workers: int = 0  # 0 = auto-detect
     seed: Optional[int] = None
-    early_termination: bool = False
+    early_termination: bool = True
+    quadtree_depth: int = 4
+    min_items_separation: Optional[float] = None
+    exploration_time: Optional[int] = None  # seconds, overrides time_limit split
+    compression_time: Optional[int] = None  # seconds, overrides time_limit split
 
 
 class SpyrrowEngine(NestingEngine):
@@ -166,26 +175,46 @@ class SpyrrowEngine(NestingEngine):
             config = SpyrrowConfig(time_limit=time_limit)
         
         start_time = time.time()
-        
+
+        # Map piece_buffer to min_items_separation if not already set
+        if config.min_items_separation is None and instance.piece_buffer > 0:
+            config.min_items_separation = instance.piece_buffer
+
         # Convert our instance to spyrrow format
         spyrrow_items, item_mapping = self._convert_items(instance)
         
         # Create spyrrow instance
         # Note: spyrrow's strip_height is our container width
+        # Use effective width (reduced by edge_buffer) if edge_buffer is set
+        effective_width = instance.get_effective_container_width() if instance.edge_buffer > 0 else instance.container.width
         spyrrow_instance = spyrrow.StripPackingInstance(
             instance.id,
-            strip_height=instance.container.width,
+            strip_height=effective_width,
             items=spyrrow_items
         )
         
         # Create spyrrow config
         # Note: spyrrow 0.8.0 fixed the 'num_wokers' typo to 'num_workers'
         # Pass None for auto-detection of CPU cores
+        #
+        # Time budget: If explicit exploration_time + compression_time are set,
+        # use those (guarantees compression runs). Otherwise use total_computation_time
+        # with default 80/20 split.
+        time_kwargs = {}
+        if config.exploration_time is not None and config.compression_time is not None:
+            time_kwargs['total_computation_time'] = None
+            time_kwargs['exploration_time'] = config.exploration_time
+            time_kwargs['compression_time'] = config.compression_time
+        else:
+            time_kwargs['total_computation_time'] = int(config.time_limit)
+
         spyrrow_config = spyrrow.StripPackingConfig(
             early_termination=config.early_termination,
-            total_computation_time=int(config.time_limit),
+            **time_kwargs,
             num_workers=config.num_workers if config.num_workers and config.num_workers > 0 else None,
-            seed=config.seed if config.seed is not None else 0
+            seed=config.seed if config.seed is not None else 0,
+            quadtree_depth=config.quadtree_depth,
+            min_items_separation=config.min_items_separation,
         )
         
         # Solve

@@ -413,6 +413,11 @@ def run_nesting(
     piece_buffer: float,
     edge_buffer: float,
     time_limit: float,
+    quadtree_depth: int = 4,
+    early_termination: bool = True,
+    exploration_time: Optional[int] = None,
+    compression_time: Optional[int] = None,
+    seed: int = 42,
 ) -> 'NestingSolution':
     """Run the nesting solver — identical to Streamlit run_nesting()."""
     nest_pieces = [bp.piece for bp in bundle_pieces]
@@ -436,7 +441,11 @@ def run_nesting(
     config = SpyrrowConfig(
         time_limit=time_limit,
         num_workers=None,
-        seed=42,
+        seed=seed,
+        early_termination=early_termination,
+        quadtree_depth=quadtree_depth,
+        exploration_time=exploration_time,
+        compression_time=compression_time,
     )
 
     return engine.solve(instance, config=config)
@@ -455,6 +464,12 @@ def nest_single_marker(
     edge_buffer_mm: float = 5.0,
     time_limit: float = 20.0,
     rotation_mode: str = "free",
+    quadtree_depth: int = 4,
+    early_termination: bool = True,
+    exploration_time: Optional[int] = None,
+    compression_time: Optional[int] = None,
+    seed: int = 42,
+    seed_screening: bool = False,
 ) -> Dict:
     """
     Run Spyrrow on a single marker ratio.
@@ -485,6 +500,24 @@ def nest_single_marker(
 
     logger.info(f"Nesting {len(bundle_pieces)} pieces for ratio {ratio}")
 
+    # Seed screening: run 6 random seeds for 10s each, pick the best
+    if seed_screening:
+        import random
+        screen_seeds = [random.randint(1, 9999) for _ in range(6)]
+        best_seed = seed
+        best_util = 0.0
+        for s in screen_seeds:
+            quick_sol = run_nesting(
+                bundle_pieces, fabric_width_mm, piece_buffer_mm, edge_buffer_mm,
+                time_limit=10, quadtree_depth=quadtree_depth,
+                early_termination=False, seed=s,
+            )
+            if quick_sol.utilization_percent > best_util:
+                best_util = quick_sol.utilization_percent
+                best_seed = s
+        seed = best_seed
+        logger.info(f"Seed screening: best={best_seed} ({best_util:.2f}%) from {screen_seeds}")
+
     start = time.time()
     solution = run_nesting(
         bundle_pieces,
@@ -492,8 +525,14 @@ def nest_single_marker(
         piece_buffer_mm,
         edge_buffer_mm,
         time_limit,
+        quadtree_depth=quadtree_depth,
+        early_termination=early_termination,
+        exploration_time=exploration_time,
+        compression_time=compression_time,
+        seed=seed,
     )
     elapsed = time.time() - start
+    logger.info(f"Spyrrow solve completed in {elapsed:.1f}s (limit={time_limit}s, early_term={early_termination}, qt_depth={quadtree_depth}, seed={seed})")
 
     length_yards = solution.strip_length / 914.4  # 1 yard = 914.4 mm
 
@@ -514,6 +553,7 @@ def nest_single_marker(
         'solution': solution,
         'bundle_pieces': bundle_pieces,
         'computation_time_s': elapsed,
+        'seed_used': seed,
     }
 
 
@@ -733,6 +773,11 @@ def refine_cutplan_markers(
     progress_callback: Optional[Callable] = None,
     cancel_check: Optional[Callable] = None,
     file_type: Optional[str] = None,
+    quadtree_depth: int = 4,
+    early_termination: bool = True,
+    exploration_time: Optional[int] = None,
+    compression_time: Optional[int] = None,
+    seed_screening: bool = False,
 ) -> List[Dict]:
     """
     Refine all markers in a cutplan sequentially with Spyrrow.
@@ -785,6 +830,11 @@ def refine_cutplan_markers(
             edge_buffer_mm=edge_buffer_mm,
             time_limit=time_limit,
             rotation_mode=rotation_mode,
+            quadtree_depth=quadtree_depth,
+            early_termination=early_termination,
+            exploration_time=exploration_time,
+            compression_time=compression_time,
+            seed_screening=seed_screening,
         )
 
         # Generate exports

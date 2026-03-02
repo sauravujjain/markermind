@@ -6,8 +6,12 @@ import json
 import traceback
 
 from ...database import get_db, SessionLocal
-from ...schemas.nesting import NestingJobCreate, NestingJobResponse, NestingJobListResponse, NestingJobResultResponse, TestMarkerRequest, TestMarkerResponse
-from ...models import User, NestingJob, NestingJobResult, MarkerBank, Pattern, Order
+from ...schemas.nesting import (
+    NestingJobCreate, NestingJobResponse, NestingJobListResponse, NestingJobResultResponse,
+    TestMarkerRequest, TestMarkerResponse,
+    TestMarkerResultResponse, TestMarkerResultListItem, TestMarkerResultUpdate,
+)
+from ...models import User, NestingJob, NestingJobResult, MarkerBank, Pattern, Order, TestMarkerResult
 from ...services.nesting_service import NestingService
 from ...config import resolve_path
 from ..deps import get_current_user
@@ -328,7 +332,7 @@ async def test_marker(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """Run a quick single-ratio CPU (Spyrrow) nest for diagnostic purposes. No DB writes."""
+    """Run a quick single-ratio CPU (Spyrrow) nest and persist the result."""
     import time as _time
     from ...services.spyrrow_nesting_runner import (
         load_pieces_for_spyrrow, nest_single_marker, export_marker_svg,
@@ -362,10 +366,19 @@ async def test_marker(
             raise HTTPException(status_code=400, detail=f"Size '{size}' not available in pattern")
 
     # Validate parameters
-    time_limit = max(1.0, min(60.0, request.time_limit))
+    time_limit = max(1.0, min(600.0, request.time_limit))
     piece_buffer_mm = max(0.0, min(10.0, request.piece_buffer_mm))
     edge_buffer_mm = max(0.0, min(20.0, request.edge_buffer_mm))
     orientation = request.orientation if request.orientation in ("free", "nap_one_way") else "free"
+    quadtree_depth = max(2, min(10, request.quadtree_depth))
+    early_termination = request.early_termination
+
+    # Validate exploration/compression time
+    exploration_time_s = None
+    compression_time_s = None
+    if request.exploration_time_s is not None and request.compression_time_s is not None:
+        exploration_time_s = max(1, min(3600, request.exploration_time_s))
+        compression_time_s = max(1, min(3600, request.compression_time_s))
 
     # Determine material — use request material or first available
     if not pattern.available_materials:
@@ -389,25 +402,129 @@ async def test_marker(
 
     fabric_width_mm = request.fabric_width_inches * 25.4
 
+    use_cloud = getattr(request, 'use_cloud', False)
+    seed_screening = getattr(request, 'seed_screening', False)
+
     try:
         t0 = _time.time()
 
-        # Load and grade pieces
+        # Load and grade pieces (always local — parsing stays on-prem)
         nesting_pieces, piece_config = load_pieces_for_spyrrow(
             dxf_path, rul_path, material, sizes, allowed_rotations=allowed_rotations,
             file_type=pattern.file_type,
         )
 
-        # Run Spyrrow solver for this single ratio
-        solution_data = nest_single_marker(
-            ratio=request.size_bundles,
-            nesting_pieces=nesting_pieces,
-            piece_config=piece_config,
-            fabric_width_mm=fabric_width_mm,
-            piece_buffer_mm=piece_buffer_mm,
-            edge_buffer_mm=edge_buffer_mm,
-            time_limit=time_limit,
-        )
+        if use_cloud:
+            # --- Cloud path: anonymize pieces and send to Modal ---
+            from ...services.spyrrow_nesting_runner import (
+                _group_pieces_by_name, build_bundle_pieces,
+            )
+            grouped = _group_pieces_by_name(nesting_pieces)
+            bundle_pieces = build_bundle_pieces(grouped, piece_config, request.size_bundles)
+
+            if not bundle_pieces:
+                raise HTTPException(status_code=400, detail="No pieces generated for this ratio")
+
+            effective_width = fabric_width_mm - 2 * edge_buffer_mm
+
+            # Anonymize: strip names, keep only vertices/demand/orientations
+            anonymous_pieces = []
+            for bp in bundle_pieces:
+                verts = list(bp.piece.vertices)
+                if verts and verts[0] != verts[-1]:
+                    verts.append(verts[0])
+                anonymous_pieces.append({
+                    "vertices": verts,
+                    "demand": 1,
+                    "allowed_orientations": [0.0, 180.0] if orientation == "free" else [0.0],
+                })
+
+            # Build config for remote solver
+            cloud_config = {
+                "quadtree_depth": quadtree_depth,
+                "early_termination": early_termination,
+                "seed": 42,
+                "num_workers": 0,  # 0 = auto-detect cores on Modal container
+                "min_items_separation": piece_buffer_mm if piece_buffer_mm > 0 else None,
+            }
+            if exploration_time_s is not None and compression_time_s is not None:
+                cloud_config["exploration_time"] = exploration_time_s
+                cloud_config["compression_time"] = compression_time_s
+            else:
+                cloud_config["time_limit_s"] = int(time_limit)
+
+            # Import and call Modal remote_nest
+            import importlib.util
+            from pathlib import Path as _Path
+            benchmark_path = _Path(__file__).parent.parent.parent.parent.parent / "scripts" / "modal_benchmark.py"
+            spec = importlib.util.spec_from_file_location("modal_benchmark", str(benchmark_path))
+            modal_mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(modal_mod)
+
+            if not modal_mod.MODAL_AVAILABLE:
+                raise HTTPException(status_code=500, detail="Modal not installed on server")
+
+            with modal_mod.app.run():
+                cloud_result = modal_mod.remote_nest.remote(
+                    effective_width, anonymous_pieces, cloud_config
+                )
+
+            # Build solution_data from cloud result for SVG rendering
+            # Map cloud placements back to local bundle_pieces
+            import math as _math
+            from nesting_engine.core.solution import NestingSolution, PlacedPiece
+
+            placements = []
+            for cp in cloud_result["placements"]:
+                idx = cp["piece_index"]
+                if idx < len(bundle_pieces):
+                    bp = bundle_pieces[idx]
+                    placements.append(PlacedPiece(
+                        piece_id=bp.piece.id,
+                        instance_index=0,
+                        x=cp["x"],
+                        y=cp["y"],
+                        rotation=cp["rotation"],
+                        flipped=False,
+                    ))
+
+            # Create a mock solution object for SVG export
+            class _CloudSolution:
+                def __init__(self, strip_length, util_pct, placed):
+                    self.strip_length = strip_length
+                    self.utilization_percent = util_pct * 100
+                    self.placements = placed
+
+            mock_solution = _CloudSolution(
+                cloud_result["strip_length_mm"],
+                cloud_result["utilization"],
+                placements,
+            )
+
+            solution_data = {
+                'utilization': cloud_result["utilization"],
+                'strip_length_mm': cloud_result["strip_length_mm"],
+                'length_yards': cloud_result["strip_length_mm"] / 914.4,
+                'solution': mock_solution,
+                'bundle_pieces': bundle_pieces,
+                'computation_time_s': cloud_result.get("computation_time_s", 0),
+            }
+        else:
+            # --- Local path ---
+            solution_data = nest_single_marker(
+                ratio=request.size_bundles,
+                nesting_pieces=nesting_pieces,
+                piece_config=piece_config,
+                fabric_width_mm=fabric_width_mm,
+                piece_buffer_mm=piece_buffer_mm,
+                edge_buffer_mm=edge_buffer_mm,
+                time_limit=time_limit,
+                quadtree_depth=quadtree_depth,
+                early_termination=early_termination,
+                exploration_time=exploration_time_s,
+                compression_time=compression_time_s,
+                seed_screening=seed_screening,
+            )
 
         computation_time_ms = (_time.time() - t0) * 1000
 
@@ -419,19 +536,140 @@ async def test_marker(
 
         piece_count = len(solution_data.get('bundle_pieces', []))
 
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Nesting failed: {str(e)}")
 
-    return TestMarkerResponse(
+    # Auto-save to DB
+    saved = TestMarkerResult(
+        pattern_id=request.pattern_id,
+        order_id=request.order_id,
+        created_by=current_user.id,
+        ratio_str=ratio_str,
+        size_bundles=request.size_bundles,
+        bundle_count=total_bundles,
+        material=material,
         efficiency=solution_data['utilization'],
         length_mm=solution_data['strip_length_mm'],
         length_yards=solution_data['length_yards'],
+        fabric_width_mm=fabric_width_mm,
+        piece_count=piece_count,
+        computation_time_ms=computation_time_ms,
+        svg_preview=svg_preview,
+        time_limit_s=time_limit,
+        quadtree_depth=quadtree_depth,
+        early_termination=early_termination,
+        piece_buffer_mm=piece_buffer_mm,
+        edge_buffer_mm=edge_buffer_mm,
+        orientation=orientation,
+        exploration_time_s=exploration_time_s,
+        compression_time_s=compression_time_s,
+        use_cloud=use_cloud,
+        seed_used=solution_data.get('seed_used'),
+        seed_screening=seed_screening,
+    )
+    db.add(saved)
+    db.commit()
+    db.refresh(saved)
+
+    return TestMarkerResponse(
+        id=saved.id,
+        efficiency=solution_data['utilization'],
+        length_mm=solution_data['strip_length_mm'],
+        length_yards=solution_data['length_yards'],
+        fabric_width_mm=fabric_width_mm,
         piece_count=piece_count,
         bundle_count=total_bundles,
         ratio_str=ratio_str,
         computation_time_ms=computation_time_ms,
         svg_preview=svg_preview,
+        exploration_time_s=exploration_time_s,
+        compression_time_s=compression_time_s,
+        use_cloud=use_cloud,
+        seed_used=solution_data.get('seed_used'),
+        seed_screening=seed_screening,
     )
+
+
+@router.get("/test-markers", response_model=List[TestMarkerResultListItem])
+async def list_test_markers(
+    pattern_id: Optional[str] = None,
+    order_id: Optional[str] = None,
+    skip: int = 0,
+    limit: int = 200,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """List saved test marker results (without SVG for performance)."""
+    from sqlalchemy.orm import defer as sa_defer
+    query = db.query(TestMarkerResult).options(
+        sa_defer(TestMarkerResult.svg_preview)
+    ).filter(
+        TestMarkerResult.created_by == current_user.id
+    )
+    if pattern_id:
+        query = query.filter(TestMarkerResult.pattern_id == pattern_id)
+    if order_id:
+        query = query.filter(TestMarkerResult.order_id == order_id)
+
+    results = query.order_by(TestMarkerResult.created_at.desc()).offset(skip).limit(limit).all()
+    return results
+
+
+@router.get("/test-markers/{result_id}", response_model=TestMarkerResultResponse)
+async def get_test_marker(
+    result_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Get a single test marker result with full SVG."""
+    result = db.query(TestMarkerResult).filter(
+        TestMarkerResult.id == result_id,
+        TestMarkerResult.created_by == current_user.id
+    ).first()
+    if not result:
+        raise HTTPException(status_code=404, detail="Test marker result not found")
+    return result
+
+
+@router.delete("/test-markers/{result_id}")
+async def delete_test_marker(
+    result_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Delete a saved test marker result."""
+    result = db.query(TestMarkerResult).filter(
+        TestMarkerResult.id == result_id,
+        TestMarkerResult.created_by == current_user.id
+    ).first()
+    if not result:
+        raise HTTPException(status_code=404, detail="Test marker result not found")
+    db.delete(result)
+    db.commit()
+    return {"message": "Deleted"}
+
+
+@router.patch("/test-markers/{result_id}", response_model=TestMarkerResultListItem)
+async def update_test_marker(
+    result_id: str,
+    update: TestMarkerResultUpdate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Update notes on a saved test marker result."""
+    result = db.query(TestMarkerResult).filter(
+        TestMarkerResult.id == result_id,
+        TestMarkerResult.created_by == current_user.id
+    ).first()
+    if not result:
+        raise HTTPException(status_code=404, detail="Test marker result not found")
+    if update.notes is not None:
+        result.notes = update.notes
+    db.commit()
+    db.refresh(result)
+    return result
 
 
 @router.get("/markers", response_model=List[dict])

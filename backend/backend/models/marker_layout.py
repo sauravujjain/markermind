@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, ForeignKey, Float, Text
+from sqlalchemy import Column, String, Integer, ForeignKey, Float, Text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 from ..database import Base
@@ -21,5 +21,6 @@ class MarkerLayout(Base, TimestampMixin):
     edge_buffer_mm = Column(Float)
     time_limit_s = Column(Float)
     rotation_mode = Column(String(20))
+    quadtree_depth = Column(Integer)
 
     cutplan_marker = relationship("CutplanMarker", back_populates="layout")

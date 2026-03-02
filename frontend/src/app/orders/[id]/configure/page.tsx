@@ -777,7 +777,7 @@ export default function ConfigurePage() {
         const firstFabricCode = orderFabricCodes[0]
         const fabric = fabrics.find(f => f.code === firstFabricCode)
         const width = fabric?.width_inches || nestingConfig.fabricWidthInches || 60
-        return <TestMarkerPanel pattern={pattern} fabricWidthInches={width} />
+        return <TestMarkerPanel pattern={pattern} fabricWidthInches={width} orderId={orderId} />
       })()}
     </>
   )

@@ -102,19 +102,106 @@ class TestMarkerRequest(BaseModel):
     fabric_width_inches: float
     size_bundles: Dict[str, int]  # e.g., {"32": 1, "34": 1}
     material: Optional[str] = None  # e.g., "SHELL" — defaults to first available
-    time_limit: float = 10.0      # seconds (1-60)
-    piece_buffer_mm: float = 2.0   # gap between pieces in mm (0-10)
-    edge_buffer_mm: float = 5.0    # gap from container edge in mm (0-20)
+    time_limit: float = 120.0     # seconds (max allowed time per marker)
+    piece_buffer_mm: float = 0.0   # gap between pieces in mm (0-10)
+    edge_buffer_mm: float = 0.0    # gap from container edge in mm (0-20)
     orientation: str = "free"      # "free" or "nap_one_way"
+    quadtree_depth: int = 5
+    early_termination: bool = True
+    exploration_time_s: Optional[int] = None   # custom explore time (seconds)
+    compression_time_s: Optional[int] = None   # custom compress time (seconds)
+    order_id: Optional[str] = None             # optional order context
+    use_cloud: bool = False                    # run on Modal cloud instead of local CPU
+    seed_screening: bool = False               # run 6 seeds × 10s to find best seed
 
 
 class TestMarkerResponse(BaseModel):
     """Response from a quick CPU test marker nest."""
+    id: Optional[str] = None       # DB id of saved result
     efficiency: float              # 0.0 - 1.0
     length_mm: float
     length_yards: float
+    fabric_width_mm: float         # echo back actual strip width used
     piece_count: int
     bundle_count: int
     ratio_str: str                 # e.g., "0-0-1-0-1-0-0"
     computation_time_ms: float
     svg_preview: Optional[str] = None  # SVG string of the marker layout
+    exploration_time_s: Optional[int] = None
+    compression_time_s: Optional[int] = None
+    use_cloud: bool = False
+    seed_used: Optional[int] = None
+    seed_screening: bool = False
+
+
+class TestMarkerResultResponse(BaseModel):
+    """Full test marker result from DB."""
+    id: str
+    pattern_id: str
+    order_id: Optional[str] = None
+    created_by: str
+    ratio_str: str
+    size_bundles: Dict[str, int]
+    bundle_count: int
+    material: Optional[str] = None
+    efficiency: float
+    length_mm: float
+    length_yards: float
+    fabric_width_mm: float
+    piece_count: int
+    computation_time_ms: float
+    svg_preview: Optional[str] = None
+    time_limit_s: float
+    quadtree_depth: int
+    early_termination: bool
+    piece_buffer_mm: float
+    edge_buffer_mm: float
+    orientation: str
+    exploration_time_s: Optional[int] = None
+    compression_time_s: Optional[int] = None
+    use_cloud: bool = False
+    seed_used: Optional[int] = None
+    seed_screening: bool = False
+    notes: Optional[str] = None
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class TestMarkerResultListItem(BaseModel):
+    """Lightweight test marker result without SVG for list endpoints."""
+    id: str
+    pattern_id: str
+    order_id: Optional[str] = None
+    ratio_str: str
+    size_bundles: Dict[str, int]
+    bundle_count: int
+    material: Optional[str] = None
+    efficiency: float
+    length_mm: float
+    length_yards: float
+    fabric_width_mm: float
+    piece_count: int
+    computation_time_ms: float
+    time_limit_s: float
+    quadtree_depth: int
+    early_termination: bool
+    piece_buffer_mm: float
+    edge_buffer_mm: float
+    orientation: str
+    exploration_time_s: Optional[int] = None
+    compression_time_s: Optional[int] = None
+    use_cloud: bool = False
+    seed_used: Optional[int] = None
+    seed_screening: bool = False
+    notes: Optional[str] = None
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class TestMarkerResultUpdate(BaseModel):
+    """Update fields for a saved test marker result."""
+    notes: Optional[str] = None

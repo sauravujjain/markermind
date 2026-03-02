@@ -63,7 +63,7 @@ export default function CutplanPage() {
   const lastStrategiesDone = useRef(0)
 
   const getRefinementConfig = (cpId: string): RefinementConfig =>
-    refinementConfigs[cpId] || { piece_buffer_mm: 2.0, edge_buffer_mm: 5.0, time_limit_s: 20.0, rotation_mode: 'free' }
+    refinementConfigs[cpId] || { piece_buffer_mm: 0.0, edge_buffer_mm: 0.0, time_limit_s: 120, rotation_mode: 'free', quadtree_depth: 5, early_termination: true, exploration_time_s: null, compression_time_s: null, seed_screening: false, use_cloud: false }
 
   const setRefinementConfig = (cpId: string, config: RefinementConfig) =>
     setRefinementConfigs(prev => ({ ...prev, [cpId]: config }))
@@ -625,7 +625,7 @@ export default function CutplanPage() {
                           </tr>
                         </thead>
                         <tbody>
-                          {plan.markers.map((marker, idx) => {
+                          {[...plan.markers].sort((a, b) => (b.length_yards || 0) - (a.length_yards || 0)).map((marker, idx) => {
                             const ratioValues = marker.ratio_str.split('-').map(v => parseInt(v) || 0)
                             const bundles = ratioValues.reduce((a, b) => a + b, 0)
                             const gpuWidth = nestingJobs.find(j => j.status === 'completed')?.fabric_width_inches
@@ -722,9 +722,102 @@ export default function CutplanPage() {
                         </div>
 
                         {/* Config panel */}
-                        {!isRefiningThis && !hasLayouts && (
+                        {!isRefiningThis && !hasLayouts && (() => {
+                          const timeSplitMode = (config.exploration_time_s != null && config.compression_time_s != null) ? 'custom' : 'auto'
+                          const totalTime = config.time_limit_s || 120
+                          const explorePct = timeSplitMode === 'custom' && config.exploration_time_s != null && config.compression_time_s != null
+                            ? Math.round(config.exploration_time_s / (config.exploration_time_s + config.compression_time_s) * 100)
+                            : 80
+
+                          const setTimeSplit = (mode: 'auto' | 'custom') => {
+                            if (mode === 'auto') {
+                              setRefinementConfig(cpId, { ...config, exploration_time_s: null, compression_time_s: null })
+                            } else {
+                              const expT = Math.round(totalTime * 0.8)
+                              setRefinementConfig(cpId, { ...config, exploration_time_s: expT, compression_time_s: totalTime - expT })
+                            }
+                          }
+
+                          const setExplorePctVal = (pct: number) => {
+                            pct = Math.max(1, Math.min(99, pct))
+                            setRefinementConfig(cpId, {
+                              ...config,
+                              exploration_time_s: Math.round(totalTime * pct / 100),
+                              compression_time_s: Math.round(totalTime * (100 - pct) / 100),
+                            })
+                          }
+
+                          // Build param summary tag
+                          const paramParts: string[] = [`qt${config.quadtree_depth}`]
+                          if (timeSplitMode === 'custom') {
+                            paramParts.push(`${explorePct}/${100 - explorePct}`)
+                          } else {
+                            paramParts.push(`${totalTime}s`)
+                          }
+                          if (!config.early_termination) paramParts.push('no-es')
+                          if (config.piece_buffer_mm > 0) paramParts.push(`pb${config.piece_buffer_mm}`)
+                          if (config.edge_buffer_mm > 0) paramParts.push(`eb${config.edge_buffer_mm}`)
+                          if (config.rotation_mode === 'nap_one_way') paramParts.push('nap')
+                          if (config.seed_screening) paramParts.push('seed-screen')
+                          const paramSummary = paramParts.join(' ')
+
+                          return (
                           <div className="space-y-3 p-3 bg-white rounded-lg border">
-                            <div className="grid grid-cols-4 gap-3">
+                            {/* Row 1: Time, Early Stop, Quadtree */}
+                            <div className="grid grid-cols-3 gap-3">
+                              <div>
+                                <label className="text-xs font-medium text-muted-foreground block mb-1">Max Time/Marker (sec)</label>
+                                <input
+                                  type="number"
+                                  value={config.time_limit_s}
+                                  onChange={(e) => {
+                                    const v = e.target.value
+                                    const newTime = v === '' ? '' as any : parseFloat(v)
+                                    // If custom split, update explore/compress proportionally
+                                    if (timeSplitMode === 'custom' && typeof newTime === 'number') {
+                                      setRefinementConfig(cpId, {
+                                        ...config,
+                                        time_limit_s: newTime,
+                                        exploration_time_s: Math.round(newTime * explorePct / 100),
+                                        compression_time_s: Math.round(newTime * (100 - explorePct) / 100),
+                                      })
+                                    } else {
+                                      setRefinementConfig(cpId, { ...config, time_limit_s: newTime })
+                                    }
+                                  }}
+                                  className="w-full px-2 py-1.5 border rounded text-sm"
+                                  min={10} max={600} step={10}
+                                />
+                              </div>
+                              <div>
+                                <label className="text-xs font-medium text-muted-foreground block mb-1">Quadtree Depth</label>
+                                <div className="flex gap-1 mt-0.5">
+                                  {[2, 3, 4, 5, 6, 7, 8].map(d => (
+                                    <button key={d} onClick={() => setRefinementConfig(cpId, { ...config, quadtree_depth: d })}
+                                      className={`px-2 py-1 rounded text-xs font-medium border transition-colors ${
+                                        config.quadtree_depth === d ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-foreground border-border hover:border-indigo-400'
+                                      }`}
+                                    >{d}</button>
+                                  ))}
+                                </div>
+                              </div>
+                              <div>
+                                <label className="text-xs font-medium text-muted-foreground block mb-1">Orientation</label>
+                                <div className="flex gap-1 mt-0.5">
+                                  <button onClick={() => setRefinementConfig(cpId, { ...config, rotation_mode: 'free' })}
+                                    className={`px-2 py-1 rounded text-xs font-medium border transition-colors ${
+                                      config.rotation_mode === 'free' ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-foreground border-border hover:border-indigo-400'
+                                    }`}>Free (0/180)</button>
+                                  <button onClick={() => setRefinementConfig(cpId, { ...config, rotation_mode: 'nap_one_way' })}
+                                    className={`px-2 py-1 rounded text-xs font-medium border transition-colors ${
+                                      config.rotation_mode === 'nap_one_way' ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-foreground border-border hover:border-indigo-400'
+                                    }`}>Nap (0 only)</button>
+                                </div>
+                              </div>
+                            </div>
+
+                            {/* Row 2: Piece Buffer, Edge Buffer, Early Stop */}
+                            <div className="grid grid-cols-3 gap-3">
                               <div>
                                 <label className="text-xs font-medium text-muted-foreground block mb-1">Piece Buffer (mm)</label>
                                 <input
@@ -745,39 +838,80 @@ export default function CutplanPage() {
                                   min={0} max={20} step={0.5}
                                 />
                               </div>
-                              <div>
-                                <label className="text-xs font-medium text-muted-foreground block mb-1">Time/Marker (sec)</label>
-                                <input
-                                  type="number"
-                                  value={config.time_limit_s}
-                                  onChange={(e) => { const v = e.target.value; setRefinementConfig(cpId, { ...config, time_limit_s: v === '' ? '' as any : parseFloat(v) }) }}
-                                  className="w-full px-2 py-1.5 border rounded text-sm"
-                                  min={5} max={120} step={5}
-                                />
-                              </div>
-                              <div>
-                                <label className="text-xs font-medium text-muted-foreground block mb-1">Orientation</label>
-                                <select
-                                  value={config.rotation_mode}
-                                  onChange={(e) => setRefinementConfig(cpId, { ...config, rotation_mode: e.target.value })}
-                                  className="w-full px-2 py-1.5 border rounded text-sm"
-                                >
-                                  <option value="free">Free (0/180)</option>
-                                  <option value="nap_safe">Nap-Safe (0 only)</option>
-                                </select>
+                              <div className="flex items-center pt-4">
+                                <label className="flex items-center gap-2 text-xs font-medium text-muted-foreground cursor-pointer">
+                                  <input
+                                    type="checkbox"
+                                    checked={config.early_termination}
+                                    onChange={(e) => setRefinementConfig(cpId, { ...config, early_termination: e.target.checked })}
+                                    className="rounded"
+                                  />
+                                  Early stop (auto)
+                                </label>
                               </div>
                             </div>
-                            <div className="flex items-center justify-between">
-                              <p className="text-xs text-muted-foreground">
-                                {plan.markers.length} markers will be refined ({plan.markers.length * config.time_limit_s}s max)
-                              </p>
+
+                            {/* Row 3: Time Split */}
+                            <div className="flex items-center gap-3">
+                              <label className="text-xs font-medium text-muted-foreground w-28 shrink-0">Time Split</label>
+                              <div className="flex gap-1">
+                                <button onClick={() => setTimeSplit('auto')}
+                                  className={`px-2 py-1 rounded text-xs font-medium border transition-colors ${
+                                    timeSplitMode === 'auto' ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-foreground border-border hover:border-indigo-400'
+                                  }`}>Auto</button>
+                                <button onClick={() => setTimeSplit('custom')}
+                                  className={`px-2 py-1 rounded text-xs font-medium border transition-colors ${
+                                    timeSplitMode === 'custom' ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-foreground border-border hover:border-indigo-400'
+                                  }`}>Custom</button>
+                              </div>
+                              {timeSplitMode === 'auto' && (
+                                <span className="text-[10px] text-muted-foreground">solver decides (80/20 default)</span>
+                              )}
+                            </div>
+                            {timeSplitMode === 'custom' && (
+                              <div className="flex items-center gap-3 ml-[7.5rem]">
+                                <div className="flex items-center gap-1">
+                                  <span className="text-xs text-muted-foreground">Explore</span>
+                                  <input type="number" value={explorePct}
+                                    onChange={(e) => { const v = e.target.value; setExplorePctVal(v === '' ? 80 : Number(v)) }}
+                                    className="w-14 px-2 py-1 border rounded text-sm" min={1} max={99} step={5}
+                                  />
+                                  <span className="text-xs text-muted-foreground">%</span>
+                                </div>
+                                <span className="text-[10px] text-muted-foreground font-mono">
+                                  {config.exploration_time_s}s explore / {config.compression_time_s}s compress
+                                </span>
+                              </div>
+                            )}
+
+                            {/* Row 4: Seed Screening */}
+                            <div className="flex items-center gap-3">
+                              <label className="text-xs font-medium text-muted-foreground w-28 shrink-0">Seed Selection</label>
+                              <label className="flex items-center gap-1.5 text-xs text-muted-foreground cursor-pointer">
+                                <input type="checkbox" checked={config.seed_screening || false}
+                                  onChange={(e) => setRefinementConfig(cpId, { ...config, seed_screening: e.target.checked })}
+                                  className="rounded" />
+                                Screen 6 seeds (adds ~60s per marker)
+                              </label>
+                            </div>
+
+                            {/* Summary + Start button */}
+                            <div className="flex items-center justify-between pt-1 border-t border-border/50">
+                              <div>
+                                <p className="text-xs text-muted-foreground">
+                                  {plan.markers.length} markers &times; {config.time_limit_s}s = {plan.markers.length * config.time_limit_s}s max
+                                  {config.seed_screening ? ' (+seed screening)' : ''}
+                                </p>
+                                <p className="text-[10px] font-mono text-indigo-500 mt-0.5">{paramSummary}</p>
+                              </div>
                               <Button size="sm" onClick={() => handleStartRefinement(cpId)}>
                                 <Play className="mr-2 h-4 w-4" />
                                 Start CPU Refine
                               </Button>
                             </div>
                           </div>
-                        )}
+                          )
+                        })()}
 
                         {/* Progress bar */}
                         {isRefiningThis && refStatus && (

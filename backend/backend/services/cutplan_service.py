@@ -211,6 +211,15 @@ class CutplanService:
                 for m in markers
             ]
 
+            # Get pattern's canonical sizes for ratio_str parsing
+            pattern_sizes = None
+            try:
+                pattern = db.query(Pattern).filter(Pattern.id == order.pattern_id).first()
+                if pattern and pattern.available_sizes:
+                    pattern_sizes = list(pattern.available_sizes)
+            except Exception:
+                pass
+
             # Determine which strategies to run based on cutplan name
             options = solver_config.get("options", ["max_efficiency", "balanced", "min_markers"])
 
@@ -224,6 +233,7 @@ class CutplanService:
                 sizes=sizes,
                 options=options,
                 penalty=penalty,
+                pattern_sizes=pattern_sizes,
             )
 
             if not cutplan_options:
@@ -305,6 +315,19 @@ class CutplanService:
             for m in markers
         ]
 
+        # Get pattern's canonical sizes for ratio_str parsing
+        # (pattern may have more sizes than the order demands)
+        pattern_sizes = None
+        try:
+            pattern_obj = db.query(Pattern).filter(Pattern.id == pattern_id).first()
+            if pattern_obj and pattern_obj.available_sizes:
+                pattern_sizes = list(pattern_obj.available_sizes)
+                if len(pattern_sizes) != len(sizes):
+                    print(f"[CutplanService] Pattern has {len(pattern_sizes)} sizes {pattern_sizes}, "
+                          f"order demands {len(sizes)} sizes {sizes} — will remap ratio strings")
+        except Exception as e:
+            print(f"[CutplanService] Warning: could not load pattern sizes: {e}")
+
         color_label = f" [{color_code}]" if color_code else ""
         total_garments = sum(flat_demand.values())
 
@@ -351,7 +374,17 @@ class CutplanService:
             prep_cost_per_m += getattr(cost_config, 'prep_top_layer_cost_per_m', 0.05)
 
         # Build marker_bank lookup: ratio_str -> MarkerBank.id
+        # Include both original ratio_str AND trimmed (order-sizes-only) version
         marker_bank_lookup = {m.ratio_str: m.id for m in markers}
+        if pattern_sizes and len(pattern_sizes) != len(sizes):
+            order_sizes_set = set(sizes)
+            for m in markers:
+                parts = m.ratio_str.split("-")
+                if len(parts) == len(pattern_sizes):
+                    full_ratio = {s: int(parts[i]) for i, s in enumerate(pattern_sizes)}
+                    trimmed = "-".join(str(full_ratio.get(s, 0)) for s in sizes)
+                    if trimmed not in marker_bank_lookup:
+                        marker_bank_lookup[trimmed] = m.id
 
         # Track cutplans created incrementally
         cutplans = []
@@ -423,6 +456,7 @@ class CutplanService:
             penalty=penalty,
             strategy_callback=on_strategy_complete,
             cancel_check=cancel_check,
+            pattern_sizes=pattern_sizes,
         )
 
         # Update order status if any strategies completed

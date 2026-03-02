@@ -523,6 +523,11 @@ def execute_refinement_job(
     edge_buffer_mm: float,
     time_limit_s: float,
     rotation_mode: str,
+    quadtree_depth: int = 5,
+    early_termination: bool = True,
+    exploration_time_s: float = None,
+    compression_time_s: float = None,
+    seed_screening: bool = False,
 ):
     """Execute CPU refinement in the background."""
     db = SessionLocal()
@@ -673,6 +678,7 @@ def execute_refinement_job(
                 edge_buffer_mm=edge_buffer_mm,
                 time_limit_s=time_limit_s,
                 rotation_mode=rotation_mode,
+                quadtree_depth=quadtree_depth,
             )
             db.add(layout)
 
@@ -706,6 +712,11 @@ def execute_refinement_job(
             progress_callback=progress_cb,
             cancel_check=cancel_cb,
             file_type=pattern.file_type,
+            quadtree_depth=quadtree_depth,
+            early_termination=early_termination,
+            exploration_time=int(exploration_time_s) if exploration_time_s else None,
+            compression_time=int(compression_time_s) if compression_time_s else None,
+            seed_screening=seed_screening,
         )
 
         elapsed = time.time() - _refinement_jobs[cutplan_id]["started_at"]
@@ -794,6 +805,11 @@ async def start_refinement(
         edge_buffer_mm=request.edge_buffer_mm,
         time_limit_s=request.time_limit_s,
         rotation_mode=request.rotation_mode,
+        quadtree_depth=request.quadtree_depth,
+        early_termination=request.early_termination,
+        exploration_time_s=request.exploration_time_s,
+        compression_time_s=request.compression_time_s,
+        seed_screening=request.seed_screening,
     )
 
     return {"message": "Refinement started", "cutplan_id": cutplan_id}
