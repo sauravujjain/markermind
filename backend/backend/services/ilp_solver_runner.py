@@ -46,6 +46,7 @@ class Marker:
     efficiency: float          # 0.0 - 1.0
     bundle_count: int          # total bundles in marker
     length_yards: float = 0.0  # estimated length in yards
+    perimeter_cm: float = 0.0  # total piece perimeter in cm (computed post-nesting)
 
     def produces(self, plies: int, sizes: List[str]) -> Dict[str, int]:
         """Calculate garments produced for given plies."""
@@ -132,6 +133,7 @@ class CutPlan:
                     "efficiency": a.marker.efficiency,
                     "length_yards": a.marker.length_yards,
                     "bundle_count": a.marker.bundle_count,
+                    "perimeter_cm": a.marker.perimeter_cm,
                     "total_plies": a.plies,
                     "cuts": a.cuts,
                 }
@@ -143,13 +145,48 @@ class CutPlan:
 def generate_all_1_2_bundle_markers(
     sizes: List[str],
     efficiency_lookup: Optional[Dict[str, float]] = None,
+    length_lookup: Optional[Dict[str, float]] = None,
 ) -> List[Marker]:
     """
     Generate all possible 1-bundle and 2-bundle markers.
-    Use efficiencies from lookup where available.
+    Use efficiencies and lengths from lookup where available.
+
+    For markers not in the lookup, length is estimated from the average
+    length-per-bundle of known markers with the same bundle count.
     """
     if efficiency_lookup is None:
         efficiency_lookup = {}
+    if length_lookup is None:
+        length_lookup = {}
+
+    # Compute average length-per-bundle from known markers for fallback estimation
+    avg_length_per_bundle = {1: 0.0, 2: 0.0}
+    for bc in [1, 2]:
+        lengths = []
+        for ratio_str, length_yd in length_lookup.items():
+            if length_yd > 0:
+                parts = ratio_str.split("-")
+                total = sum(int(x) for x in parts)
+                if total == bc:
+                    lengths.append(length_yd)
+        if lengths:
+            avg_length_per_bundle[bc] = sum(lengths) / len(lengths)
+
+    # Global fallback: average across all known markers
+    all_known = [ly for ly in length_lookup.values() if ly > 0]
+    global_avg_per_bundle = 0.0
+    if all_known:
+        total_bundles = 0
+        total_length = 0.0
+        for ratio_str, length_yd in length_lookup.items():
+            if length_yd > 0:
+                parts = ratio_str.split("-")
+                bc = sum(int(x) for x in parts)
+                if bc > 0:
+                    total_bundles += bc
+                    total_length += length_yd
+        if total_bundles > 0:
+            global_avg_per_bundle = total_length / total_bundles
 
     markers = []
 
@@ -158,11 +195,16 @@ def generate_all_1_2_bundle_markers(
         ratio = {s: (1 if s == size else 0) for s in sizes}
         ratio_str = "-".join(str(ratio[s]) for s in sizes)
         eff = efficiency_lookup.get(ratio_str, 0.70)
+        length_yd = length_lookup.get(ratio_str, 0.0)
+        if length_yd <= 0:
+            # Estimate from average 1-bundle length, or global average
+            length_yd = avg_length_per_bundle.get(1, 0.0) or (global_avg_per_bundle * 1)
         markers.append(Marker(
             ratio=ratio,
             ratio_str=ratio_str,
             efficiency=eff,
             bundle_count=1,
+            length_yards=length_yd,
         ))
 
     # 2-bundle markers
@@ -172,11 +214,16 @@ def generate_all_1_2_bundle_markers(
             ratio[size] += 1
         ratio_str = "-".join(str(ratio[s]) for s in sizes)
         eff = efficiency_lookup.get(ratio_str, 0.75)
+        length_yd = length_lookup.get(ratio_str, 0.0)
+        if length_yd <= 0:
+            # Estimate from average 2-bundle length, or global average
+            length_yd = avg_length_per_bundle.get(2, 0.0) or (global_avg_per_bundle * 2)
         markers.append(Marker(
             ratio=ratio,
             ratio_str=ratio_str,
             efficiency=eff,
             bundle_count=2,
+            length_yards=length_yd,
         ))
 
     return markers
@@ -234,18 +281,25 @@ def filter_markers_for_ilp(
 def markers_from_nesting_results(
     nesting_results: List[Dict],
     sizes: List[str],
+    pattern_sizes: Optional[List[str]] = None,
 ) -> List[Marker]:
     """
     Convert nesting job results to Marker objects.
 
+    Handles the case where the pattern has more sizes than the order demands.
+    E.g., pattern has 7 sizes (XS..3XL) but order only demands 6 (XS..2XL).
+    GPU nesting ratio strings use all pattern sizes, so we map and trim them.
+
     Args:
         nesting_results: List of dicts with ratio_str, efficiency, length_yards, bundle_count
-        sizes: List of size codes in order
+        sizes: List of size codes in order (from order demand)
+        pattern_sizes: Optional list of all sizes in the pattern (for ratio_str parsing)
 
     Returns:
         List of Marker objects
     """
     markers = []
+    order_sizes_set = set(sizes)
 
     for result in nesting_results:
         ratio_str = result.get("ratio_str", "")
@@ -253,10 +307,21 @@ def markers_from_nesting_results(
             continue
 
         ratio_parts = ratio_str.split("-")
-        if len(ratio_parts) != len(sizes):
-            continue
 
-        ratio = {size: int(ratio_parts[i]) for i, size in enumerate(sizes)}
+        if len(ratio_parts) == len(sizes):
+            # Exact match — parse directly
+            ratio = {size: int(ratio_parts[i]) for i, size in enumerate(sizes)}
+        elif pattern_sizes and len(ratio_parts) == len(pattern_sizes):
+            # Pattern has extra sizes not in order — map and filter
+            full_ratio = {size: int(ratio_parts[i]) for i, size in enumerate(pattern_sizes)}
+            # Skip markers that use sizes not in the order (can't fulfill those)
+            has_extra = any(full_ratio[s] > 0 for s in pattern_sizes if s not in order_sizes_set)
+            if has_extra:
+                continue
+            ratio = {s: full_ratio[s] for s in sizes}
+            ratio_str = "-".join(str(ratio[s]) for s in sizes)
+        else:
+            continue  # Truly incompatible
 
         markers.append(Marker(
             ratio=ratio,
@@ -264,6 +329,7 @@ def markers_from_nesting_results(
             efficiency=result.get("efficiency", 0.75),
             bundle_count=result.get("bundle_count", sum(ratio.values())),
             length_yards=result.get("length_yards", 0.0),
+            perimeter_cm=result.get("perimeter_cm") or 0.0,
         ))
 
     return markers
@@ -434,6 +500,7 @@ def optimize_cutplan(
     penalty: float = 5.0,
     strategy_callback: Optional[Callable[[str, Dict], None]] = None,
     cancel_check: Optional[Callable[[], bool]] = None,
+    pattern_sizes: Optional[List[str]] = None,
 ) -> List[Dict]:
     """
     Run ILP optimization with multiple strategies.
@@ -446,6 +513,8 @@ def optimize_cutplan(
         penalty: Penalty for balanced objective
         strategy_callback: Called after each strategy completes with (strategy_name, result_dict)
         cancel_check: Returns True if job should be cancelled
+        pattern_sizes: Optional list of all sizes in the pattern (for ratio_str parsing
+                       when pattern has more sizes than the order demands)
 
     Returns:
         List of cutplan option dicts with cost breakdowns
@@ -454,13 +523,17 @@ def optimize_cutplan(
         options = ["max_efficiency", "balanced", "min_markers"]
 
     print(f"[ILP] Starting optimization: {len(markers)} raw markers, {len(options)} strategies, demand={demand}")
+    if pattern_sizes and len(pattern_sizes) != len(sizes):
+        print(f"[ILP] Pattern has {len(pattern_sizes)} sizes {pattern_sizes}, order has {len(sizes)} sizes {sizes} — remapping ratio strings")
 
     # Convert markers to Marker objects
-    marker_objects = markers_from_nesting_results(markers, sizes)
+    marker_objects = markers_from_nesting_results(markers, sizes, pattern_sizes=pattern_sizes)
+    print(f"[ILP] Parsed {len(marker_objects)} markers from {len(markers)} raw results")
 
     # Generate all 1-2 bundle markers for completeness
     efficiency_lookup = {m.ratio_str: m.efficiency for m in marker_objects}
-    small_markers = generate_all_1_2_bundle_markers(sizes, efficiency_lookup)
+    length_lookup = {m.ratio_str: m.length_yards for m in marker_objects}
+    small_markers = generate_all_1_2_bundle_markers(sizes, efficiency_lookup, length_lookup)
 
     # Combine (avoiding duplicates)
     existing_ratios = {m.ratio_str for m in marker_objects}
@@ -582,18 +655,22 @@ def calculate_cutplan_costs(
         marker_plies = m.get("total_plies", 0)
         marker_cuts = (marker_plies + max_ply_height - 1) // max_ply_height if marker_plies > 0 else 0
 
-        # Compute marker perimeter from actual per-size perimeters
-        if perimeter_by_size and sizes and len(sizes) == len(ratio_counts):
-            marker_perimeter_cm = 0.0
-            for i, count in enumerate(ratio_counts):
-                if count > 0:
-                    size = sizes[i]
-                    size_perim = perimeter_by_size.get(size, AVG_PERIMETER_PER_BUNDLE_CM)
-                    marker_perimeter_cm += size_perim * count
-        else:
-            # Fallback: estimate from bundle count
-            bundle_count = m.get("bundle_count", sum(ratio_counts))
-            marker_perimeter_cm = bundle_count * AVG_PERIMETER_PER_BUNDLE_CM
+        # Prefer marker-level perimeter (computed post-nesting from actual placed pieces)
+        marker_perimeter_cm = m.get("perimeter_cm") or 0.0
+
+        if marker_perimeter_cm <= 0:
+            # Fallback: compute from per-size perimeters (pattern parse data)
+            if perimeter_by_size and sizes and len(sizes) == len(ratio_counts):
+                marker_perimeter_cm = 0.0
+                for i, count in enumerate(ratio_counts):
+                    if count > 0:
+                        size = sizes[i]
+                        size_perim = perimeter_by_size.get(size, AVG_PERIMETER_PER_BUNDLE_CM)
+                        marker_perimeter_cm += size_perim * count
+            else:
+                # Last resort: estimate from bundle count
+                bundle_count = m.get("bundle_count", sum(ratio_counts))
+                marker_perimeter_cm = bundle_count * AVG_PERIMETER_PER_BUNDLE_CM
 
         cutting_cost += marker_perimeter_cm * marker_cuts * cutting_cost_per_cm
 

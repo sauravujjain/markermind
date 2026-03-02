@@ -2,9 +2,9 @@
 
 import { useEffect, useState, useCallback } from 'react'
 import { useRouter } from 'next/navigation'
-import { useAuthStore } from '@/lib/auth-store'
 import { api, OrderImportRow } from '@/lib/api'
 import { DashboardLayout } from '@/components/dashboard-layout'
+import { AuthGuard } from '@/components/auth-guard'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { useToast } from '@/hooks/use-toast'
@@ -45,23 +45,12 @@ interface ParsedFile {
 
 export default function NewOrderPage() {
   const router = useRouter()
-  const { isAuthenticated, isLoading: authLoading, checkAuth } = useAuthStore()
   const { toast } = useToast()
   const [isLoading, setIsLoading] = useState(false)
   const [file, setFile] = useState<File | null>(null)
   const [parsedFile, setParsedFile] = useState<ParsedFile | null>(null)
   const [parseError, setParseError] = useState<string | null>(null)
   const [selectedOrderIdx, setSelectedOrderIdx] = useState(0)
-
-  useEffect(() => {
-    checkAuth()
-  }, [checkAuth])
-
-  useEffect(() => {
-    if (!authLoading && !isAuthenticated) {
-      router.push('/login')
-    }
-  }, [authLoading, isAuthenticated, router])
 
   const parseExcelFile = async (file: File): Promise<ParsedFile> => {
     return new Promise((resolve, reject) => {
@@ -296,17 +285,10 @@ export default function NewOrderPage() {
     }
   }
 
-  if (authLoading || !isAuthenticated) {
-    return (
-      <div className="min-h-screen flex items-center justify-center">
-        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary"></div>
-      </div>
-    )
-  }
-
   const selectedOrder = parsedFile?.orders[selectedOrderIdx]
 
   return (
+    <AuthGuard>
     <DashboardLayout>
       <div className="max-w-5xl mx-auto space-y-6">
         <div className="flex items-center space-x-4">
@@ -529,5 +511,6 @@ export default function NewOrderPage() {
         </div>
       </div>
     </DashboardLayout>
+    </AuthGuard>
   )
 }

@@ -8,6 +8,7 @@ from .marker import MarkerBank
 from .cutplan import Cutplan, CutplanMarker
 from .marker_layout import MarkerLayout
 from .cost import CostConfig
+from .test_marker_result import TestMarkerResult
 
 __all__ = [
     "Customer",
@@ -28,4 +29,5 @@ __all__ = [
     "CutplanMarker",
     "MarkerLayout",
     "CostConfig",
+    "TestMarkerResult",
 ]

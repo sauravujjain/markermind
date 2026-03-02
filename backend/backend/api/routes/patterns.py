@@ -34,6 +34,7 @@ async def list_patterns(
 async def upload_pattern(
     name: str = Form(...),
     file_type: str = Form("aama"),
+    size_names: Optional[str] = Form(None),
     dxf_file: UploadFile = File(...),
     rul_file: Optional[UploadFile] = File(None),
     current_user: User = Depends(get_current_user),
@@ -81,7 +82,7 @@ async def upload_pattern(
 
     # Auto-parse pattern after upload
     try:
-        pattern_service.parse_pattern(db, pattern)
+        pattern_service.parse_pattern(db, pattern, size_names=size_names)
     except Exception as e:
         # Log but don't fail the upload if parsing fails
         print(f"Pattern parsing failed: {e}")

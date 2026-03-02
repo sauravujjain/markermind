@@ -1,10 +1,9 @@
 'use client'
 
 import { useEffect, useState, useCallback } from 'react'
-import { useRouter } from 'next/navigation'
-import { useAuthStore } from '@/lib/auth-store'
 import { api, Pattern } from '@/lib/api'
 import { DashboardLayout } from '@/components/dashboard-layout'
+import { AuthGuard } from '@/components/auth-guard'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
@@ -14,31 +13,19 @@ import { useDropzone } from 'react-dropzone'
 import { Upload, Package, CheckCircle2, XCircle, FileUp, Loader2, File } from 'lucide-react'
 
 export default function PatternsPage() {
-  const router = useRouter()
-  const { isAuthenticated, isLoading: authLoading, checkAuth } = useAuthStore()
   const { toast } = useToast()
   const [patterns, setPatterns] = useState<Pattern[]>([])
   const [isLoading, setIsLoading] = useState(true)
   const [isUploading, setIsUploading] = useState(false)
   const [patternName, setPatternName] = useState('')
+  const [fileType, setFileType] = useState<'aama' | 'dxf_only' | 'vt_dxf'>('aama')
   const [dxfFile, setDxfFile] = useState<File | null>(null)
   const [rulFile, setRulFile] = useState<File | null>(null)
+  const [sizeNames, setSizeNames] = useState('')
 
   useEffect(() => {
-    checkAuth()
-  }, [checkAuth])
-
-  useEffect(() => {
-    if (!authLoading && !isAuthenticated) {
-      router.push('/login')
-    }
-  }, [authLoading, isAuthenticated, router])
-
-  useEffect(() => {
-    if (isAuthenticated) {
-      loadPatterns()
-    }
-  }, [isAuthenticated])
+    loadPatterns()
+  }, [])
 
   const loadPatterns = async () => {
     try {
@@ -94,7 +81,8 @@ export default function PatternsPage() {
 
     setIsUploading(true)
     try {
-      const pattern = await api.uploadPattern(patternName, 'aama', dxfFile, rulFile || undefined)
+      const pattern = await api.uploadPattern(patternName, fileType, dxfFile, fileType === 'aama' ? (rulFile || undefined) : undefined, fileType === 'dxf_only' && sizeNames.trim() ? sizeNames.trim() : undefined)
+
       toast({
         title: 'Pattern uploaded',
         description: 'Now parsing pattern file...',
@@ -109,8 +97,10 @@ export default function PatternsPage() {
 
       // Reset form and reload
       setPatternName('')
+      setFileType('aama')
       setDxfFile(null)
       setRulFile(null)
+      setSizeNames('')
       loadPatterns()
     } catch (error) {
       toast({
@@ -123,18 +113,8 @@ export default function PatternsPage() {
     }
   }
 
-  if (authLoading || !isAuthenticated) {
-    return (
-      <div className="min-h-screen flex items-center justify-center bg-background">
-        <div className="flex flex-col items-center gap-3">
-          <Loader2 className="w-8 h-8 text-primary animate-spin" />
-          <p className="text-sm text-muted-foreground">Loading...</p>
-        </div>
-      </div>
-    )
-  }
-
   return (
+    <AuthGuard>
     <DashboardLayout>
       <div className="space-y-8">
         <div>
@@ -155,7 +135,7 @@ export default function PatternsPage() {
                 <div>
                   <CardTitle className="text-lg">Upload Pattern</CardTitle>
                   <CardDescription>
-                    Upload AAMA/ASTM DXF pattern files
+                    Upload AAMA/ASTM, DXF-only, or VT DXF pattern files
                   </CardDescription>
                 </div>
               </div>
@@ -173,6 +153,64 @@ export default function PatternsPage() {
                     className="h-11 bg-muted/50 border-border focus:border-primary"
                   />
                 </div>
+
+                <div className="space-y-2">
+                  <Label className="text-foreground font-medium">Pattern Type</Label>
+                  <div className="flex gap-1 p-1 bg-muted/50 rounded-lg">
+                    <button
+                      type="button"
+                      onClick={() => { setFileType('aama'); setRulFile(null) }}
+                      className={`flex-1 px-3 py-2 text-sm font-medium rounded-md transition-all ${
+                        fileType === 'aama'
+                          ? 'bg-background shadow-sm text-foreground'
+                          : 'text-muted-foreground hover:text-foreground'
+                      }`}
+                    >
+                      AAMA (DXF + RUL)
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => { setFileType('dxf_only'); setRulFile(null) }}
+                      className={`flex-1 px-3 py-2 text-sm font-medium rounded-md transition-all ${
+                        fileType === 'dxf_only'
+                          ? 'bg-background shadow-sm text-foreground'
+                          : 'text-muted-foreground hover:text-foreground'
+                      }`}
+                    >
+                      DXF Only
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => { setFileType('vt_dxf'); setRulFile(null); setSizeNames('') }}
+                      className={`flex-1 px-3 py-2 text-sm font-medium rounded-md transition-all ${
+                        fileType === 'vt_dxf'
+                          ? 'bg-background shadow-sm text-foreground'
+                          : 'text-muted-foreground hover:text-foreground'
+                      }`}
+                    >
+                      VT DXF (Graded)
+                    </button>
+                  </div>
+                  {fileType === 'dxf_only' && (
+                    <p className="text-xs text-muted-foreground">Pre-sized pieces in DXF — no grading file needed</p>
+                  )}
+                  {fileType === 'vt_dxf' && (
+                    <p className="text-xs text-muted-foreground">Optitex Graded Nest — sizes auto-detected from piece names</p>
+                  )}
+                </div>
+
+                {fileType === 'dxf_only' && (
+                  <div className="space-y-2">
+                    <Label className="text-foreground font-medium">Size Names <span className="text-muted-foreground font-normal">(Optional)</span></Label>
+                    <Input
+                      value={sizeNames}
+                      onChange={(e) => setSizeNames(e.target.value)}
+                      placeholder="S, M, L, XL, 2X, 3X, 4X, 5X"
+                      className="h-11 bg-muted/50 border-border focus:border-primary"
+                    />
+                    <p className="text-xs text-muted-foreground">Comma-separated, smallest to largest. Defaults to SIZE_1, SIZE_2, etc.</p>
+                  </div>
+                )}
 
                 <div className="space-y-2">
                   <Label className="text-foreground font-medium">DXF File <span className="text-primary">(Required)</span></Label>
@@ -201,6 +239,7 @@ export default function PatternsPage() {
                   </div>
                 </div>
 
+                {fileType === 'aama' && (
                 <div className="space-y-2">
                   <Label className="text-foreground font-medium">RUL File <span className="text-muted-foreground font-normal">(Optional)</span></Label>
                   <div
@@ -227,6 +266,7 @@ export default function PatternsPage() {
                     )}
                   </div>
                 </div>
+                )}
 
                 <Button
                   type="submit"
@@ -324,5 +364,6 @@ export default function PatternsPage() {
         </div>
       </div>
     </DashboardLayout>
+    </AuthGuard>
   )
 }

@@ -2,7 +2,7 @@
 Spyrrow CPU Nesting Runner - Final marker refinement using Spyrrow solver.
 
 This module replicates the exact same pipeline as the working Streamlit app
-(garment-nester/apps/app.py):
+(apps/app.py):
 
   1. grade_material_to_nesting_pieces() → Piece objects
   2. Pre-expand pieces into individual BundlePiece objects (demand=1 each)
@@ -24,11 +24,73 @@ from typing import Dict, List, Optional, Callable, Tuple
 
 logger = logging.getLogger(__name__)
 
+
+# --------------------------------------------------------------------------
+# Vertex cleaning — jagua-rs panics on non-consecutive duplicate vertices
+# --------------------------------------------------------------------------
+
+def _clean_polygon_vertices(
+    vertices: List[Tuple[float, float]],
+    tolerance: float = 0.01,
+) -> List[Tuple[float, float]]:
+    """
+    Remove duplicate vertices (both consecutive AND non-consecutive) from a
+    polygon, then re-close it.
+
+    jagua-rs (the Rust collision engine inside Spyrrow) requires simple
+    polygons with NO duplicate vertices at all — not just consecutive ones.
+    """
+    if len(vertices) < 3:
+        return vertices
+
+    # Remove closing vertex if present
+    verts = list(vertices)
+    if len(verts) > 1 and _pts_equal(verts[0], verts[-1], tolerance):
+        verts = verts[:-1]
+
+    # Remove non-consecutive duplicate vertices (keep first occurrence)
+    seen: List[Tuple[float, float]] = []
+    for v in verts:
+        is_dup = False
+        for s in seen:
+            if _pts_equal(v, s, tolerance):
+                is_dup = True
+                break
+        if not is_dup:
+            seen.append(v)
+
+    # Remove consecutive duplicates that might remain
+    cleaned: List[Tuple[float, float]] = [seen[0]] if seen else []
+    for v in seen[1:]:
+        if not _pts_equal(v, cleaned[-1], tolerance):
+            cleaned.append(v)
+
+    if len(cleaned) < 3:
+        logger.warning(
+            f"Polygon reduced to {len(cleaned)} vertices after dedup — "
+            f"original had {len(vertices)}"
+        )
+        return vertices  # Return original; let downstream handle it
+
+    # Re-close
+    cleaned.append(cleaned[0])
+    return cleaned
+
+
+def _pts_equal(
+    a: Tuple[float, float],
+    b: Tuple[float, float],
+    tol: float = 0.01,
+) -> bool:
+    """Check if two points are equal within tolerance."""
+    return abs(a[0] - b[0]) < tol and abs(a[1] - b[1]) < tol
+
+
 import ezdxf
 
-# Add garment-nester to path
-GARMENT_NESTER_PATH = Path(__file__).parent.parent.parent.parent.parent / "garment-nester"
-sys.path.insert(0, str(GARMENT_NESTER_PATH))
+# Add MarkerMind project root to path so nesting_engine is importable
+PROJECT_ROOT = Path(__file__).parent.parent.parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
 
 from nesting_engine.io.aama_parser import (
     load_aama_pattern, AAMAGrader,
@@ -37,6 +99,23 @@ from nesting_engine.io.aama_parser import (
 from nesting_engine.engine.spyrrow_engine import SpyrrowEngine, SpyrrowConfig
 from nesting_engine.core.instance import Container, NestingItem, NestingInstance, FlipMode
 from nesting_engine.core.piece import Piece, PieceIdentifier, OrientationConstraint
+
+
+def _compute_perimeter_mm(vertices_mm: List[Tuple[float, float]]) -> float:
+    """Sum of edge lengths for a closed polygon. Returns mm."""
+    if len(vertices_mm) < 2:
+        return 0.0
+    perim = 0.0
+    for i in range(len(vertices_mm) - 1):
+        x1, y1 = vertices_mm[i]
+        x2, y2 = vertices_mm[i + 1]
+        perim += math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
+    # Close if not already closed
+    if vertices_mm[0] != vertices_mm[-1]:
+        x1, y1 = vertices_mm[-1]
+        x2, y2 = vertices_mm[0]
+        perim += math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
+    return perim
 
 
 # --------------------------------------------------------------------------
@@ -66,7 +145,7 @@ def _create_piece_copy(piece: Piece, suffix: str) -> Piece:
         size=piece.identifier.size,
     )
     return Piece(
-        vertices=piece.vertices,
+        vertices=_clean_polygon_vertices(list(piece.vertices)),
         identifier=new_id,
         orientation=piece.orientation,
         grain=piece.grain,
@@ -81,6 +160,9 @@ def create_flipped_piece(piece: Piece) -> Piece:
     center_x = (min(xs) + max(xs)) / 2
     flipped_verts = [(2 * center_x - x, y) for x, y in verts]
     flipped_verts = flipped_verts[::-1]
+
+    # Clean after flipping — the mirror + reverse can produce duplicates
+    flipped_verts = _clean_polygon_vertices(flipped_verts)
 
     new_id = PieceIdentifier(
         piece_name=piece.identifier.piece_name + "_f",
@@ -102,13 +184,17 @@ def create_flipped_piece(piece: Piece) -> Piece:
 
 def load_pieces_for_spyrrow(
     dxf_path: str,
-    rul_path: str,
+    rul_path: Optional[str],
     material: str,
     sizes: List[str],
     allowed_rotations: List[int] = [0, 180],
+    file_type: Optional[str] = None,
 ) -> Tuple[List[Piece], Dict[str, dict]]:
     """
     Load graded pieces via grade_material_to_nesting_pieces().
+
+    For DXF-only patterns (rul_path is None), uses load_dxf_pieces_by_size()
+    instead. For VT DXF patterns, uses parse_vt_dxf().
 
     Returns:
         (nesting_pieces, piece_config)
@@ -116,6 +202,31 @@ def load_pieces_for_spyrrow(
         - piece_config: {piece_name: {demand: int, flipped: bool}}
           Mirrors the Streamlit app's piece_type_config.
     """
+    # VT DXF path: Optitex Graded Nest format
+    if file_type == "vt_dxf":
+        return _load_pieces_vt_dxf_for_spyrrow(dxf_path, sizes, allowed_rotations)
+
+    # DXF-only path: no RUL grading, pieces already sized in DXF
+    if rul_path is None or not Path(rul_path).exists():
+        from nesting_engine.io.dxf_parser import load_dxf_pieces_by_size
+        nesting_pieces, piece_config, _ = load_dxf_pieces_by_size(
+            dxf_path, sizes, rotations=allowed_rotations,
+        )
+        logger.info(f"Loaded {len(nesting_pieces)} DXF-only pieces for sizes={sizes}")
+
+        # Clean vertices (same as AAMA path)
+        cleaned_count = 0
+        for p in nesting_pieces:
+            original_len = len(p.vertices)
+            p.vertices = _clean_polygon_vertices(list(p.vertices))
+            if len(p.vertices) != original_len:
+                cleaned_count += 1
+        if cleaned_count:
+            logger.info(f"Cleaned duplicate vertices from {cleaned_count}/{len(nesting_pieces)} pieces")
+
+        return nesting_pieces, piece_config
+
+    # AAMA path (existing logic)
     nesting_pieces = grade_material_to_nesting_pieces(
         dxf_path, rul_path,
         material=material,
@@ -124,6 +235,17 @@ def load_pieces_for_spyrrow(
         allow_flip=True,
     )
     logger.info(f"Loaded {len(nesting_pieces)} graded pieces for material={material}, sizes={sizes}")
+
+    # Clean all piece vertices upfront — jagua-rs panics on non-consecutive
+    # duplicate vertices and the AAMA grader only removes consecutive ones.
+    cleaned_count = 0
+    for p in nesting_pieces:
+        original_len = len(p.vertices)
+        p.vertices = _clean_polygon_vertices(list(p.vertices))
+        if len(p.vertices) != original_len:
+            cleaned_count += 1
+    if cleaned_count:
+        logger.info(f"Cleaned duplicate vertices from {cleaned_count}/{len(nesting_pieces)} pieces")
 
     # Build piece_config from AAMA annotation (L/R detection)
     # Same logic as Streamlit app lines 1036-1055
@@ -143,6 +265,51 @@ def load_pieces_for_spyrrow(
             demand = aama_piece.quantity.total if aama_piece else 1
             flipped = False
         piece_config[piece_name] = {'demand': demand, 'flipped': flipped}
+
+    return nesting_pieces, piece_config
+
+
+def _load_pieces_vt_dxf_for_spyrrow(
+    dxf_path: str,
+    sizes: List[str],
+    allowed_rotations: List[int] = [0, 180],
+) -> Tuple[List[Piece], Dict[str, dict]]:
+    """Load pieces from a VT DXF (Optitex Graded Nest) for Spyrrow nesting."""
+    from nesting_engine.io.vt_dxf_parser import parse_vt_dxf
+
+    all_pieces, all_sizes, piece_quantities, _material = parse_vt_dxf(
+        dxf_path, rotations=allowed_rotations,
+    )
+
+    # Filter to requested sizes
+    target_set = set(sizes)
+    nesting_pieces = [p for p in all_pieces if p.identifier.size in target_set]
+
+    logger.info(f"Loaded {len(nesting_pieces)} VT DXF pieces for sizes={sizes}")
+
+    # Clean vertices
+    cleaned_count = 0
+    for p in nesting_pieces:
+        original_len = len(p.vertices)
+        p.vertices = _clean_polygon_vertices(list(p.vertices))
+        if len(p.vertices) != original_len:
+            cleaned_count += 1
+    if cleaned_count:
+        logger.info(f"Cleaned duplicate vertices from {cleaned_count}/{len(nesting_pieces)} pieces")
+
+    # Build piece_config from quantities
+    # qty=2 means L/R pair -> demand=1 per side, flipped=True
+    # qty=1 means single piece -> demand=1, flipped=False
+    piece_config: Dict[str, dict] = {}
+    for p in nesting_pieces:
+        piece_name = p.identifier.piece_name
+        if piece_name in piece_config:
+            continue
+        qty = piece_quantities.get(piece_name, 1)
+        if qty >= 2:
+            piece_config[piece_name] = {'demand': qty // 2, 'flipped': True}
+        else:
+            piece_config[piece_name] = {'demand': qty, 'flipped': False}
 
     return nesting_pieces, piece_config
 
@@ -246,6 +413,11 @@ def run_nesting(
     piece_buffer: float,
     edge_buffer: float,
     time_limit: float,
+    quadtree_depth: int = 4,
+    early_termination: bool = True,
+    exploration_time: Optional[int] = None,
+    compression_time: Optional[int] = None,
+    seed: int = 42,
 ) -> 'NestingSolution':
     """Run the nesting solver — identical to Streamlit run_nesting()."""
     nest_pieces = [bp.piece for bp in bundle_pieces]
@@ -269,7 +441,11 @@ def run_nesting(
     config = SpyrrowConfig(
         time_limit=time_limit,
         num_workers=None,
-        seed=42,
+        seed=seed,
+        early_termination=early_termination,
+        quadtree_depth=quadtree_depth,
+        exploration_time=exploration_time,
+        compression_time=compression_time,
     )
 
     return engine.solve(instance, config=config)
@@ -288,6 +464,12 @@ def nest_single_marker(
     edge_buffer_mm: float = 5.0,
     time_limit: float = 20.0,
     rotation_mode: str = "free",
+    quadtree_depth: int = 4,
+    early_termination: bool = True,
+    exploration_time: Optional[int] = None,
+    compression_time: Optional[int] = None,
+    seed: int = 42,
+    seed_screening: bool = False,
 ) -> Dict:
     """
     Run Spyrrow on a single marker ratio.
@@ -318,6 +500,24 @@ def nest_single_marker(
 
     logger.info(f"Nesting {len(bundle_pieces)} pieces for ratio {ratio}")
 
+    # Seed screening: run 6 random seeds for 10s each, pick the best
+    if seed_screening:
+        import random
+        screen_seeds = [random.randint(1, 9999) for _ in range(6)]
+        best_seed = seed
+        best_util = 0.0
+        for s in screen_seeds:
+            quick_sol = run_nesting(
+                bundle_pieces, fabric_width_mm, piece_buffer_mm, edge_buffer_mm,
+                time_limit=10, quadtree_depth=quadtree_depth,
+                early_termination=False, seed=s,
+            )
+            if quick_sol.utilization_percent > best_util:
+                best_util = quick_sol.utilization_percent
+                best_seed = s
+        seed = best_seed
+        logger.info(f"Seed screening: best={best_seed} ({best_util:.2f}%) from {screen_seeds}")
+
     start = time.time()
     solution = run_nesting(
         bundle_pieces,
@@ -325,18 +525,35 @@ def nest_single_marker(
         piece_buffer_mm,
         edge_buffer_mm,
         time_limit,
+        quadtree_depth=quadtree_depth,
+        early_termination=early_termination,
+        exploration_time=exploration_time,
+        compression_time=compression_time,
+        seed=seed,
     )
     elapsed = time.time() - start
+    logger.info(f"Spyrrow solve completed in {elapsed:.1f}s (limit={time_limit}s, early_term={early_termination}, qt_depth={quadtree_depth}, seed={seed})")
 
     length_yards = solution.strip_length / 914.4  # 1 yard = 914.4 mm
+
+    # Compute total perimeter from placed pieces (vertices already in mm)
+    piece_map = {bp.piece.id: bp for bp in bundle_pieces}
+    total_perimeter_mm = 0.0
+    for placement in solution.placements:
+        bp = piece_map.get(placement.piece_id)
+        if bp:
+            total_perimeter_mm += _compute_perimeter_mm(list(bp.piece.vertices))
+    perimeter_cm = total_perimeter_mm / 10.0
 
     return {
         'utilization': solution.utilization_percent / 100.0,
         'strip_length_mm': solution.strip_length,
         'length_yards': length_yards,
+        'perimeter_cm': perimeter_cm,
         'solution': solution,
         'bundle_pieces': bundle_pieces,
         'computation_time_s': elapsed,
+        'seed_used': seed,
     }
 
 
@@ -555,6 +772,12 @@ def refine_cutplan_markers(
     rotation_mode: str = "free",
     progress_callback: Optional[Callable] = None,
     cancel_check: Optional[Callable] = None,
+    file_type: Optional[str] = None,
+    quadtree_depth: int = 4,
+    early_termination: bool = True,
+    exploration_time: Optional[int] = None,
+    compression_time: Optional[int] = None,
+    seed_screening: bool = False,
 ) -> List[Dict]:
     """
     Refine all markers in a cutplan sequentially with Spyrrow.
@@ -574,6 +797,7 @@ def refine_cutplan_markers(
     # Load pieces once for all markers
     nesting_pieces, piece_config = load_pieces_for_spyrrow(
         dxf_path, rul_path, material, sizes, allowed_rotations,
+        file_type=file_type,
     )
 
     total = len(markers)
@@ -606,6 +830,11 @@ def refine_cutplan_markers(
             edge_buffer_mm=edge_buffer_mm,
             time_limit=time_limit,
             rotation_mode=rotation_mode,
+            quadtree_depth=quadtree_depth,
+            early_termination=early_termination,
+            exploration_time=exploration_time,
+            compression_time=compression_time,
+            seed_screening=seed_screening,
         )
 
         # Generate exports
@@ -619,6 +848,7 @@ def refine_cutplan_markers(
             'utilization': solution_data['utilization'],
             'strip_length_mm': solution_data['strip_length_mm'],
             'length_yards': solution_data['length_yards'],
+            'perimeter_cm': solution_data.get('perimeter_cm', 0.0),
             'computation_time_s': solution_data['computation_time_s'],
             'svg_preview': svg_preview,
             'dxf_bytes': dxf_bytes,

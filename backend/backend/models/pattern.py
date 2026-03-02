@@ -10,6 +10,8 @@ class FileType(str, enum.Enum):
     AAMA = "aama"  # AAMA/ASTM DXF format
     GERBER = "gerber"
     LECTRA = "lectra"
+    DXF_ONLY = "dxf_only"  # Pre-sized pieces in DXF, no RUL grading needed
+    VT_DXF = "vt_dxf"  # Optitex Graded Nest DXF (one file per material, sizes in blocks)
 
 
 class Pattern(Base, TimestampMixin):

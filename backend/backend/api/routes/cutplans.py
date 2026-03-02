@@ -259,7 +259,9 @@ async def get_cutplan(
     db: Session = Depends(get_db)
 ):
     """Get cutplan by ID."""
-    cutplan = db.query(Cutplan).join(Order).filter(
+    cutplan = db.query(Cutplan).options(
+        joinedload(Cutplan.markers)
+    ).join(Order).filter(
         Cutplan.id == cutplan_id,
         Order.customer_id == current_user.customer_id
     ).first()
@@ -278,7 +280,9 @@ async def list_cutplans(
     db: Session = Depends(get_db)
 ):
     """List cutplans."""
-    query = db.query(Cutplan).join(Order).filter(
+    query = db.query(Cutplan).options(
+        joinedload(Cutplan.markers)
+    ).join(Order).filter(
         Order.customer_id == current_user.customer_id
     )
     if order_id:
@@ -287,7 +291,14 @@ async def list_cutplans(
         query = query.filter(Cutplan.status == status)
 
     cutplans = query.order_by(Cutplan.created_at.desc()).offset(skip).limit(limit).all()
-    return cutplans
+    # De-duplicate from joinedload cartesian product
+    seen = set()
+    unique = []
+    for c in cutplans:
+        if c.id not in seen:
+            seen.add(c.id)
+            unique.append(c)
+    return unique
 
 
 @router.post("/{cutplan_id}/approve", response_model=CutplanResponse)
@@ -363,6 +374,148 @@ async def get_cost_analysis(
 # Final Nesting (Spyrrow CPU Refinement)
 # --------------------------------------------------------------------------
 
+
+def _recalculate_cutplan_costs(db: Session, cutplan: Cutplan, customer_id: str):
+    """
+    Recalculate cutplan costs after CPU refinement.
+
+    After refinement, markers have updated lengths (from MarkerLayout).
+    This recalculates total_yards, fabric_cost, prep_cost, and total_cost
+    using the refined lengths while keeping cutting_cost unchanged
+    (perimeter * cuts doesn't change with refinement).
+    """
+    from ...models import CostConfig as CostConfigModel, Pattern, Fabric as FabricModel, PatternFabricMapping
+    import math
+
+    cost_config = db.query(CostConfigModel).filter(
+        CostConfigModel.customer_id == customer_id
+    ).first()
+    if not cost_config:
+        return
+
+    order = cutplan.order
+    if not order:
+        return
+
+    # Get sizes from pattern
+    pattern = db.query(Pattern).filter(Pattern.id == order.pattern_id).first() if order.pattern_id else None
+    sizes = list(pattern.available_sizes) if pattern and pattern.available_sizes else []
+
+    # Resolve perimeter_by_size for the material
+    perimeter_by_size = {}
+    if pattern and pattern.parse_metadata:
+        perim_all = pattern.parse_metadata.get("perimeter_by_size", {})
+        if perim_all and order.order_lines:
+            first_line = order.order_lines[0]
+            fab = db.query(FabricModel).filter(
+                FabricModel.customer_id == customer_id,
+                FabricModel.code == first_line.fabric_code,
+            ).first()
+            if fab:
+                mapping = db.query(PatternFabricMapping).filter(
+                    PatternFabricMapping.pattern_id == pattern.id,
+                    PatternFabricMapping.fabric_id == fab.id,
+                ).first()
+                if mapping and mapping.material_name in perim_all:
+                    perimeter_by_size = perim_all[mapping.material_name]
+            if not perimeter_by_size and len(perim_all) == 1:
+                perimeter_by_size = list(perim_all.values())[0]
+
+    # Order sizes to match ratio_str positions
+    order_sizes_set = set()
+    seen_colors = set()
+    for line in (order.order_lines or []):
+        if line.color_code in seen_colors:
+            continue
+        seen_colors.add(line.color_code)
+        for sq in line.size_quantities:
+            if sq.quantity > 0:
+                order_sizes_set.add(sq.size_code)
+    if sizes:
+        ordered_sizes = [s for s in sizes if s in order_sizes_set]
+    else:
+        ordered_sizes = sorted(order_sizes_set)
+
+    # Cost parameters
+    fabric_cost_per_yard = cost_config.fabric_cost_per_yard
+    spreading_cost_per_yard = cost_config.spreading_cost_per_yard
+    spreading_cost_per_ply = getattr(cost_config, 'spreading_cost_per_ply', 0.013)
+    cutting_cost_per_cm = (
+        (cost_config.cutting_labor_cost_per_hour * cost_config.cutting_workers_per_cut)
+        / 3600.0
+    ) / cost_config.cutting_speed_cm_per_s if cost_config.cutting_speed_cm_per_s > 0 else 0.0
+    prep_cost_per_m = 0.0
+    if getattr(cost_config, 'prep_perf_paper_enabled', True):
+        prep_cost_per_m += getattr(cost_config, 'prep_perf_paper_cost_per_m', 0.1)
+    if getattr(cost_config, 'prep_underlayer_enabled', True):
+        prep_cost_per_m += getattr(cost_config, 'prep_underlayer_cost_per_m', 0.1)
+    if getattr(cost_config, 'prep_top_layer_enabled', True):
+        prep_cost_per_m += getattr(cost_config, 'prep_top_layer_cost_per_m', 0.05)
+    max_ply_height = cost_config.max_ply_height or 100
+
+    YARDS_TO_METERS = 0.9144
+    AVG_PERIMETER_PER_BUNDLE_CM = 2540.0
+
+    total_yards = 0.0
+    total_plies = 0
+    total_cuts = 0
+    cutting_cost = 0.0
+    prep_cost = 0.0
+
+    for marker in cutplan.markers:
+        marker_plies = marker.total_plies or 0
+        marker_cuts = math.ceil(marker_plies / max_ply_height) if marker_plies > 0 else 0
+
+        # Use refined length if available, else original
+        if marker.layout and marker.layout.length_yards:
+            length_yards = marker.layout.length_yards
+        else:
+            length_yards = marker.length_yards or 0
+
+        total_yards += length_yards * marker_plies
+        total_plies += marker_plies
+        total_cuts += marker_cuts
+
+        # Cutting cost: perimeter * cuts * rate
+        # Prefer marker-level perimeter (from CPU refinement or GPU nesting)
+        marker_perimeter_cm = None
+        if marker.marker and marker.marker.extra_data:
+            marker_perimeter_cm = marker.marker.extra_data.get("perimeter_cm")
+
+        if not marker_perimeter_cm or marker_perimeter_cm <= 0:
+            # Fallback to ratio × perimeter_by_size approach
+            ratios = [int(x) for x in marker.ratio_str.split("-")]
+            if perimeter_by_size and ordered_sizes and len(ordered_sizes) == len(ratios):
+                marker_perimeter_cm = 0.0
+                for i, count in enumerate(ratios):
+                    if count > 0:
+                        size = ordered_sizes[i]
+                        marker_perimeter_cm += perimeter_by_size.get(size, AVG_PERIMETER_PER_BUNDLE_CM) * count
+            else:
+                bundle_count = sum(ratios)
+                marker_perimeter_cm = bundle_count * AVG_PERIMETER_PER_BUNDLE_CM
+
+        cutting_cost += marker_perimeter_cm * marker_cuts * cutting_cost_per_cm
+
+        # Prep cost: length_m * cuts * rate
+        length_m = length_yards * YARDS_TO_METERS
+        prep_cost += length_m * marker_cuts * prep_cost_per_m
+
+    fabric_cost = total_yards * fabric_cost_per_yard
+    spreading_cost = (total_yards * spreading_cost_per_yard) + (total_plies * spreading_cost_per_ply)
+    total_cost = fabric_cost + spreading_cost + cutting_cost + prep_cost
+
+    # Update cutplan
+    cutplan.total_yards = total_yards
+    cutplan.total_plies = total_plies
+    cutplan.total_cuts = total_cuts
+    cutplan.fabric_cost = fabric_cost
+    cutplan.spreading_cost = spreading_cost
+    cutplan.cutting_cost = cutting_cost
+    cutplan.prep_cost = prep_cost
+    cutplan.total_cost = total_cost
+
+
 def execute_refinement_job(
     cutplan_id: str,
     customer_id: str,
@@ -370,6 +523,11 @@ def execute_refinement_job(
     edge_buffer_mm: float,
     time_limit_s: float,
     rotation_mode: str,
+    quadtree_depth: int = 5,
+    early_termination: bool = True,
+    exploration_time_s: float = None,
+    compression_time_s: float = None,
+    seed_screening: bool = False,
 ):
     """Execute CPU refinement in the background."""
     db = SessionLocal()
@@ -421,25 +579,39 @@ def execute_refinement_job(
         dxf_path = resolve_path(pattern.dxf_file_path)
         rul_path = resolve_path(pattern.rul_file_path) if pattern.rul_file_path else None
 
-        if not rul_path:
+        if not rul_path and pattern.file_type not in ("dxf_only", "vt_dxf"):
             raise ValueError("Pattern RUL file required for graded nesting")
 
-        # Determine material and fabric width from order lines
+        # Determine material and fabric width from order lines + nesting job
         order_lines = order.order_lines
         if not order_lines:
             raise ValueError("Order has no order lines")
 
         first_line = order_lines[0]
         fabric_code = first_line.fabric_code
-        fabric = db.query(Fabric).filter(
-            Fabric.code == fabric_code,
-            Fabric.customer_id == customer_id,
-        ).first()
 
-        fabric_width_mm = (fabric.width_inches * 25.4) if fabric else 1524.0  # Default 60"
+        # Get fabric width from the most recent completed NestingJob for this order
+        # (this is the user-specified width, not the generic Fabric table width)
+        from ...models import NestingJob
+        nesting_job = db.query(NestingJob).filter(
+            NestingJob.order_id == order.id,
+            NestingJob.status == "completed",
+        ).order_by(NestingJob.created_at.desc()).first()
 
-        # Determine sizes from cutplan markers
-        # Get sizes from order
+        if nesting_job and nesting_job.fabric_width_inches:
+            fabric_width_mm = nesting_job.fabric_width_inches * 25.4
+            print(f"[Refinement] Using NestingJob fabric width: {nesting_job.fabric_width_inches}\" ({fabric_width_mm:.1f}mm)")
+        else:
+            # Fallback: use Fabric table width (less reliable)
+            fabric = db.query(Fabric).filter(
+                Fabric.code == fabric_code,
+                Fabric.customer_id == customer_id,
+            ).first()
+            fabric_width_mm = (fabric.width_inches * 25.4) if fabric else 1524.0
+            print(f"[Refinement] WARNING: No NestingJob found, using Fabric table width: {fabric_width_mm / 25.4:.2f}\" ({fabric_width_mm:.1f}mm)")
+
+        # Determine sizes — use pattern's canonical order (from RUL file)
+        # to ensure ratio_str interpretation is consistent
         sizes_set = set()
         seen_colors = set()
         for line in order_lines:
@@ -449,7 +621,11 @@ def execute_refinement_job(
             for sq in line.size_quantities:
                 if sq.quantity > 0:
                     sizes_set.add(sq.size_code)
-        sizes = sorted(sizes_set)
+        if pattern.available_sizes:
+            # Preserve pattern order, filter to sizes actually in the order
+            sizes = [s for s in pattern.available_sizes if s in sizes_set]
+        else:
+            sizes = sorted(sizes_set)
 
         # Material = fabric_code (matches pattern material name)
         material = fabric_code
@@ -465,15 +641,16 @@ def execute_refinement_job(
 
         def progress_cb(marker_idx, total, result):
             pct = int((marker_idx + 1) / total * 100)
+            marker_record = markers[marker_idx]
+            label = marker_record.marker_label or f"M{marker_idx + 1}"
             _refinement_jobs[cutplan_id].update({
                 "progress": pct,
                 "markers_done": marker_idx + 1,
-                "message": f"Completed {result['marker_label']} ({result['utilization']*100:.1f}%) — {marker_idx + 1}/{total}",
+                "message": f"Completed {label} ({result['utilization']*100:.1f}%) — {marker_idx + 1}/{total}",
             })
 
             # Save result to DB immediately
-            marker_record = markers[marker_idx]
-            dxf_filename = f"{result['marker_label']}.dxf"
+            dxf_filename = f"{label}.dxf"
             dxf_filepath = os.path.join(dxf_dir, dxf_filename)
 
             # Write DXF file
@@ -501,8 +678,21 @@ def execute_refinement_job(
                 edge_buffer_mm=edge_buffer_mm,
                 time_limit_s=time_limit_s,
                 rotation_mode=rotation_mode,
+                quadtree_depth=quadtree_depth,
             )
             db.add(layout)
+
+            # Update MarkerBank.extra_data with CPU-computed perimeter_cm
+            cpu_perimeter_cm = result.get('perimeter_cm', 0)
+            if cpu_perimeter_cm > 0 and marker_record.marker_id:
+                marker_bank = db.query(MarkerBank).filter(
+                    MarkerBank.id == marker_record.marker_id
+                ).first()
+                if marker_bank:
+                    extra = marker_bank.extra_data or {}
+                    extra["perimeter_cm"] = cpu_perimeter_cm
+                    marker_bank.extra_data = extra
+
             db.commit()
 
         def cancel_cb():
@@ -521,6 +711,12 @@ def execute_refinement_job(
             rotation_mode=rotation_mode,
             progress_callback=progress_cb,
             cancel_check=cancel_cb,
+            file_type=pattern.file_type,
+            quadtree_depth=quadtree_depth,
+            early_termination=early_termination,
+            exploration_time=int(exploration_time_s) if exploration_time_s else None,
+            compression_time=int(compression_time_s) if compression_time_s else None,
+            seed_screening=seed_screening,
         )
 
         elapsed = time.time() - _refinement_jobs[cutplan_id]["started_at"]
@@ -534,6 +730,19 @@ def execute_refinement_job(
             })
         else:
             cutplan.status = CutplanStatus.refined
+
+            # Re-load cutplan with markers+layouts+marker_bank for cost recalculation
+            db.expire_all()
+            cutplan = db.query(Cutplan).options(
+                joinedload(Cutplan.markers).joinedload(CutplanMarker.layout),
+                joinedload(Cutplan.markers).joinedload(CutplanMarker.marker),
+                joinedload(Cutplan.order),
+            ).filter(Cutplan.id == cutplan_id).first()
+            cutplan.status = CutplanStatus.refined
+
+            # Recalculate costs using refined marker lengths
+            _recalculate_cutplan_costs(db, cutplan, customer_id)
+
             _refinement_jobs[cutplan_id].update({
                 "status": "completed",
                 "progress": 100,
@@ -596,6 +805,11 @@ async def start_refinement(
         edge_buffer_mm=request.edge_buffer_mm,
         time_limit_s=request.time_limit_s,
         rotation_mode=request.rotation_mode,
+        quadtree_depth=request.quadtree_depth,
+        early_termination=request.early_termination,
+        exploration_time_s=request.exploration_time_s,
+        compression_time_s=request.compression_time_s,
+        seed_screening=request.seed_screening,
     )
 
     return {"message": "Refinement started", "cutplan_id": cutplan_id}
@@ -625,11 +839,12 @@ async def get_refinement_status(
         CutplanMarker.cutplan_id == cutplan_id,
     ).all()
 
-    for cm in cutplan_markers:
+    for idx, cm in enumerate(cutplan_markers):
         if cm.layout:
             layouts.append(MarkerLayoutResponse(
                 id=cm.layout.id,
                 cutplan_marker_id=cm.id,
+                marker_label=cm.marker_label or f"M{idx + 1}",
                 ratio_str=cm.ratio_str,
                 utilization=cm.layout.utilization or 0,
                 strip_length_mm=cm.layout.strip_length_mm or 0,
@@ -721,7 +936,8 @@ async def download_markers_dxf(
     with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
         for idx, cm in layouts_with_files:
             dxf_path = cm.layout.dxf_file_path
-            arcname = f"M{idx + 1}_{cm.ratio_str}.dxf"
+            label = cm.marker_label or f"M{idx + 1}"
+            arcname = f"{label}_{cm.ratio_str}.dxf"
             zf.write(dxf_path, arcname)
 
     zip_buffer.seek(0)

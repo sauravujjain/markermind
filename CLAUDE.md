@@ -40,6 +40,54 @@ npm run dev
 
 ---
 
+## CRITICAL: Development Server Mode
+
+**During development, ALWAYS use dev mode (`next dev`), NOT production mode (`next start`).**
+
+### After editing code — what to do:
+
+| What changed | Action needed | Why |
+|---|---|---|
+| **Frontend files** (`.tsx`, `.ts`, `.css`) | **Nothing.** Dev server picks up changes via HMR instantly. | `next dev` watches the filesystem and hot-reloads the browser automatically. |
+| **Backend files** (`.py`) | **Nothing.** Uvicorn `--reload` detects changes and restarts. | The `--reload` flag watches Python files. |
+| **package.json / config files** | Restart the frontend dev server (see below). | Config changes aren't covered by HMR. |
+
+**Do NOT run `npx next build`.** That is only for production deployment.
+**Do NOT kill and restart the frontend** after normal code edits — HMR handles it.
+
+### Starting the servers (only needed once per session):
+
+**Frontend:**
+```bash
+cd /home/sarv/projects/MarkerMind/frontend
+npx next dev > /home/sarv/projects/MarkerMind/logs/frontend.log 2>&1 &
+```
+
+**Backend:**
+```bash
+cd /home/sarv/projects/MarkerMind/backend
+uvicorn backend.main:app --reload &
+```
+
+### Before starting, verify servers aren't already running:
+```bash
+lsof -i :3000 -sTCP:LISTEN 2>/dev/null && echo "Frontend already running" || echo "Frontend not running"
+lsof -i :8000 -sTCP:LISTEN 2>/dev/null && echo "Backend already running" || echo "Backend not running"
+```
+
+### If the frontend is stuck or not reflecting changes (rare):
+```bash
+kill $(lsof -t -i :3000) 2>/dev/null
+sleep 1
+cd /home/sarv/projects/MarkerMind/frontend
+npx next dev > /home/sarv/projects/MarkerMind/logs/frontend.log 2>&1 &
+```
+
+### Production mode (deployment only — via `start.sh`):
+Only use `next build && next start` for production deployment. Never use it during active development.
+
+---
+
 ## Future Requirements & Roadmap
 
 **See [`REQUIREMENTS_CHECKLIST.md`](./REQUIREMENTS_CHECKLIST.md)** for:
@@ -53,6 +101,26 @@ npm run dev
 - Compliance & security requirements
 
 Update this checklist as new requirements are identified during development.
+
+---
+
+## CRITICAL: Primary User Interface
+
+**The order detail page (`orders/[id]/page.tsx`) is the PRIMARY user workflow.** All pattern upload, nesting, and cutplan operations happen from within an order context — not from the standalone `/patterns` page.
+
+**User flow:**
+1. Create/import an order → lands on `/orders/[id]`
+2. Upload pattern **from the order page** (inline upload form)
+3. Assign pattern to order
+4. Run GPU nesting
+5. Generate cutplan
+6. Review and approve
+
+**Pattern upload lives in two places:**
+- **`orders/[id]/page.tsx`** — PRIMARY. This is where users upload patterns during their workflow. Any new parser options or upload UI changes MUST be added here first.
+- **`patterns/page.tsx`** — SECONDARY. Standalone pattern library page. Keep in sync but this is not the main user path.
+
+When adding new features to pattern upload (new parser types, new fields, etc.), always update `orders/[id]/page.tsx` first — that's what users actually see.
 
 ---
 
@@ -74,8 +142,11 @@ src/nesting_engine/
 │   └── solution.py     # NestingSolution, PlacedPiece
 ├── engine/         # Nesting solvers
 │   └── spyrrow_engine.py   # Spyrrow wrapper (primary solver)
-├── io/             # File I/O
-│   └── dxf_parser.py       # AAMA/ASTM DXF parsing
+├── io/             # File I/O  (see docs/parser_index.md for full format guide)
+│   ├── aama_parser.py      # AAMA/ASTM DXF+RUL grading parser
+│   ├── dxf_text_parser.py  # Text-label DXF (Gerber-style markers)
+│   ├── dxf_block_parser.py # Block-based production DXF (pre-sized)
+│   └── dxf_parser.py       # Orchestrator + backward-compat re-exports
 └── apps/
     └── app.py      # Streamlit UI
 ```
@@ -182,7 +253,11 @@ Before any PR:
 | `core/instance.py` | Problem definition | Carefully |
 | `core/solution.py` | Solution format | Carefully |
 | `engine/spyrrow_engine.py` | Solver wrapper | When needed |
-| `io/dxf_parser.py` | DXF loading | When needed |
+| `io/aama_parser.py` | AAMA/ASTM DXF+RUL grading parser | When needed |
+| `io/dxf_text_parser.py` | Text-label DXF parser (Gerber-style) | When needed |
+| `io/dxf_block_parser.py` | Block-based production DXF parser | When needed |
+| `io/vt_dxf_parser.py` | Optitex Graded Nest DXF parser (VT format) | When needed |
+| `io/dxf_parser.py` | Orchestrator, backward-compat re-exports | Rarely |
 | `apps/app.py` | UI | Freely |
 | `scripts/gpu_*_ga_ratio_optimizer.py` | GPU raster nesting & ratio optimization | When needed |
 | `scripts/brute_force_improved.py` | Brute force marker ratio evaluation | When needed |
@@ -197,9 +272,11 @@ For in-depth algorithm documentation, see:
 
 | Document | Description |
 |----------|-------------|
+| [`docs/parser_index.md`](docs/parser_index.md) | **Pattern parser index**: all CAD format parsers, routing logic, how to add new formats |
 | [`docs/gpu_nesting.md`](docs/gpu_nesting.md) | GPU raster nesting algorithm: FFT convolution, piece placement, sorting strategies, island GA |
 | [`docs/cutplan_optimizer.md`](docs/cutplan_optimizer.md) | ILP cutplan optimization: single-color, multicolor joint, two-stage solvers |
 | [`docs/cutting_costs.md`](docs/cutting_costs.md) | Cost calculation methodology: fabric, spreading, cutting, prep costs |
+| [`docs/production_deployment.md`](docs/production_deployment.md) | **Production deployment guide**: GCP architecture, Cloud Run GPU, multi-tenant subdomain routing, pricing, cost analysis |
 
 ## GPU Raster Nesting (Fast Marker Algorithm)
 
