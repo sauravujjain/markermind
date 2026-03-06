@@ -1,5 +1,35 @@
 # MarkerMind - Claude Code Guide
 
+## CRITICAL: No Geometry Changes Without User Review
+
+**Any code change that modifies, transforms, simplifies, filters, or otherwise alters the geometry (vertices/polygons) of pattern pieces MUST be reviewed and explicitly approved by the user before being applied. No exceptions.**
+
+This applies to:
+- Parser files (`aama_parser.py`, `dxf_block_parser.py`, `dxf_text_parser.py`, `vt_dxf_parser.py`, `dxf_parser.py`)
+- Vertex cleaning/processing functions (`_clean_polygon_vertices`, `_simplify_polygon`, etc.)
+- Any pre-processing in nesting runners (`spyrrow_nesting_runner.py`, `gpu_nesting_runner.py`) that touches piece vertices before solving
+- Grading functions, coordinate transforms, polygon simplification, tolerance changes
+- Any new function that operates on piece vertex data
+
+**Procedure:** Present the proposed change, show the geometric impact (area diff, vertex count diff) on existing patterns, and wait for explicit approval before writing/editing code.
+
+---
+
+## CRITICAL: Parser Architecture — Self-Contained Units
+
+**Each parser is a self-contained, deployable unit.** All logic specific to a parser — file reading, geometry extraction, vertex cleaning/preprocessing, validation — MUST live inside that parser's own file.
+
+**Rationale:** In production, each customer deploys only the parser(s) they need (potentially 1 out of 20+). A parser must be deployable without dragging in code from other parsers.
+
+**Rules:**
+- **No shared vertex cleaning functions** across parsers. Each parser owns its own `clean_vertices_for_spyrrow()` (or equivalent) because each format has different geometry quirks.
+- **No cross-parser imports.** Parser A must never import from Parser B.
+- **Nesting runners (`spyrrow_nesting_runner.py`, `gpu_nesting_runner.py`) must not contain parser-specific geometry logic.** They call the parser's cleaning function, not their own.
+- **When adding a new parser:** create a new file, include its own vertex cleaning, register it in `dxf_parser.py` orchestrator. Do not modify existing parsers.
+- **The orchestrator (`dxf_parser.py`)** handles format detection and routing only — no geometry processing.
+
+---
+
 ## CRITICAL: Testing First Requirement
 
 **Before any design, improvement, or feature work, you MUST first complete the full workflow test through the web application using Puppeteer.**

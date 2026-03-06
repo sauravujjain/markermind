@@ -78,13 +78,14 @@ function OrderLayoutInner({ children }: { children: React.ReactNode }) {
   const isOnConfigure = pathname === `/orders/${orderId}/configure`
   const isOnNesting = pathname === `/orders/${orderId}/nesting`
   const isOnCutplan = pathname === `/orders/${orderId}/cutplan`
+  const isOnRollplan = pathname === `/orders/${orderId}/rollplan`
 
   // Determine next action for sticky bar
   let nextAction: { label: string; onClick: () => void; disabled?: boolean } | null = null
 
   if (isConfigured && !hasNestingResults) {
     nextAction = {
-      label: isNesting ? 'Nesting in Progress...' : 'Configure & Nest',
+      label: isNesting ? 'GPU Nesting in Progress...' : 'Configure & Nest',
       onClick: () => router.push(`/orders/${orderId}/configure`),
       disabled: isNesting,
     }
@@ -124,7 +125,7 @@ function OrderLayoutInner({ children }: { children: React.ReactNode }) {
     nextAction = null
   } else if (!isConfigured) {
     nextAction = {
-      label: 'Configure Nesting',
+      label: 'Configure GPU Nesting',
       onClick: () => router.push(`/orders/${orderId}/configure`),
     }
   }
@@ -152,7 +153,7 @@ function OrderLayoutInner({ children }: { children: React.ReactNode }) {
               variant="outline"
               onClick={() => router.push(`/orders/${orderId}/configure`)}
               disabled={!order.pattern_id}
-              title={!order.pattern_id ? 'Select a pattern first' : 'Configure & run nesting'}
+              title={!order.pattern_id ? 'Select a pattern first' : 'Configure & run GPU nesting'}
             >
               <Settings className="mr-2 h-4 w-4" />
               Configure & Nest
@@ -160,7 +161,7 @@ function OrderLayoutInner({ children }: { children: React.ReactNode }) {
             <Button
               onClick={() => router.push(`/orders/${orderId}/cutplan`)}
               disabled={!hasNestingResults}
-              title={!hasNestingResults ? 'Run nesting first' : 'Generate cutplan options'}
+              title={!hasNestingResults ? 'Run GPU nesting first' : 'Generate cutplan options'}
             >
               Generate Cutplan
             </Button>
@@ -168,7 +169,7 @@ function OrderLayoutInner({ children }: { children: React.ReactNode }) {
         </div>
 
         {/* Workflow Steps */}
-        <div className="grid gap-3 md:grid-cols-6">
+        <div className="grid gap-3 md:grid-cols-7">
           <Link href={`/orders/${orderId}`}>
             <Card className={`cursor-pointer transition-all hover:shadow-md ${order.order_lines.length > 0 ? 'border-green-500' : ''} ${isOnMain ? 'ring-2 ring-primary/30' : ''}`}>
               <CardHeader className="pb-2">
@@ -230,7 +231,7 @@ function OrderLayoutInner({ children }: { children: React.ReactNode }) {
                   <div className={`w-7 h-7 rounded-full flex items-center justify-center text-xs ${nestingJobs.some(j => j.status === 'completed') ? 'bg-green-100 text-green-600' : nestingJobs.some(j => j.status === 'running') ? 'bg-blue-100 text-blue-600' : 'bg-gray-100 text-gray-400'}`}>
                     {nestingJobs.some(j => j.status === 'completed') ? <CheckCircle2 className="h-3.5 w-3.5" /> : nestingJobs.some(j => j.status === 'running') ? <Clock className="h-3.5 w-3.5 animate-pulse" /> : '4'}
                   </div>
-                  <CardTitle className="text-xs">Nesting</CardTitle>
+                  <CardTitle className="text-xs">GPU Nesting</CardTitle>
                 </div>
               </CardHeader>
               <CardContent className="pt-0">
@@ -259,12 +260,30 @@ function OrderLayoutInner({ children }: { children: React.ReactNode }) {
             </Card>
           </Link>
 
+          <Link href={`/orders/${orderId}/rollplan`}>
+            <Card className={`cursor-pointer transition-all hover:shadow-md ${hasApprovedCutplan && cutplans.some(c => c.status === 'refined') ? 'border-amber-500' : ''} ${isOnRollplan ? 'ring-2 ring-primary/30' : ''}`}>
+              <CardHeader className="pb-2">
+                <div className="flex items-center space-x-2">
+                  <div className={`w-7 h-7 rounded-full flex items-center justify-center text-xs ${hasApprovedCutplan && cutplans.some(c => c.status === 'refined') ? 'bg-amber-100 text-amber-600' : 'bg-gray-100 text-gray-400'}`}>
+                    {'6'}
+                  </div>
+                  <CardTitle className="text-xs">Roll Plan</CardTitle>
+                </div>
+              </CardHeader>
+              <CardContent className="pt-0">
+                <p className="text-xs text-muted-foreground">
+                  {cutplans.some(c => c.status === 'refined') ? 'Plan rolls' : 'Pending'}
+                </p>
+              </CardContent>
+            </Card>
+          </Link>
+
           <Link href={`/orders/${orderId}/cutplan`}>
             <Card className={`cursor-pointer transition-all hover:shadow-md ${cutplans.some(c => c.status === 'refined') ? 'border-green-500' : cutplans.some(c => c.status === 'refining') ? 'border-blue-500' : cutplans.some(c => c.status === 'approved') ? 'border-amber-500' : ''} ${isOnCutplan ? 'ring-2 ring-primary/30' : ''}`}>
               <CardHeader className="pb-2">
                 <div className="flex items-center space-x-2">
                   <div className={`w-7 h-7 rounded-full flex items-center justify-center text-xs ${cutplans.some(c => c.status === 'refined') ? 'bg-green-100 text-green-600' : cutplans.some(c => c.status === 'refining') ? 'bg-blue-100 text-blue-600' : 'bg-gray-100 text-gray-400'}`}>
-                    {cutplans.some(c => c.status === 'refined') ? <CheckCircle2 className="h-3.5 w-3.5" /> : cutplans.some(c => c.status === 'refining') ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : '6'}
+                    {cutplans.some(c => c.status === 'refined') ? <CheckCircle2 className="h-3.5 w-3.5" /> : cutplans.some(c => c.status === 'refining') ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : '7'}
                   </div>
                   <CardTitle className="text-xs">Export</CardTitle>
                 </div>
@@ -292,7 +311,7 @@ function OrderLayoutInner({ children }: { children: React.ReactNode }) {
             {/* Progress indicator */}
             <div className="flex items-center gap-3">
               <div className="flex items-center gap-1">
-                {[1, 2, 3, 4, 5, 6].map((step) => (
+                {[1, 2, 3, 4, 5, 6, 7].map((step) => (
                   <div
                     key={step}
                     className={`w-2 h-2 rounded-full transition-all ${
@@ -331,9 +350,9 @@ function OrderLayoutInner({ children }: { children: React.ReactNode }) {
                   variant="outline"
                   size="sm"
                   onClick={() => router.push(`/orders/${orderId}/configure`)}
-                  title="Re-run nesting with different parameters"
+                  title="Re-run GPU nesting with different parameters"
                 >
-                  Re-run Nesting
+                  Re-run GPU Nesting
                 </Button>
               )}
             </div>

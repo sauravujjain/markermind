@@ -1454,6 +1454,59 @@ def _clean_vertices(
     return cleaned
 
 
+def clean_vertices_for_spyrrow(
+    vertices: List[Tuple[float, float]],
+    tolerance: float = 0.01,
+) -> List[Tuple[float, float]]:
+    """
+    Prepare AAMA-graded vertices for the Spyrrow/jagua-rs solver.
+
+    AAMA grader produces clean polygons from rule-based grading. The only
+    issue is occasional duplicate vertices (consecutive from grading, or
+    non-consecutive from rule intersection). This function removes all
+    duplicates and re-closes the polygon.
+
+    No simplification is applied — AAMA curves are already clean polylines
+    where every vertex is geometrically significant.
+
+    This function is specific to AAMA parser output. Other parsers have
+    their own cleaning functions.
+    """
+    if len(vertices) < 3:
+        return vertices
+
+    verts = list(vertices)
+    # Remove closing vertex if present
+    if (len(verts) > 1 and
+            abs(verts[0][0] - verts[-1][0]) < tolerance and
+            abs(verts[0][1] - verts[-1][1]) < tolerance):
+        verts = verts[:-1]
+
+    # Remove non-consecutive duplicates (keep first occurrence)
+    seen: List[Tuple[float, float]] = []
+    for v in verts:
+        is_dup = False
+        for s in seen:
+            if abs(v[0] - s[0]) < tolerance and abs(v[1] - s[1]) < tolerance:
+                is_dup = True
+                break
+        if not is_dup:
+            seen.append(v)
+
+    # Remove consecutive duplicates that might remain
+    cleaned: List[Tuple[float, float]] = [seen[0]] if seen else []
+    for v in seen[1:]:
+        if not (abs(v[0] - cleaned[-1][0]) < tolerance and
+                abs(v[1] - cleaned[-1][1]) < tolerance):
+            cleaned.append(v)
+
+    if len(cleaned) < 3:
+        return vertices  # don't break the polygon
+
+    cleaned.append(cleaned[0])
+    return cleaned
+
+
 # =============================================================================
 # Multi-Material Workflow Functions
 # =============================================================================

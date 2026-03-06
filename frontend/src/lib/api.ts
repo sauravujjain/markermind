@@ -366,17 +366,88 @@ class ApiClient {
     return response.blob()
   }
 
-  async downloadOrderExcel(orderId: string): Promise<Blob> {
+  async downloadOrderExcel(orderId: string, includeMarkers: boolean = false): Promise<Blob> {
     const token = this.getToken()
     const headers: Record<string, string> = {}
     if (token) headers['Authorization'] = `Bearer ${token}`
 
-    const response = await fetch(`${API_URL}/export/order/${orderId}/excel`, { headers })
+    const params = includeMarkers ? '?include_markers=true' : ''
+    const response = await fetch(`${API_URL}/export/order/${orderId}/excel${params}`, { headers })
     if (!response.ok) {
       const error = await response.json().catch(() => ({}))
       throw new Error(error.detail || 'Download failed')
     }
     return response.blob()
+  }
+
+  async downloadTestMarkerDxf(resultId: string): Promise<Blob> {
+    const token = this.getToken()
+    const headers: Record<string, string> = {}
+    if (token) headers['Authorization'] = `Bearer ${token}`
+
+    const response = await fetch(`${API_URL}/export/test-marker/${resultId}/dxf`, { headers })
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}))
+      throw new Error(error.detail || 'DXF download failed')
+    }
+    return response.blob()
+  }
+
+  // Roll Plans
+  async createRollPlan(data: RollPlanCreateRequest) {
+    return this.request<{ id: string; status: string }>('/rollplans', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    })
+  }
+
+  async uploadRolls(rollplanId: string, file: File) {
+    const formData = new FormData()
+    formData.append('file', file)
+
+    const token = this.getToken()
+    const response = await fetch(`${API_URL}/rollplans/${rollplanId}/upload-rolls`, {
+      method: 'POST',
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+      body: formData,
+    })
+
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}))
+      throw new Error(error.detail || 'Upload failed')
+    }
+
+    return response.json() as Promise<RollUploadResponse>
+  }
+
+  async startRollSimulation(rollplanId: string, params?: { ga_pop_size?: number; ga_generations?: number }) {
+    const query = params ? `?${new URLSearchParams(params as Record<string, string>)}` : ''
+    return this.request<{ id: string }>(`/rollplans/${rollplanId}/simulate${query}`, { method: 'POST' })
+  }
+
+  async getRollPlanStatus(rollplanId: string) {
+    return this.request<RollPlanStatus>(`/rollplans/${rollplanId}/status`)
+  }
+
+  async getRollPlan(rollplanId: string) {
+    return this.request<RollPlan>(`/rollplans/${rollplanId}`)
+  }
+
+  async listRollPlans(cutplanId?: string) {
+    const query = cutplanId ? `?cutplan_id=${cutplanId}` : ''
+    return this.request<RollPlan[]>(`/rollplans${query}`)
+  }
+
+  async getRollPlanDockets(rollplanId: string, source: string = 'mc') {
+    return this.request<CutDocket[]>(`/rollplans/${rollplanId}/dockets?source=${source}`)
+  }
+
+  async cancelRollSimulation(rollplanId: string) {
+    return this.request(`/rollplans/${rollplanId}/cancel`, { method: 'POST' })
+  }
+
+  async deleteRollPlan(rollplanId: string) {
+    return this.request(`/rollplans/${rollplanId}`, { method: 'DELETE' })
   }
 }
 
@@ -505,6 +576,7 @@ export interface NestingJobCreate {
   top_n_results?: number
   full_coverage?: boolean
   gpu_scale?: number  // px/mm resolution. 0.15=fast (default), 0.3=demo quality
+  selected_sizes?: string[]  // Subset of pattern sizes to nest; omit = all sizes
 }
 
 export interface NestingJob {
@@ -620,6 +692,8 @@ export interface CutplanOptimizeRequest {
   generate_options?: string[]
   color_code?: string
   fabric_cost_per_yard?: number
+  max_ply_height?: number
+  min_plies_by_bundle?: string  // e.g. "6:50,5:40,4:30,3:10,2:1,1:1"
 }
 
 export interface Cutplan {
@@ -739,4 +813,116 @@ export interface RefinementStatus {
   markers_total: number
   markers_done: number
   layouts: MarkerLayout[]
+}
+
+// Roll Plan types
+export interface RollPlanCreateRequest {
+  cutplan_id: string
+  name?: string
+  color_code?: string
+  mode?: string              // "monte_carlo" | "ga" | "both"
+  num_simulations?: number
+  min_reuse_length_yards?: number
+  pseudo_roll_avg_yards?: number
+  pseudo_roll_delta_yards?: number
+  ga_pop_size?: number
+  ga_generations?: number
+}
+
+export interface WasteStats {
+  avg: number
+  std: number
+  p95: number
+}
+
+export interface WasteBreakdown {
+  unusable_yards: number
+  endbit_yards: number
+  returnable_yards: number
+  real_waste_yards: number
+}
+
+export interface RollAssignment {
+  roll_id: string
+  roll_length_yards: number
+  plies_from_roll: number
+  end_bit_yards: number
+  is_pseudo: boolean
+}
+
+export interface CutDocket {
+  cut_number: number
+  marker_label: string
+  ratio_str: string
+  marker_length_yards: number
+  plies: number
+  assigned_rolls: RollAssignment[]
+  total_fabric_yards: number
+  total_end_bit_yards: number
+}
+
+export interface MonteCarloResult {
+  num_simulations: number
+  total_fabric_required?: number
+  unusable_waste: WasteStats
+  endbit_waste: WasteStats
+  returnable_waste: WasteStats
+  real_waste: WasteStats
+  best_run_dockets: CutDocket[]
+}
+
+export interface GAResult {
+  waste: WasteBreakdown
+  generations_run?: number
+  dockets: CutDocket[]
+}
+
+export interface RollPlan {
+  id: string
+  cutplan_id: string
+  name?: string
+  color_code?: string
+  status: string
+  mode: string
+  input_type?: string
+  num_simulations: number
+  min_reuse_length_yards: number
+  pseudo_roll_avg_yards?: number
+  pseudo_roll_delta_yards?: number
+  progress: number
+  progress_message?: string
+  error_message?: string
+  monte_carlo?: MonteCarloResult
+  ga?: GAResult
+  rolls_count: number
+  real_rolls_count: number
+  pseudo_rolls_count: number
+  created_at: string
+  updated_at: string
+}
+
+export interface RollPlanStatus {
+  id: string
+  status: string
+  progress: number
+  message: string
+}
+
+export interface FabricRoll {
+  id: string
+  roll_plan_id: string
+  roll_number: string
+  length_yards: number
+  is_pseudo: boolean
+  width_inches?: number
+  shade_group?: string
+  created_at: string
+}
+
+export interface RollUploadResponse {
+  rolls_count: number
+  total_length_yards: number
+  avg_length_yards: number
+  min_length_yards: number
+  max_length_yards: number
 }

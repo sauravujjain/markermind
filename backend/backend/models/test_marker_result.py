@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, Integer, ForeignKey, Float, Text, Boolean, JSON
+from sqlalchemy import Column, String, Integer, ForeignKey, Float, Text, Boolean, JSON, LargeBinary
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 from ..database import Base
@@ -28,6 +28,7 @@ class TestMarkerResult(Base, TimestampMixin):
     piece_count = Column(Integer, nullable=False)
     computation_time_ms = Column(Float, nullable=False)
     svg_preview = Column(Text, nullable=True)
+    dxf_data = Column(LargeBinary, nullable=True)
 
     # Nesting params snapshot
     time_limit_s = Column(Float, nullable=False)

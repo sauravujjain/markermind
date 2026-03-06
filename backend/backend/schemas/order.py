@@ -64,8 +64,8 @@ class OrderCreate(BaseModel):
     style_number: Optional[str] = None
     style_id: Optional[str] = None
     pattern_id: Optional[str] = None
-    piece_buffer_mm: float = 2.0
-    edge_buffer_mm: float = 5.0
+    piece_buffer_mm: float = 0.0
+    edge_buffer_mm: float = 0.0
     rotation_mode: str = "free"
     lines: List[OrderLineCreate] = []
 

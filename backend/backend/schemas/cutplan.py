@@ -10,6 +10,8 @@ class CutplanOptimizeRequest(BaseModel):
     generate_options: List[str] = ["balanced"]  # Which options to generate
     color_code: Optional[str] = None  # Filter to specific color, None = all colors
     fabric_cost_per_yard: Optional[float] = None  # User-specified fabric cost, None = use DB default
+    max_ply_height: Optional[int] = None  # Max plies per cut, None = use DB default
+    min_plies_by_bundle: Optional[str] = None  # e.g. "6:50,5:40,4:30,3:10,2:1,1:1", None = use DB default
 
 
 class CostBreakdownResponse(BaseModel):

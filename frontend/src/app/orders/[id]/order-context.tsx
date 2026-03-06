@@ -175,11 +175,16 @@ export function OrderProvider({ children }: { children: ReactNode }) {
     const hasRefined = cutplans.some(c => c.status === 'refined')
     const isRefining = cutplans.some(c => c.status === 'refining')
     if (hasRefined) {
-      stepLabel = 'Export Ready'
+      stepLabel = 'Roll Plan'
     } else if (isRefining) {
       stepLabel = 'Refining...'
     } else {
       stepLabel = 'Ready to Refine'
+    }
+    // Step 7: Export Ready (after refinement complete)
+    if (hasRefined) {
+      currentStep = 7
+      stepLabel = 'Export Ready'
     }
   }
 

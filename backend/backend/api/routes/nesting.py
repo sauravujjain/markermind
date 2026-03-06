@@ -335,7 +335,7 @@ async def test_marker(
     """Run a quick single-ratio CPU (Spyrrow) nest and persist the result."""
     import time as _time
     from ...services.spyrrow_nesting_runner import (
-        load_pieces_for_spyrrow, nest_single_marker, export_marker_svg,
+        load_pieces_for_spyrrow, nest_single_marker, export_marker_svg, export_marker_dxf,
     )
 
     # Verify pattern exists and belongs to customer
@@ -528,11 +528,10 @@ async def test_marker(
 
         computation_time_ms = (_time.time() - t0) * 1000
 
-        # Generate SVG preview
+        # Generate SVG preview and DXF
         svg_preview = export_marker_svg(solution_data, fabric_width_mm)
-
-        # Build ratio_str in canonical order (matching full sizes list)
         ratio_str = '-'.join(str(request.size_bundles.get(s, 0)) for s in sizes)
+        dxf_bytes = export_marker_dxf(solution_data, fabric_width_mm, ratio_str)
 
         piece_count = len(solution_data.get('bundle_pieces', []))
 
@@ -557,6 +556,7 @@ async def test_marker(
         piece_count=piece_count,
         computation_time_ms=computation_time_ms,
         svg_preview=svg_preview,
+        dxf_data=dxf_bytes,
         time_limit_s=time_limit,
         quadtree_depth=quadtree_depth,
         early_termination=early_termination,
@@ -604,7 +604,8 @@ async def list_test_markers(
     """List saved test marker results (without SVG for performance)."""
     from sqlalchemy.orm import defer as sa_defer
     query = db.query(TestMarkerResult).options(
-        sa_defer(TestMarkerResult.svg_preview)
+        sa_defer(TestMarkerResult.svg_preview),
+        sa_defer(TestMarkerResult.dxf_data),
     ).filter(
         TestMarkerResult.created_by == current_user.id
     )
@@ -624,7 +625,10 @@ async def get_test_marker(
     db: Session = Depends(get_db)
 ):
     """Get a single test marker result with full SVG."""
-    result = db.query(TestMarkerResult).filter(
+    from sqlalchemy.orm import defer as sa_defer
+    result = db.query(TestMarkerResult).options(
+        sa_defer(TestMarkerResult.dxf_data),
+    ).filter(
         TestMarkerResult.id == result_id,
         TestMarkerResult.created_by == current_user.id
     ).first()
