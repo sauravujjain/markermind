@@ -33,9 +33,10 @@ MIN_PLIES_BY_BUNDLE = {
 }
 
 
-def get_min_plies(bundle_count: int) -> int:
+def get_min_plies(bundle_count: int, custom_min_plies: Optional[Dict[int, int]] = None) -> int:
     """Get minimum plies for a marker based on its bundle count."""
-    return MIN_PLIES_BY_BUNDLE.get(bundle_count, 1)
+    lookup = custom_min_plies if custom_min_plies else MIN_PLIES_BY_BUNDLE
+    return lookup.get(bundle_count, 1)
 
 
 @dataclass
@@ -64,10 +65,11 @@ class MarkerAssignment:
     """A marker with assigned plies."""
     marker: Marker
     plies: int
+    _max_ply_height: int = 100
 
     @property
     def cuts(self) -> int:
-        return (self.plies + MAX_PLIES_PER_CUT - 1) // MAX_PLIES_PER_CUT
+        return (self.plies + self._max_ply_height - 1) // self._max_ply_height
 
     def produces(self, sizes: List[str]) -> Dict[str, int]:
         return self.marker.produces(self.plies, sizes)
@@ -80,6 +82,7 @@ class CutPlan:
     strategy: str
     assignments: List[MarkerAssignment] = field(default_factory=list)
     sizes: List[str] = field(default_factory=list)
+    max_ply_height: int = 100
 
     @property
     def total_plies(self) -> int:
@@ -342,6 +345,8 @@ def solve_ilp(
     objective: str = "max_efficiency",
     marker_penalty: float = 5.0,
     name: str = "ILP Solution",
+    max_ply_height: int = 100,
+    min_plies_by_bundle: Optional[Dict[int, int]] = None,
 ) -> Tuple[CutPlan, float]:
     """
     Unified ILP solver with different objective functions.
@@ -376,41 +381,49 @@ def solve_ilp(
         return CutPlan(name=name, strategy=objective, sizes=sizes), 0.0
 
     M = max(demand.values()) + 100  # Big-M
-    max_cuts = (M + MAX_PLIES_PER_CUT - 1) // MAX_PLIES_PER_CUT + 1
+    max_cuts = (M + max_ply_height - 1) // max_ply_height + 1
 
-    # Get minimum plies for each marker
-    min_plies = [get_min_plies(m.bundle_count) for m in all_markers]
+    # Get minimum plies for each marker (use custom if provided)
+    min_plies = [get_min_plies(m.bundle_count, min_plies_by_bundle) for m in all_markers]
 
     # Build objective function based on type
+    # All strategies now include efficiency weighting for better results:
+    #   A: max_efficiency  → eff_weight + penalty=1 (slight marker penalty)
+    #   B: min_markers     → eff_weight + penalty=10 (strongly favor fewer markers)
+    #   C: min_end_cuts    → handled externally as two-stage
+    #   D: min_bundle_cuts → eff_weight + cutting_work_weight (3 variable model)
+    #   E: balanced        → eff_weight + penalty=5 (trade-off)
+
     if objective == "min_bundle_cuts":
         # Variables: [plies_0..n-1, used_0..n-1, cuts_0..n-1]
         num_vars = 3 * n
         c = np.zeros(num_vars)
         for i, m in enumerate(all_markers):
-            c[2*n + i] = m.bundle_count  # Minimize bundle_count * cuts
-    elif objective == "balanced":
-        # Variables: [plies_0..n-1, used_0..n-1]
+            c[i] = 1 - m.efficiency       # Efficiency loss term
+            c[2*n + i] = 2 * m.bundle_count  # Cutting work term (weight=2)
+    elif objective == "max_efficiency":
+        # Efficiency-focused with slight marker penalty (penalty=1)
         num_vars = 2 * n
         c = np.zeros(num_vars)
         for i, m in enumerate(all_markers):
-            c[i] = 1 - m.efficiency  # Efficiency loss
-        c[n:2*n] = marker_penalty  # Penalty per marker
-    else:
-        # Variables: [plies_0..n-1, used_0..n-1]
+            c[i] = 1 - m.efficiency
+        c[n:2*n] = 1  # Light penalty per marker
+    elif objective == "min_markers":
+        # Strongly favor fewer markers but still consider efficiency (penalty=10)
         num_vars = 2 * n
-
-        if objective == "max_efficiency":
-            c = np.zeros(num_vars)
-            for i, m in enumerate(all_markers):
-                c[i] = 1 - m.efficiency
-        elif objective == "min_markers":
-            c = np.zeros(num_vars)
-            c[n:2*n] = 1
-        elif objective == "min_plies":
-            c = np.zeros(num_vars)
-            c[:n] = 1
-        else:
-            raise ValueError(f"Unknown objective: {objective}")
+        c = np.zeros(num_vars)
+        for i, m in enumerate(all_markers):
+            c[i] = 1 - m.efficiency
+        c[n:2*n] = 10  # Heavy penalty per marker
+    elif objective == "balanced":
+        # Trade-off between efficiency and marker count (penalty=5)
+        num_vars = 2 * n
+        c = np.zeros(num_vars)
+        for i, m in enumerate(all_markers):
+            c[i] = 1 - m.efficiency
+        c[n:2*n] = marker_penalty
+    else:
+        raise ValueError(f"Unknown objective: {objective}")
 
     # Equality constraints: production = demand
     A_eq = []
@@ -441,12 +454,12 @@ def solve_ilp(
         A_ub.append(row)
         b_ub.append(0)
 
-    # Constraint 3 (for min_bundle_cuts): cuts[m] >= plies[m] / MAX_PLIES_PER_CUT
+    # Constraint 3 (for min_bundle_cuts): cuts[m] >= plies[m] / max_ply_height
     if objective == "min_bundle_cuts":
         for i in range(n):
             row = [0] * num_vars
             row[i] = 1
-            row[2*n + i] = -MAX_PLIES_PER_CUT
+            row[2*n + i] = -max_ply_height
             A_ub.append(row)
             b_ub.append(0)
 
@@ -479,16 +492,102 @@ def solve_ilp(
             raise RuntimeError(f"ILP failed ({solve_time:.1f}s): {result.message}")
 
     # Build plan
-    plan = CutPlan(name=name, strategy=objective, sizes=sizes)
+    plan = CutPlan(name=name, strategy=objective, sizes=sizes, max_ply_height=max_ply_height)
     x = np.round(result.x).astype(int)
     plies_vals = x[:n]
 
     for i, plies in enumerate(plies_vals):
         if plies > 0:
-            plan.assignments.append(MarkerAssignment(all_markers[i], plies))
+            plan.assignments.append(MarkerAssignment(all_markers[i], plies, _max_ply_height=max_ply_height))
 
     plan.assignments.sort(key=lambda a: (-a.marker.bundle_count, -a.marker.efficiency))
 
+    return plan, solve_time
+
+
+def _solve_min_end_cuts(
+    demand: Dict[str, int],
+    all_markers: List[Marker],
+    sizes: List[str],
+    penalty: float = 5.0,
+    max_ply_height: int = 100,
+    min_plies_by_bundle: Optional[Dict[int, int]] = None,
+    name: str = "Option C: Min End Cuts",
+) -> Tuple[CutPlan, float]:
+    """
+    Two-stage solver to minimize end cuts:
+      Stage 1: Balanced ILP for ~95% of demand using larger markers (3+ bundles)
+      Stage 2: Fill the remaining ~5% with small 1-2 bundle markers
+
+    This ensures the tail end of demand is handled by short markers that are
+    easy to cut, while the bulk uses efficient larger markers.
+    """
+    t0 = time.time()
+
+    # Split markers into large (3+ bundles) and small (1-2 bundles)
+    large_markers = [m for m in all_markers if m.bundle_count >= 3]
+    small_markers = [m for m in all_markers if m.bundle_count <= 2]
+
+    # Stage 1: Solve balanced for 95% of demand using large markers
+    demand_95 = {}
+    for size, qty in demand.items():
+        demand_95[size] = max(1, int(qty * 0.95))
+
+    plan = CutPlan(name=name, strategy="min_end_cuts", sizes=sizes, max_ply_height=max_ply_height)
+
+    if large_markers:
+        try:
+            plan_stage1, _ = solve_ilp(
+                demand=demand_95,
+                all_markers=large_markers,
+                sizes=sizes,
+                objective="balanced",
+                marker_penalty=penalty,
+                max_ply_height=max_ply_height,
+                min_plies_by_bundle=min_plies_by_bundle,
+                name=f"{name} (Stage 1)",
+            )
+
+            # Compute what stage 1 produced
+            produced = plan_stage1.total_produced()
+            for a in plan_stage1.assignments:
+                plan.assignments.append(MarkerAssignment(a.marker, a.plies, _max_ply_height=max_ply_height))
+
+        except Exception as e:
+            print(f"[ILP] Min End Cuts stage 1 failed: {e}, falling back to full balanced")
+            produced = {s: 0 for s in sizes}
+    else:
+        produced = {s: 0 for s in sizes}
+
+    # Stage 2: Fill remainder with small markers (relaxed min_plies: 1 for all)
+    remainder = {}
+    for size in sizes:
+        rem = demand[size] - produced.get(size, 0)
+        if rem > 0:
+            remainder[size] = rem
+
+    if remainder and any(v > 0 for v in remainder.values()) and small_markers:
+        # Relaxed min plies for small markers
+        relaxed_min_plies = {1: 1, 2: 1, 3: 1, 4: 1, 5: 1, 6: 1}
+        try:
+            plan_stage2, _ = solve_ilp(
+                demand=remainder,
+                all_markers=small_markers,
+                sizes=sizes,
+                objective="balanced",
+                marker_penalty=1,  # Light penalty for remainder
+                max_ply_height=max_ply_height,
+                min_plies_by_bundle=relaxed_min_plies,
+                name=f"{name} (Stage 2)",
+            )
+
+            for a in plan_stage2.assignments:
+                plan.assignments.append(MarkerAssignment(a.marker, a.plies, _max_ply_height=max_ply_height))
+        except Exception as e:
+            print(f"[ILP] Min End Cuts stage 2 failed: {e}")
+
+    plan.assignments.sort(key=lambda a: (-a.marker.bundle_count, -a.marker.efficiency))
+    solve_time = time.time() - t0
     return plan, solve_time
 
 
@@ -501,6 +600,8 @@ def optimize_cutplan(
     strategy_callback: Optional[Callable[[str, Dict], None]] = None,
     cancel_check: Optional[Callable[[], bool]] = None,
     pattern_sizes: Optional[List[str]] = None,
+    max_ply_height: int = 100,
+    min_plies_by_bundle_str: Optional[str] = None,
 ) -> List[Dict]:
     """
     Run ILP optimization with multiple strategies.
@@ -558,10 +659,21 @@ def optimize_cutplan(
     strategy_names = {
         "max_efficiency": "Option A: Max Efficiency",
         "min_markers": "Option B: Min Markers",
-        "min_plies": "Option C: Min Plies",
-        "min_bundle_cuts": "Option D: Min Bundle-Cuts",
-        "balanced": f"Option E: Balanced (penalty={penalty})",
+        "min_end_cuts": "Option C: Min End Cuts",
+        "min_bundle_cuts": "Option D: Min Cutting Work",
+        "balanced": "Option E: Balanced",
     }
+
+    # Parse min_plies_by_bundle from custom string if provided
+    custom_min_plies = None
+    if min_plies_by_bundle_str:
+        try:
+            custom_min_plies = {}
+            for part in min_plies_by_bundle_str.split(","):
+                bc, mp = part.strip().split(":")
+                custom_min_plies[int(bc)] = int(mp)
+        except Exception:
+            custom_min_plies = None
 
     for idx, option in enumerate(options):
         # Check for cancellation
@@ -571,14 +683,39 @@ def optimize_cutplan(
 
         print(f"[ILP] Running strategy {idx+1}/{len(options)}: {option}...")
         try:
-            plan, solve_time = solve_ilp(
-                demand=demand,
-                all_markers=marker_objects,
-                sizes=sizes,
-                objective=option,
-                marker_penalty=penalty,
-                name=strategy_names.get(option, f"Option: {option}"),
-            )
+            if option == "min_end_cuts":
+                # Two-stage: balanced for 95% demand, small markers for remainder
+                plan, solve_time = _solve_min_end_cuts(
+                    demand=demand,
+                    all_markers=marker_objects,
+                    sizes=sizes,
+                    penalty=penalty,
+                    max_ply_height=max_ply_height,
+                    min_plies_by_bundle=custom_min_plies,
+                    name=strategy_names[option],
+                )
+            elif option == "min_plies":
+                # Legacy alias → redirect to min_end_cuts
+                plan, solve_time = _solve_min_end_cuts(
+                    demand=demand,
+                    all_markers=marker_objects,
+                    sizes=sizes,
+                    penalty=penalty,
+                    max_ply_height=max_ply_height,
+                    min_plies_by_bundle=custom_min_plies,
+                    name=strategy_names.get("min_end_cuts", "Option C: Min End Cuts"),
+                )
+            else:
+                plan, solve_time = solve_ilp(
+                    demand=demand,
+                    all_markers=marker_objects,
+                    sizes=sizes,
+                    objective=option,
+                    marker_penalty=penalty,
+                    max_ply_height=max_ply_height,
+                    min_plies_by_bundle=custom_min_plies,
+                    name=strategy_names.get(option, f"Option: {option}"),
+                )
             result = plan.to_dict()
             result["solve_time"] = solve_time
             cutplan_options.append(result)

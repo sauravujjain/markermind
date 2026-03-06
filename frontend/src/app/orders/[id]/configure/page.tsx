@@ -35,10 +35,8 @@ export default function ConfigurePage() {
   } = useOrderContext()
 
   // Local state
-  // Sizes are auto-determined from the intersection of order sizes and pattern sizes
-  const selectedSizes = currentPattern
-    ? currentPattern.available_sizes.filter(s => orderSizes.includes(s))
-    : []
+  // Sizes: start with intersection of order sizes and pattern sizes, user can toggle
+  const [selectedSizes, setSelectedSizes] = useState<string[]>([])
   const [materialMappings, setMaterialMappings] = useState<Record<string, string>>({})
   const [perFabricConfig, setPerFabricConfig] = useState<Record<string, {
     widthInches: number
@@ -62,6 +60,12 @@ export default function ConfigurePage() {
   // Initialize local state from context data
   useEffect(() => {
     if (!order || !currentPattern) return
+
+    // Initialize selected sizes from intersection of order and pattern sizes
+    setSelectedSizes(prev => {
+      if (prev.length > 0) return prev  // Don't reset if already set
+      return currentPattern.available_sizes.filter(s => orderSizes.includes(s))
+    })
 
     // Initialize material mappings from pattern's fabric_mappings
     const mappings: Record<string, string> = {}
@@ -208,6 +212,7 @@ export default function ConfigurePage() {
         top_n_results: fabricConfig?.topN || nestingConfig.topNResults,
         full_coverage: fabricConfig?.fullCoverage || nestingConfig.fullCoverage,
         gpu_scale: fabricConfig?.gpuScale || 0.15,
+        selected_sizes: selectedSizes.length > 0 ? selectedSizes : undefined,
       })
       toast({ title: 'Nesting job started', description: 'The GPU nesting job has been queued' })
       loadData()
@@ -242,9 +247,9 @@ export default function ConfigurePage() {
                 <Settings className="h-5 w-5 text-accent-foreground" />
               </div>
               <div>
-                <CardTitle>Configure Nesting</CardTitle>
+                <CardTitle>Configure GPU Nesting</CardTitle>
                 <CardDescription>
-                  Match order fabrics to pattern materials and set nesting parameters
+                  Match order fabrics to pattern materials and set GPU nesting parameters
                 </CardDescription>
               </div>
             </div>
@@ -375,12 +380,71 @@ export default function ConfigurePage() {
               ) : null
             })()}
 
+            {/* Size Selection */}
+            <div className="pt-4 border-t">
+              <div className="flex items-center justify-between mb-2">
+                <div>
+                  <h4 className="font-medium text-sm">Sizes for Nesting</h4>
+                  <p className="text-xs text-muted-foreground">
+                    {selectedSizes.length} of {currentPattern.available_sizes.length} sizes selected
+                    {selectedSizes.length < orderSizes.filter(s => currentPattern.available_sizes.includes(s)).length && (
+                      <span className="text-amber-600 ml-1">(some order sizes excluded)</span>
+                    )}
+                  </p>
+                </div>
+                <div className="flex gap-1">
+                  <button
+                    onClick={() => setSelectedSizes(currentPattern.available_sizes.filter(s => orderSizes.includes(s)))}
+                    className="text-[10px] px-2 py-0.5 rounded border hover:bg-muted"
+                  >
+                    Order sizes
+                  </button>
+                  <button
+                    onClick={() => setSelectedSizes([...currentPattern.available_sizes])}
+                    className="text-[10px] px-2 py-0.5 rounded border hover:bg-muted"
+                  >
+                    All
+                  </button>
+                </div>
+              </div>
+              <div className="flex flex-wrap gap-1.5">
+                {currentPattern.available_sizes.map((size) => {
+                  const inOrder = orderSizes.includes(size)
+                  const isSelected = selectedSizes.includes(size)
+                  return (
+                    <button
+                      key={size}
+                      onClick={() => {
+                        setSelectedSizes(prev =>
+                          isSelected
+                            ? prev.filter(s => s !== size)
+                            : [...prev, size]
+                        )
+                      }}
+                      className={`px-3 py-1.5 rounded-md text-xs font-medium border transition-colors ${
+                        isSelected
+                          ? inOrder
+                            ? 'bg-primary text-primary-foreground border-primary'
+                            : 'bg-blue-100 text-blue-700 border-blue-300'
+                          : 'bg-muted/30 text-muted-foreground border-border hover:border-primary/50'
+                      }`}
+                      title={inOrder ? 'In order demand' : 'Pattern-only size (not in order)'}
+                    >
+                      {size}
+                      {inOrder && <span className="ml-1 opacity-60">*</span>}
+                    </button>
+                  )
+                })}
+              </div>
+              <p className="text-[10px] text-muted-foreground mt-1">* = size present in order demand</p>
+            </div>
+
             {/* Nesting Preview - Tabbed by Fabric */}
             <div className="space-y-4 pt-4 border-t">
               <div>
-                <h4 className="font-medium text-sm">Nesting Preview</h4>
+                <h4 className="font-medium text-sm">GPU Nesting Preview</h4>
                 <p className="text-xs text-muted-foreground">
-                  Select a fabric to configure and run nesting
+                  Select a fabric to configure and run GPU nesting
                 </p>
               </div>
 
@@ -586,6 +650,33 @@ export default function ConfigurePage() {
                       </div>
                     </div>
 
+                    {/* Nesting Sizes Indicator */}
+                    <div className="px-4 py-2 bg-blue-50/50 border-b">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="text-xs font-medium text-muted-foreground">Nesting sizes:</span>
+                        {currentPattern.available_sizes.map((size) => {
+                          const isSelected = selectedSizes.includes(size)
+                          return (
+                            <span
+                              key={size}
+                              className={`px-2 py-0.5 rounded text-[10px] font-medium ${
+                                isSelected
+                                  ? 'bg-primary/10 text-primary border border-primary/30'
+                                  : 'bg-muted/50 text-muted-foreground/40 line-through border border-transparent'
+                              }`}
+                            >
+                              {size}
+                            </span>
+                          )
+                        })}
+                        {selectedSizes.length < currentPattern.available_sizes.length && (
+                          <span className="text-[10px] text-muted-foreground">
+                            ({currentPattern.available_sizes.length - selectedSizes.length} excluded)
+                          </span>
+                        )}
+                      </div>
+                    </div>
+
                     {/* Pieces Section */}
                     <div className="px-4 py-3">
                       <div className="flex items-center justify-between mb-3">
@@ -593,7 +684,7 @@ export default function ConfigurePage() {
                           <span><strong className="text-primary">{pieces.length}</strong> pieces</span>
                           <span><strong>{totalPiecesPerBundle}</strong>/bundle</span>
                           <span className="text-amber-600"><strong>{lrPieces.length}</strong> mirrored</span>
-                          <span className="text-blue-600"><strong>{selectedSizes.length}</strong> sizes</span>
+                          <span className="text-blue-600"><strong>{selectedSizes.length}</strong> sizes selected</span>
                         </div>
                       </div>
 

@@ -1,0 +1,188 @@
+from pydantic import BaseModel
+from typing import Optional, List
+from datetime import datetime
+
+
+# ---------------------------------------------------------------------------
+# Requests
+# ---------------------------------------------------------------------------
+
+
+class RollPlanCreateRequest(BaseModel):
+    cutplan_id: str
+    name: Optional[str] = None
+    color_code: Optional[str] = None
+    mode: str = "both"                          # monte_carlo, ga, both
+    num_simulations: int = 100
+    min_reuse_length_yards: float = 0.5
+    # Pseudo-roll config (used when no real rolls uploaded)
+    pseudo_roll_avg_yards: float = 100.0
+    pseudo_roll_delta_yards: float = 20.0
+    # GA tuning (optional overrides)
+    ga_pop_size: int = 30
+    ga_generations: int = 50
+
+
+# ---------------------------------------------------------------------------
+# Responses: Fabric Rolls
+# ---------------------------------------------------------------------------
+
+
+class FabricRollResponse(BaseModel):
+    id: str
+    roll_plan_id: str
+    roll_number: str
+    length_yards: float
+    is_pseudo: bool
+    width_inches: Optional[float] = None
+    shrinkage_x_pct: Optional[float] = None
+    shrinkage_y_pct: Optional[float] = None
+    shade_group: Optional[str] = None
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class RollUploadResponse(BaseModel):
+    """Summary after parsing and saving roll Excel."""
+    roll_plan_id: str
+    rolls_count: int
+    total_length_yards: float
+    avg_length_yards: float
+    median_length_yards: float
+    min_length_yards: float
+    max_length_yards: float
+    rolls: List[FabricRollResponse]
+
+
+# ---------------------------------------------------------------------------
+# Responses: Cut Dockets
+# ---------------------------------------------------------------------------
+
+
+class RollAssignmentResponse(BaseModel):
+    roll_id: str
+    roll_length_yards: float
+    plies_from_roll: int
+    end_bit_yards: float
+    is_pseudo: bool = False
+
+
+class CutDocketResponse(BaseModel):
+    cut_number: int
+    marker_label: str
+    ratio_str: str
+    marker_length_yards: float
+    plies: int
+    assigned_rolls: List[RollAssignmentResponse]
+    total_fabric_yards: float
+    total_end_bit_yards: float
+
+
+# ---------------------------------------------------------------------------
+# Responses: Waste breakdown
+# ---------------------------------------------------------------------------
+
+
+class WasteStatsResponse(BaseModel):
+    """Statistics for one waste category across MC runs."""
+    avg: float = 0.0
+    std: float = 0.0
+    min: float = 0.0
+    max: float = 0.0
+    median: float = 0.0
+    p95: float = 0.0
+
+
+class WasteBreakdownResponse(BaseModel):
+    """Single-run waste breakdown (for GA result)."""
+    unusable_yards: float = 0.0      # Type 1: < smallest marker
+    unusable_count: int = 0
+    endbit_yards: float = 0.0        # Type 2: optimization target
+    endbit_count: int = 0
+    returnable_yards: float = 0.0    # Type 3: >= longest marker
+    returnable_count: int = 0
+    real_waste_yards: float = 0.0    # Type 1 + Type 2
+
+
+# ---------------------------------------------------------------------------
+# Responses: Roll Plan
+# ---------------------------------------------------------------------------
+
+
+class RollPlanStatusResponse(BaseModel):
+    id: str
+    status: str
+    progress: int
+    message: str
+
+
+class RollPlanListItem(BaseModel):
+    id: str
+    cutplan_id: str
+    name: Optional[str] = None
+    color_code: Optional[str] = None
+    status: str
+    mode: str
+    input_type: Optional[str] = None
+    mc_endbit_avg: Optional[float] = None       # Key metric for comparison
+    ga_endbit_yards: Optional[float] = None
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class MonteCarloResultResponse(BaseModel):
+    """
+    MC cutplan evaluation results.
+    Key metric: endbit_waste (Type 2) — the waste that COULD have been used.
+    """
+    num_simulations: int
+    total_fabric_required: Optional[float] = None
+    # Per-category waste stats
+    unusable_waste: WasteStatsResponse = WasteStatsResponse()   # Type 1
+    endbit_waste: WasteStatsResponse = WasteStatsResponse()     # Type 2  ← compare cutplans by this
+    returnable_waste: WasteStatsResponse = WasteStatsResponse() # Type 3
+    real_waste: WasteStatsResponse = WasteStatsResponse()       # Type 1 + 2
+    best_run_dockets: List[CutDocketResponse] = []
+
+
+class GAResultResponse(BaseModel):
+    """GA roll-to-marker optimization results with waste breakdown."""
+    waste: WasteBreakdownResponse = WasteBreakdownResponse()
+    generations_run: Optional[int] = None
+    dockets: List[CutDocketResponse] = []
+
+
+class RollPlanResponse(BaseModel):
+    id: str
+    cutplan_id: str
+    name: Optional[str] = None
+    color_code: Optional[str] = None
+    status: str
+    mode: str
+    input_type: Optional[str] = None
+    num_simulations: int
+    min_reuse_length_yards: float
+    pseudo_roll_avg_yards: Optional[float] = None
+    pseudo_roll_delta_yards: Optional[float] = None
+    progress: int
+    progress_message: Optional[str] = None
+    error_message: Optional[str] = None
+
+    # Results
+    monte_carlo: Optional[MonteCarloResultResponse] = None
+    ga: Optional[GAResultResponse] = None
+
+    # Roll count
+    rolls_count: int = 0
+    real_rolls_count: int = 0
+    pseudo_rolls_count: int = 0
+
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True

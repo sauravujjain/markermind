@@ -41,6 +41,8 @@ def execute_cutplan_job(
     penalty: float,
     color_code: Optional[str] = None,
     fabric_cost_per_yard: Optional[float] = None,
+    max_ply_height: Optional[int] = None,
+    min_plies_by_bundle: Optional[str] = None,
 ):
     """Execute cutplan optimization in the background."""
     db = SessionLocal()
@@ -82,6 +84,8 @@ def execute_cutplan_job(
             cancel_check=cancel_check,
             color_code=color_code,
             fabric_cost_per_yard=fabric_cost_per_yard,
+            max_ply_height=max_ply_height,
+            min_plies_by_bundle=min_plies_by_bundle,
         )
 
         elapsed = time.time() - _cutplan_jobs[order_id]["started_at"]
@@ -168,7 +172,8 @@ async def optimize_cutplan(
         "efficiency": "max_efficiency",
         "balanced": "balanced",
         "min_markers": "min_markers",
-        "min_plies": "min_plies",
+        "min_plies": "min_end_cuts",  # Legacy alias
+        "min_end_cuts": "min_end_cuts",
         "min_bundle_cuts": "min_bundle_cuts",
     }
 
@@ -189,6 +194,8 @@ async def optimize_cutplan(
         penalty=request.penalty or 5.0,
         color_code=request.color_code,
         fabric_cost_per_yard=request.fabric_cost_per_yard,
+        max_ply_height=request.max_ply_height,
+        min_plies_by_bundle=request.min_plies_by_bundle,
     )
 
     # Return empty list — frontend will poll for results

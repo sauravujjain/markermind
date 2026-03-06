@@ -13,6 +13,7 @@ from .api.routes import (
     cutplans_router,
     exports_router,
     costs_router,
+    rollplans_router,
 )
 
 
@@ -55,6 +56,7 @@ app.include_router(nesting_router, prefix="/api")
 app.include_router(cutplans_router, prefix="/api")
 app.include_router(exports_router, prefix="/api")
 app.include_router(costs_router, prefix="/api")
+app.include_router(rollplans_router, prefix="/api")
 
 
 @app.get("/")

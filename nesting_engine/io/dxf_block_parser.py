@@ -238,3 +238,66 @@ def parse_block_dxf(
         nesting_pieces.append(piece)
 
     return nesting_pieces, all_sizes
+
+
+# ---------------------------------------------------------------------------
+# Vertex cleaning for Spyrrow compatibility
+# ---------------------------------------------------------------------------
+
+def clean_vertices_for_spyrrow(
+    vertices: List[Tuple[float, float]],
+    tolerance: float = 0.01,
+) -> List[Tuple[float, float]]:
+    """
+    Prepare block-parser vertices for the Spyrrow/jagua-rs solver.
+
+    Block parser pieces have densely discretized curves (arcs/splines
+    converted to many short line segments). Only duplicate removal is
+    applied — no simplification, which was found to corrupt geometry
+    on rectangular pocket shapes (up to 49% area loss).
+
+    This function is specific to block parser output. Other parsers have
+    their own cleaning functions.
+    """
+    return _dedup(vertices, tolerance)
+
+
+def _dedup(
+    vertices: List[Tuple[float, float]],
+    tolerance: float = 0.01,
+) -> List[Tuple[float, float]]:
+    """Remove duplicate vertices (consecutive and non-consecutive), re-close."""
+    if len(vertices) < 3:
+        return vertices
+
+    verts = list(vertices)
+    # Remove closing vertex if present
+    if len(verts) > 1 and _pt_eq(verts[0], verts[-1], tolerance):
+        verts = verts[:-1]
+
+    # Remove non-consecutive duplicates (keep first occurrence)
+    seen: List[Tuple[float, float]] = []
+    for v in verts:
+        if not any(_pt_eq(v, s, tolerance) for s in seen):
+            seen.append(v)
+
+    # Remove consecutive duplicates that might remain
+    cleaned: List[Tuple[float, float]] = [seen[0]] if seen else []
+    for v in seen[1:]:
+        if not _pt_eq(v, cleaned[-1], tolerance):
+            cleaned.append(v)
+
+    if len(cleaned) < 3:
+        logger.warning(
+            f"Polygon reduced to {len(cleaned)} vertices after dedup "
+            f"(original had {len(vertices)})"
+        )
+        return vertices
+
+    cleaned.append(cleaned[0])
+    return cleaned
+
+
+
+def _pt_eq(a: Tuple[float, float], b: Tuple[float, float], tol: float) -> bool:
+    return abs(a[0] - b[0]) < tol and abs(a[1] - b[1]) < tol

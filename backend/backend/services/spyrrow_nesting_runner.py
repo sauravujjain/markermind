@@ -26,40 +26,44 @@ logger = logging.getLogger(__name__)
 
 
 # --------------------------------------------------------------------------
-# Vertex cleaning — jagua-rs panics on non-consecutive duplicate vertices
+# Vertex cleaning — each parser owns its own clean_vertices_for_spyrrow().
+# The runner imports from the parser, never defines parser-specific logic.
+# Only _dedup_vertices is kept here for _create_piece_copy / create_flipped_piece
+# (safety dedup on already-cleaned pieces during bundle expansion).
 # --------------------------------------------------------------------------
 
-def _clean_polygon_vertices(
+def _pts_equal(
+    a: Tuple[float, float],
+    b: Tuple[float, float],
+    tol: float = 0.01,
+) -> bool:
+    """Check if two points are equal within tolerance."""
+    return abs(a[0] - b[0]) < tol and abs(a[1] - b[1]) < tol
+
+
+def _dedup_vertices(
     vertices: List[Tuple[float, float]],
     tolerance: float = 0.01,
 ) -> List[Tuple[float, float]]:
     """
-    Remove duplicate vertices (both consecutive AND non-consecutive) from a
-    polygon, then re-close it.
+    Safety dedup for _create_piece_copy / create_flipped_piece.
 
-    jagua-rs (the Rust collision engine inside Spyrrow) requires simple
-    polygons with NO duplicate vertices at all — not just consecutive ones.
+    These operate on pieces that were already cleaned by their parser's
+    clean_vertices_for_spyrrow(). This just catches any duplicates
+    introduced by the copy/flip operations themselves.
     """
     if len(vertices) < 3:
         return vertices
 
-    # Remove closing vertex if present
     verts = list(vertices)
     if len(verts) > 1 and _pts_equal(verts[0], verts[-1], tolerance):
         verts = verts[:-1]
 
-    # Remove non-consecutive duplicate vertices (keep first occurrence)
     seen: List[Tuple[float, float]] = []
     for v in verts:
-        is_dup = False
-        for s in seen:
-            if _pts_equal(v, s, tolerance):
-                is_dup = True
-                break
-        if not is_dup:
+        if not any(_pts_equal(v, s, tolerance) for s in seen):
             seen.append(v)
 
-    # Remove consecutive duplicates that might remain
     cleaned: List[Tuple[float, float]] = [seen[0]] if seen else []
     for v in seen[1:]:
         if not _pts_equal(v, cleaned[-1], tolerance):
@@ -70,20 +74,10 @@ def _clean_polygon_vertices(
             f"Polygon reduced to {len(cleaned)} vertices after dedup — "
             f"original had {len(vertices)}"
         )
-        return vertices  # Return original; let downstream handle it
+        return vertices
 
-    # Re-close
     cleaned.append(cleaned[0])
     return cleaned
-
-
-def _pts_equal(
-    a: Tuple[float, float],
-    b: Tuple[float, float],
-    tol: float = 0.01,
-) -> bool:
-    """Check if two points are equal within tolerance."""
-    return abs(a[0] - b[0]) < tol and abs(a[1] - b[1]) < tol
 
 
 import ezdxf
@@ -95,6 +89,13 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from nesting_engine.io.aama_parser import (
     load_aama_pattern, AAMAGrader,
     grade_material_to_nesting_pieces, get_pieces_by_material,
+    clean_vertices_for_spyrrow as clean_aama_vertices,
+)
+from nesting_engine.io.dxf_block_parser import (
+    clean_vertices_for_spyrrow as clean_block_dxf_vertices,
+)
+from nesting_engine.io.vt_dxf_parser import (
+    clean_vertices_for_spyrrow as clean_vt_dxf_vertices,
 )
 from nesting_engine.engine.spyrrow_engine import SpyrrowEngine, SpyrrowConfig
 from nesting_engine.core.instance import Container, NestingItem, NestingInstance, FlipMode
@@ -145,7 +146,7 @@ def _create_piece_copy(piece: Piece, suffix: str) -> Piece:
         size=piece.identifier.size,
     )
     return Piece(
-        vertices=_clean_polygon_vertices(list(piece.vertices)),
+        vertices=_dedup_vertices(list(piece.vertices)),
         identifier=new_id,
         orientation=piece.orientation,
         grain=piece.grain,
@@ -162,7 +163,7 @@ def create_flipped_piece(piece: Piece) -> Piece:
     flipped_verts = flipped_verts[::-1]
 
     # Clean after flipping — the mirror + reverse can produce duplicates
-    flipped_verts = _clean_polygon_vertices(flipped_verts)
+    flipped_verts = _dedup_vertices(flipped_verts)
 
     new_id = PieceIdentifier(
         piece_name=piece.identifier.piece_name + "_f",
@@ -211,18 +212,19 @@ def load_pieces_for_spyrrow(
         from nesting_engine.io.dxf_parser import load_dxf_pieces_by_size
         nesting_pieces, piece_config, _ = load_dxf_pieces_by_size(
             dxf_path, sizes, rotations=allowed_rotations,
+            size_names=sizes,  # Map SIZE_1..N labels to actual size names
         )
         logger.info(f"Loaded {len(nesting_pieces)} DXF-only pieces for sizes={sizes}")
 
-        # Clean vertices (same as AAMA path)
+        # Block parser vertex cleaning (dedup only)
         cleaned_count = 0
         for p in nesting_pieces:
             original_len = len(p.vertices)
-            p.vertices = _clean_polygon_vertices(list(p.vertices))
+            p.vertices = clean_block_dxf_vertices(list(p.vertices))
             if len(p.vertices) != original_len:
                 cleaned_count += 1
         if cleaned_count:
-            logger.info(f"Cleaned duplicate vertices from {cleaned_count}/{len(nesting_pieces)} pieces")
+            logger.info(f"Cleaned/simplified vertices for {cleaned_count}/{len(nesting_pieces)} DXF-only pieces")
 
         return nesting_pieces, piece_config
 
@@ -236,16 +238,15 @@ def load_pieces_for_spyrrow(
     )
     logger.info(f"Loaded {len(nesting_pieces)} graded pieces for material={material}, sizes={sizes}")
 
-    # Clean all piece vertices upfront — jagua-rs panics on non-consecutive
-    # duplicate vertices and the AAMA grader only removes consecutive ones.
+    # AAMA vertex cleaning (dedup only — no simplification)
     cleaned_count = 0
     for p in nesting_pieces:
         original_len = len(p.vertices)
-        p.vertices = _clean_polygon_vertices(list(p.vertices))
+        p.vertices = clean_aama_vertices(list(p.vertices))
         if len(p.vertices) != original_len:
             cleaned_count += 1
     if cleaned_count:
-        logger.info(f"Cleaned duplicate vertices from {cleaned_count}/{len(nesting_pieces)} pieces")
+        logger.info(f"Cleaned duplicate vertices from {cleaned_count}/{len(nesting_pieces)} AAMA pieces")
 
     # Build piece_config from AAMA annotation (L/R detection)
     # Same logic as Streamlit app lines 1036-1055
@@ -287,15 +288,15 @@ def _load_pieces_vt_dxf_for_spyrrow(
 
     logger.info(f"Loaded {len(nesting_pieces)} VT DXF pieces for sizes={sizes}")
 
-    # Clean vertices
+    # VT DXF vertex cleaning (dedup only — no simplification)
     cleaned_count = 0
     for p in nesting_pieces:
         original_len = len(p.vertices)
-        p.vertices = _clean_polygon_vertices(list(p.vertices))
+        p.vertices = clean_vt_dxf_vertices(list(p.vertices))
         if len(p.vertices) != original_len:
             cleaned_count += 1
     if cleaned_count:
-        logger.info(f"Cleaned duplicate vertices from {cleaned_count}/{len(nesting_pieces)} pieces")
+        logger.info(f"Cleaned duplicate vertices from {cleaned_count}/{len(nesting_pieces)} VT DXF pieces")
 
     # Build piece_config from quantities
     # qty=2 means L/R pair -> demand=1 per side, flipped=True
@@ -460,8 +461,8 @@ def nest_single_marker(
     nesting_pieces: List[Piece],
     piece_config: Dict[str, dict],
     fabric_width_mm: float,
-    piece_buffer_mm: float = 2.0,
-    edge_buffer_mm: float = 5.0,
+    piece_buffer_mm: float = 0.0,
+    edge_buffer_mm: float = 0.0,
     time_limit: float = 20.0,
     rotation_mode: str = "free",
     quadtree_depth: int = 4,
@@ -766,8 +767,8 @@ def refine_cutplan_markers(
     sizes: List[str],
     markers: List[Dict],
     fabric_width_mm: float,
-    piece_buffer_mm: float = 2.0,
-    edge_buffer_mm: float = 5.0,
+    piece_buffer_mm: float = 0.0,
+    edge_buffer_mm: float = 0.0,
     time_limit: float = 20.0,
     rotation_mode: str = "free",
     progress_callback: Optional[Callable] = None,

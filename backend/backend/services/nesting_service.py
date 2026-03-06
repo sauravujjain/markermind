@@ -211,7 +211,7 @@ class NestingService:
         Run GPU nesting algorithm.
         This is the main entry point that will be called by the job runner.
         """
-        from .gpu_nesting_runner import run_nesting_for_material, NestingCancelled
+        from .gpu_nesting_runner import run_nesting_for_material, NestingCancelled, generate_all_ratios
 
         results = []
 
@@ -332,7 +332,8 @@ class NestingService:
             # Mark job complete
             job.status = "completed"
             job.progress = 100
-            job.progress_message = f"Completed - {len(results)} markers generated"
+            total_evaluated = sum(len(generate_all_ratios(bc, sizes)) for bc in range(1, (job.max_bundle_count or 6) + 1))
+            job.progress_message = f"Completed — {total_evaluated} ratios evaluated, {len(results)} markers retained"
             db.commit()
 
             # Clear preview cache

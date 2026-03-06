@@ -36,8 +36,8 @@ class Order(Base, TimestampMixin):
     status = Column(SQLEnum(OrderStatus, values_callable=lambda x: [e.value for e in x]), default=OrderStatus.DRAFT, nullable=False)
 
     # Nesting parameters
-    piece_buffer_mm = Column(Float, default=2.0)  # Gap between pieces
-    edge_buffer_mm = Column(Float, default=5.0)  # Gap from fabric edge
+    piece_buffer_mm = Column(Float, default=0.0)  # Gap between pieces
+    edge_buffer_mm = Column(Float, default=0.0)  # Gap from fabric edge
     rotation_mode = Column(SQLEnum(RotationMode, values_callable=lambda x: [e.value for e in x]), default=RotationMode.FREE)
 
     # Relationships

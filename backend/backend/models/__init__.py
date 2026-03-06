@@ -9,6 +9,7 @@ from .cutplan import Cutplan, CutplanMarker
 from .marker_layout import MarkerLayout
 from .cost import CostConfig
 from .test_marker_result import TestMarkerResult
+from .rollplan import RollPlan, FabricRoll
 
 __all__ = [
     "Customer",
@@ -30,4 +31,6 @@ __all__ = [
     "MarkerLayout",
     "CostConfig",
     "TestMarkerResult",
+    "RollPlan",
+    "FabricRoll",
 ]

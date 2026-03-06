@@ -54,6 +54,7 @@ class Cutplan(Base, TimestampMixin):
     # Relationships
     order = relationship("Order", back_populates="cutplans")
     markers = relationship("CutplanMarker", back_populates="cutplan", cascade="all, delete-orphan")
+    roll_plans = relationship("RollPlan", back_populates="cutplan", cascade="all, delete-orphan")
 
 
 class CutplanMarker(Base, TimestampMixin):

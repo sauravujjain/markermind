@@ -33,6 +33,15 @@ from .cutplan import (
     CutplanMarkerResponse,
     CostBreakdownResponse,
 )
+from .rollplan import (
+    RollPlanCreateRequest,
+    RollPlanResponse,
+    RollPlanStatusResponse,
+    RollPlanListItem,
+    FabricRollResponse,
+    RollUploadResponse,
+    CutDocketResponse,
+)
 
 __all__ = [
     "UserCreate",
@@ -62,4 +71,11 @@ __all__ = [
     "CutplanResponse",
     "CutplanMarkerResponse",
     "CostBreakdownResponse",
+    "RollPlanCreateRequest",
+    "RollPlanResponse",
+    "RollPlanStatusResponse",
+    "RollPlanListItem",
+    "FabricRollResponse",
+    "RollUploadResponse",
+    "CutDocketResponse",
 ]

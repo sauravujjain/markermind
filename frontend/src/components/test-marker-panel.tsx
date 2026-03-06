@@ -6,7 +6,7 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-import { Loader2, FlaskConical, Info, ChevronDown, ChevronUp, Settings2, Plus, Play, Trash2, X, Database, Cloud } from 'lucide-react'
+import { Loader2, FlaskConical, Info, ChevronDown, ChevronUp, Settings2, Plus, Play, Trash2, X, Database, Cloud, Download } from 'lucide-react'
 
 interface TestMarkerPanelProps {
   pattern: Pattern
@@ -875,10 +875,37 @@ export function TestMarkerPanel({ pattern, fabricWidthInches, orderId }: TestMar
                       {isExpanded && isDone && (
                         <div className="px-2 pb-2 bg-blue-50/30 border-t border-blue-100">
                           {expandedSvg ? (
-                            <div
-                              className="rounded-lg border bg-white p-2 overflow-x-auto mt-1"
-                              dangerouslySetInnerHTML={{ __html: expandedSvg }}
-                            />
+                            <>
+                              <div
+                                className="rounded-lg border bg-white p-2 overflow-x-auto mt-1"
+                                dangerouslySetInnerHTML={{ __html: expandedSvg }}
+                              />
+                              {r.dbId && (
+                                <div className="flex justify-end mt-1">
+                                  <button
+                                    onClick={async (e) => {
+                                      e.stopPropagation()
+                                      try {
+                                        const blob = await api.downloadTestMarkerDxf(r.dbId!)
+                                        const url = URL.createObjectURL(blob)
+                                        const a = document.createElement('a')
+                                        a.href = url
+                                        a.download = `marker_${r.ratioStr}_${((r.result?.efficiency ?? 0) * 100).toFixed(0)}pct.dxf`
+                                        a.click()
+                                        URL.revokeObjectURL(url)
+                                      } catch (err: any) {
+                                        console.error('DXF download failed:', err)
+                                      }
+                                    }}
+                                    className="inline-flex items-center gap-1 text-xs text-blue-600 hover:text-blue-800 transition-colors px-2 py-1 rounded hover:bg-blue-50"
+                                    title="Download marker as DXF"
+                                  >
+                                    <Download className="h-3 w-3" />
+                                    DXF
+                                  </button>
+                                </div>
+                              )}
+                            </>
                           ) : (
                             <div className="flex items-center justify-center py-4 text-xs text-muted-foreground gap-1.5">
                               <Loader2 className="h-3 w-3 animate-spin" />

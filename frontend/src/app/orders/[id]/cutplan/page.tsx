@@ -42,9 +42,11 @@ export default function CutplanPage() {
   const [cutplanConfig, setCutplanConfig] = useState({
     maxPlyHeight: 100,
     fabricCostPerYard: 3.0,
-    strategies: ['max_efficiency', 'balanced', 'min_markers'] as string[],
+    strategies: ['max_efficiency', 'balanced', 'min_markers'] as string[],  // default 3 selected
     selectedColor: 'all' as string,
+    minPliesByBundle: '6:50,5:40,4:30,3:10,2:1,1:1',
   })
+  const [showAdvanced, setShowAdvanced] = useState(false)
   const [isGeneratingCutplan, setIsGeneratingCutplan] = useState(false)
   const [cutplanOptStatus, setCutplanOptStatus] = useState<{
     status: string; progress: number; message: string; strategies_total: number; strategies_done: number
@@ -54,6 +56,9 @@ export default function CutplanPage() {
   const [refinementConfigs, setRefinementConfigs] = useState<Record<string, RefinementConfig>>({})
   const [refiningCutplans, setRefiningCutplans] = useState<Record<string, boolean>>({})
   const [refinementStatuses, setRefinementStatuses] = useState<Record<string, RefinementStatus>>({})
+
+  // Excel export option
+  const [includeMarkerImages, setIncludeMarkerImages] = useState(false)
 
   // Per-cutplan expanded marker tracking for refined layouts
   const [expandedMarkers, setExpandedMarkers] = useState<Record<string, Set<number>>>({})
@@ -67,6 +72,18 @@ export default function CutplanPage() {
 
   const setRefinementConfig = (cpId: string, config: RefinementConfig) =>
     setRefinementConfigs(prev => ({ ...prev, [cpId]: config }))
+
+  // Load cost config defaults on mount (max_ply_height, fabric cost, etc.)
+  useEffect(() => {
+    api.getCostConfig().then((config: any) => {
+      setCutplanConfig(prev => ({
+        ...prev,
+        maxPlyHeight: config.max_ply_height || prev.maxPlyHeight,
+        fabricCostPerYard: config.fabric_cost_per_yard ?? prev.fabricCostPerYard,
+        minPliesByBundle: config.min_plies_by_bundle || prev.minPliesByBundle,
+      }))
+    }).catch(() => {})
+  }, [])
 
   // Check if cutplan optimization is already running on load
   useEffect(() => {
@@ -152,6 +169,8 @@ export default function CutplanPage() {
         generate_options: cutplanConfig.strategies,
         penalty: 5.0,
         fabric_cost_per_yard: cutplanConfig.fabricCostPerYard,
+        max_ply_height: cutplanConfig.maxPlyHeight,
+        min_plies_by_bundle: cutplanConfig.minPliesByBundle,
         ...(cutplanConfig.selectedColor !== 'all' ? { color_code: cutplanConfig.selectedColor } : {}),
       })
       setShowCutplanConfig(false)
@@ -423,9 +442,11 @@ export default function CutplanPage() {
                 <label className="text-sm font-medium mb-2 block">Optimization Strategies</label>
                 <div className="flex flex-wrap gap-2">
                   {[
-                    { id: 'max_efficiency', label: 'Max Efficiency', desc: 'Minimize fabric waste' },
-                    { id: 'balanced', label: 'Balanced', desc: 'Efficiency + marker count' },
-                    { id: 'min_markers', label: 'Min Markers', desc: 'Simplest cutting plan' },
+                    { id: 'max_efficiency', label: 'Max Efficiency', desc: 'Best fabric utilization' },
+                    { id: 'balanced', label: 'Balanced', desc: 'Efficiency vs marker count trade-off' },
+                    { id: 'min_markers', label: 'Min Markers', desc: 'Fewest unique markers' },
+                    { id: 'min_end_cuts', label: 'Min End Cuts', desc: '95% large markers + 5% small fills' },
+                    { id: 'min_bundle_cuts', label: 'Min Cutting Work', desc: 'Least cutting operations' },
                   ].map((strategy) => {
                     const isSelected = cutplanConfig.strategies.includes(strategy.id)
                     return (
@@ -455,6 +476,55 @@ export default function CutplanPage() {
                 <p className="text-xs text-muted-foreground mt-2">
                   Select one or more strategies to generate cutplan options
                 </p>
+              </div>
+
+              {/* Advanced Settings */}
+              <div>
+                <button
+                  onClick={() => setShowAdvanced(!showAdvanced)}
+                  className="text-xs text-muted-foreground hover:text-foreground flex items-center gap-1"
+                >
+                  <span className={`transition-transform ${showAdvanced ? 'rotate-90' : ''}`}>▶</span>
+                  Advanced Settings
+                </button>
+                {showAdvanced && (
+                  <div className="mt-3 p-3 rounded-lg border bg-muted/20 space-y-3">
+                    <div>
+                      <label className="text-xs font-medium mb-1 block">Min Plies by Bundle Count</label>
+                      <p className="text-[10px] text-muted-foreground mb-2">
+                        Minimum plies required per marker based on its bundle count. Prevents wasteful small-ply large markers.
+                      </p>
+                      <div className="grid grid-cols-6 gap-2">
+                        {(() => {
+                          const parsed: Record<string, string> = {}
+                          cutplanConfig.minPliesByBundle.split(',').forEach(part => {
+                            const [bc, mp] = part.trim().split(':')
+                            if (bc && mp) parsed[bc] = mp
+                          })
+                          return ['6', '5', '4', '3', '2', '1'].map(bc => (
+                            <div key={bc} className="text-center">
+                              <div className="text-[10px] text-muted-foreground mb-0.5">{bc}-bndl</div>
+                              <input
+                                type="number"
+                                value={parsed[bc] || '1'}
+                                onChange={(e) => {
+                                  const newParsed = { ...parsed, [bc]: e.target.value || '1' }
+                                  const newStr = ['6', '5', '4', '3', '2', '1']
+                                    .map(b => `${b}:${newParsed[b] || '1'}`)
+                                    .join(',')
+                                  setCutplanConfig({ ...cutplanConfig, minPliesByBundle: newStr })
+                                }}
+                                className="w-full px-1.5 py-1 border rounded text-xs text-center"
+                                min={1}
+                                max={200}
+                              />
+                            </div>
+                          ))
+                        })()}
+                      </div>
+                    </div>
+                  </div>
+                )}
               </div>
 
               {/* Generate Button */}
@@ -534,26 +604,37 @@ export default function CutplanPage() {
                 <CardDescription>Compare and select the best cutplan for production</CardDescription>
               </div>
               {cutplans.some(c => c.status === 'refined') && (
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={async () => {
-                    try {
-                      const blob = await api.downloadOrderExcel(orderId)
-                      const url = URL.createObjectURL(blob)
-                      const a = document.createElement('a')
-                      a.href = url
-                      a.download = `order_${order.order_number}_cutplan.xlsx`
-                      a.click()
-                      URL.revokeObjectURL(url)
-                    } catch (e) {
-                      toast({ title: 'Export failed', description: e instanceof Error ? e.message : 'Please try again', variant: 'destructive' })
-                    }
-                  }}
-                >
-                  <Download className="h-4 w-4 mr-1.5" />
-                  Export All (Excel)
-                </Button>
+                <div className="flex items-center gap-3">
+                  <label className="flex items-center gap-1.5 text-xs text-muted-foreground cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      checked={includeMarkerImages}
+                      onChange={(e) => setIncludeMarkerImages(e.target.checked)}
+                      className="rounded border-gray-300"
+                    />
+                    Include marker images
+                  </label>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={async () => {
+                      try {
+                        const blob = await api.downloadOrderExcel(orderId, includeMarkerImages)
+                        const url = URL.createObjectURL(blob)
+                        const a = document.createElement('a')
+                        a.href = url
+                        a.download = `order_${order.order_number}_cutplan.xlsx`
+                        a.click()
+                        URL.revokeObjectURL(url)
+                      } catch (e) {
+                        toast({ title: 'Export failed', description: e instanceof Error ? e.message : 'Please try again', variant: 'destructive' })
+                      }
+                    }}
+                  >
+                    <Download className="h-4 w-4 mr-1.5" />
+                    Export All (Excel)
+                  </Button>
+                </div>
               )}
             </div>
           </CardHeader>

@@ -268,6 +268,8 @@ class CutplanService:
         cancel_check: Any = None,
         color_code: Optional[str] = None,
         fabric_cost_per_yard: Optional[float] = None,
+        max_ply_height: Optional[int] = None,
+        min_plies_by_bundle: Optional[str] = None,
     ) -> List[Cutplan]:
         """
         Run ILP optimization with multiple strategies and create cutplans for each.
@@ -334,9 +336,11 @@ class CutplanService:
         if progress_callback:
             progress_callback(5, f"Loaded {len(marker_dicts)} markers{color_label}, {total_garments} garments across {len(sizes)} sizes...")
 
-        # Get cost config, override fabric cost if user specified
+        # Get cost config, override fabric cost, max ply height, min plies if user specified
         cost_config = self.get_cost_config(db, customer_id)
         effective_fabric_cost = fabric_cost_per_yard if fabric_cost_per_yard is not None else cost_config.fabric_cost_per_yard
+        effective_max_ply_height = max_ply_height if max_ply_height is not None else cost_config.max_ply_height
+        effective_min_plies_str = min_plies_by_bundle if min_plies_by_bundle is not None else cost_config.min_plies_by_bundle
 
         # Load perimeter_by_size from pattern parse_metadata
         perimeter_for_material = None
@@ -400,6 +404,12 @@ class CutplanService:
                 name=option.get("name", "Cutplan"),
                 solver_type="single_color",
             )
+            # Persist solver params so exports can use them later
+            cutplan.solver_config = {
+                "max_ply_height": effective_max_ply_height,
+                "penalty": penalty,
+                "fabric_cost_per_yard": effective_fabric_cost,
+            }
 
             # Save markers with stable labels and MarkerBank links
             selected_markers = option.get("markers", [])
@@ -409,7 +419,7 @@ class CutplanService:
             costs = calculate_cutplan_costs(
                 option,
                 fabric_cost_per_yard=effective_fabric_cost,
-                max_ply_height=cost_config.max_ply_height,
+                max_ply_height=effective_max_ply_height,
                 spreading_cost_per_yard=cost_config.spreading_cost_per_yard,
                 spreading_cost_per_ply=getattr(cost_config, 'spreading_cost_per_ply', 0.013),
                 cutting_cost_per_cm=cutting_cost_per_cm,
@@ -457,6 +467,8 @@ class CutplanService:
             strategy_callback=on_strategy_complete,
             cancel_check=cancel_check,
             pattern_sizes=pattern_sizes,
+            max_ply_height=effective_max_ply_height,
+            min_plies_by_bundle_str=effective_min_plies_str,
         )
 
         # Update order status if any strategies completed
