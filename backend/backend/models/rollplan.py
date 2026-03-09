@@ -62,7 +62,7 @@ class RollPlan(Base, TimestampMixin):
 
     # Results: Monte Carlo — waste breakdown per category (avg across runs)
     total_fabric_required = Column(Float, nullable=True)
-    # Type 1: unusable scraps (< smallest marker)
+    # Type 1: unusable scraps (< yield per garment)
     mc_unusable_avg = Column(Float, nullable=True)
     mc_unusable_std = Column(Float, nullable=True)
     mc_unusable_p95 = Column(Float, nullable=True)
@@ -88,6 +88,7 @@ class RollPlan(Base, TimestampMixin):
     ga_real_waste_yards = Column(Float, nullable=True)
     ga_generations_run = Column(Integer, nullable=True)
     ga_dockets = Column(JSON, nullable=True)               # CutDockets from GA
+    preflight_warnings = Column(JSON, nullable=True)      # Pre-flight validation warnings
 
     # Relationships
     cutplan = relationship("Cutplan", back_populates="roll_plans")
