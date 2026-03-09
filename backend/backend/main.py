@@ -13,6 +13,7 @@ from .api.routes import (
     cutplans_router,
     exports_router,
     costs_router,
+    rollplans_router,
 )
 
 
@@ -35,10 +36,13 @@ app = FastAPI(
 )
 
 # CORS middleware
+# When origins=["*"], disable credentials (browser requirement).
+# For production, set CORS_ORIGINS to explicit list and credentials will be enabled.
+_cors_allow_all = settings.cors_origins == ["*"]
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,
-    allow_credentials=True,
+    allow_credentials=not _cors_allow_all,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -52,6 +56,7 @@ app.include_router(nesting_router, prefix="/api")
 app.include_router(cutplans_router, prefix="/api")
 app.include_router(exports_router, prefix="/api")
 app.include_router(costs_router, prefix="/api")
+app.include_router(rollplans_router, prefix="/api")
 
 
 @app.get("/")
@@ -72,9 +77,12 @@ async def health():
 
 if __name__ == "__main__":
     import uvicorn
+    import sys
+    # Only enable reload when running interactively (not from start.sh)
+    use_reload = settings.debug and sys.stdin.isatty()
     uvicorn.run(
         "backend.main:app",
         host="0.0.0.0",
         port=8000,
-        reload=settings.debug,
+        reload=use_reload,
     )

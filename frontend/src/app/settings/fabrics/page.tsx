@@ -1,11 +1,10 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { useRouter } from 'next/navigation'
 import Link from 'next/link'
-import { useAuthStore } from '@/lib/auth-store'
 import { api, Fabric } from '@/lib/api'
 import { DashboardLayout } from '@/components/dashboard-layout'
+import { AuthGuard } from '@/components/auth-guard'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
@@ -14,8 +13,6 @@ import { useToast } from '@/hooks/use-toast'
 import { ArrowLeft, Plus, Trash2 } from 'lucide-react'
 
 export default function FabricsPage() {
-  const router = useRouter()
-  const { isAuthenticated, isLoading: authLoading, checkAuth } = useAuthStore()
   const { toast } = useToast()
   const [fabrics, setFabrics] = useState<Fabric[]>([])
   const [isLoading, setIsLoading] = useState(true)
@@ -28,20 +25,8 @@ export default function FabricsPage() {
   const [costPerYard, setCostPerYard] = useState('')
 
   useEffect(() => {
-    checkAuth()
-  }, [checkAuth])
-
-  useEffect(() => {
-    if (!authLoading && !isAuthenticated) {
-      router.push('/login')
-    }
-  }, [authLoading, isAuthenticated, router])
-
-  useEffect(() => {
-    if (isAuthenticated) {
-      loadFabrics()
-    }
-  }, [isAuthenticated])
+    loadFabrics()
+  }, [])
 
   const loadFabrics = async () => {
     try {
@@ -97,15 +82,8 @@ export default function FabricsPage() {
     }
   }
 
-  if (authLoading || !isAuthenticated) {
-    return (
-      <div className="min-h-screen flex items-center justify-center">
-        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary"></div>
-      </div>
-    )
-  }
-
   return (
+    <AuthGuard>
     <DashboardLayout>
       <div className="space-y-6">
         <div className="flex items-center space-x-4">
@@ -230,5 +208,6 @@ export default function FabricsPage() {
         </div>
       </div>
     </DashboardLayout>
+    </AuthGuard>
   )
 }

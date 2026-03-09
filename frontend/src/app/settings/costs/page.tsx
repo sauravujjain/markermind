@@ -1,11 +1,10 @@
 'use client'
 
 import { useEffect, useState, useMemo } from 'react'
-import { useRouter } from 'next/navigation'
 import Link from 'next/link'
-import { useAuthStore } from '@/lib/auth-store'
 import { api } from '@/lib/api'
 import { DashboardLayout } from '@/components/dashboard-layout'
+import { AuthGuard } from '@/components/auth-guard'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
@@ -63,8 +62,6 @@ function calcCuttingCostPerCm(
 }
 
 export default function CostSettingsPage() {
-  const router = useRouter()
-  const { isAuthenticated, isLoading: authLoading, checkAuth } = useAuthStore()
   const { toast } = useToast()
   const [isLoading, setIsLoading] = useState(true)
   const [isSaving, setIsSaving] = useState(false)
@@ -137,20 +134,8 @@ export default function CostSettingsPage() {
   }, [perfPaperCost, perfPaperEnabled, underlayerCost, underlayerEnabled, topLayerCost, topLayerEnabled])
 
   useEffect(() => {
-    checkAuth()
-  }, [checkAuth])
-
-  useEffect(() => {
-    if (!authLoading && !isAuthenticated) {
-      router.push('/login')
-    }
-  }, [authLoading, isAuthenticated, router])
-
-  useEffect(() => {
-    if (isAuthenticated) {
-      loadCostConfig()
-    }
-  }, [isAuthenticated])
+    loadCostConfig()
+  }, [])
 
   const loadCostConfig = async () => {
     try {
@@ -235,15 +220,8 @@ export default function CostSettingsPage() {
     }
   }
 
-  if (authLoading || !isAuthenticated) {
-    return (
-      <div className="min-h-screen flex items-center justify-center">
-        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary"></div>
-      </div>
-    )
-  }
-
   return (
+    <AuthGuard>
     <DashboardLayout>
       <div className="space-y-6">
         <div className="flex items-center space-x-4">
@@ -630,5 +608,6 @@ export default function CostSettingsPage() {
         )}
       </div>
     </DashboardLayout>
+    </AuthGuard>
   )
 }

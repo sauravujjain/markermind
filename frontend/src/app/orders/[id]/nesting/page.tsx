@@ -3,13 +3,11 @@
 import { useEffect, useState, useRef } from 'react'
 import { useRouter, useParams, useSearchParams } from 'next/navigation'
 import Link from 'next/link'
-import { useAuthStore } from '@/lib/auth-store'
 import { api, Order, Pattern, NestingJob, Fabric } from '@/lib/api'
-import { DashboardLayout } from '@/components/dashboard-layout'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { useToast } from '@/hooks/use-toast'
-import { ArrowLeft, Play, Clock, CheckCircle2, Package, Layers, Zap, TrendingUp, AlertCircle, XCircle } from 'lucide-react'
+import { ArrowLeft, Play, Clock, CheckCircle2, Package, Layers, Zap, TrendingUp, AlertCircle, XCircle, ChevronDown } from 'lucide-react'
 
 interface MarkerResult {
   ratio: string
@@ -17,6 +15,7 @@ interface MarkerResult {
   efficiency: number
   lengthYards: number
   rank: number
+  svgPreview?: string
 }
 
 export default function NestingProgressPage() {
@@ -25,7 +24,6 @@ export default function NestingProgressPage() {
   const searchParams = useSearchParams()
   const orderId = params.id as string
   const fabricCode = searchParams.get('fabric') || ''
-  const { isAuthenticated, isLoading: authLoading, checkAuth } = useAuthStore()
   const { toast } = useToast()
 
   const [order, setOrder] = useState<Order | null>(null)
@@ -41,26 +39,18 @@ export default function NestingProgressPage() {
   const [currentPreviewEfficiency, setCurrentPreviewEfficiency] = useState<number>(0)
   const [elapsedTime, setElapsedTime] = useState(0)
   const [startTime, setStartTime] = useState<number | null>(null)
+  const [selectedMarkerIdx, setSelectedMarkerIdx] = useState<number | null>(null)
+  const [showConfigDetails, setShowConfigDetails] = useState(false)
 
   const timerRef = useRef<NodeJS.Timeout | null>(null)
   const pollingRef = useRef<NodeJS.Timeout | null>(null)
   const knownRatiosRef = useRef<Set<string>>(new Set())
 
   useEffect(() => {
-    checkAuth()
-  }, [checkAuth])
-
-  useEffect(() => {
-    if (!authLoading && !isAuthenticated) {
-      router.push('/login')
-    }
-  }, [authLoading, isAuthenticated, router])
-
-  useEffect(() => {
-    if (isAuthenticated && orderId) {
+    if (orderId) {
       loadData()
     }
-  }, [isAuthenticated, orderId])
+  }, [orderId])
 
   // Clear "new" highlight after 2 seconds
   useEffect(() => {
@@ -137,6 +127,7 @@ export default function NestingProgressPage() {
               efficiency: r.efficiency,
               lengthYards: r.length_yards,
               rank: r.rank,
+              svgPreview: r.svg_preview || undefined,
             }))
             .sort((a, b) => b.efficiency - a.efficiency)
           setMarkers(sortedResults)
@@ -192,6 +183,7 @@ export default function NestingProgressPage() {
               efficiency: r.efficiency,
               lengthYards: r.length_yards,
               rank: r.rank,
+              svgPreview: r.svg_preview || undefined,
             }))
             .sort((a, b) => b.efficiency - a.efficiency)
 
@@ -233,7 +225,7 @@ export default function NestingProgressPage() {
       } catch (error) {
         console.error('Polling error:', error)
       }
-    }, 500) // Poll every 0.5 seconds for faster preview cycling
+    }, 250) // Poll every 250ms for responsive preview updates
   }
 
   const startNesting = async () => {
@@ -244,6 +236,7 @@ export default function NestingProgressPage() {
     setNewMarkerRatios(new Set())
     knownRatiosRef.current = new Set()
     setCurrentMarkerPreview(null)
+    setSelectedMarkerIdx(null)
     setStartTime(Date.now())
     setElapsedTime(0)
 
@@ -253,6 +246,7 @@ export default function NestingProgressPage() {
       const maxBundles = parseInt(searchParams.get('maxBundles') || '6')
       const topN = parseInt(searchParams.get('topN') || '10')
       const fullCoverage = searchParams.get('fullCoverage') === 'true'
+      const gpuScale = parseFloat(searchParams.get('gpuScale') || '0.15')
 
       // Create nesting job
       const job = await api.createNestingJob({
@@ -262,6 +256,7 @@ export default function NestingProgressPage() {
         max_bundle_count: maxBundles,
         top_n_results: topN,
         full_coverage: fullCoverage,
+        gpu_scale: gpuScale,
       })
 
       setNestingJob(job)
@@ -309,9 +304,9 @@ export default function NestingProgressPage() {
   const isFailed = nestingJob?.status === 'failed'
   const isCancelled = nestingJob?.status === 'cancelled'
 
-  if (authLoading || !isAuthenticated || isLoading) {
+  if (isLoading) {
     return (
-      <div className="min-h-screen flex items-center justify-center">
+      <div className="flex items-center justify-center py-12">
         <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary"></div>
       </div>
     )
@@ -319,14 +314,12 @@ export default function NestingProgressPage() {
 
   if (!order) {
     return (
-      <DashboardLayout>
-        <div className="text-center py-12">
-          <h2 className="text-xl font-semibold">Order not found</h2>
-          <Link href="/orders">
-            <Button className="mt-4">Back to Orders</Button>
-          </Link>
-        </div>
-      </DashboardLayout>
+      <div className="text-center py-12">
+        <h2 className="text-xl font-semibold">Order not found</h2>
+        <Link href="/orders">
+          <Button className="mt-4">Back to Orders</Button>
+        </Link>
+      </div>
     )
   }
 
@@ -334,7 +327,6 @@ export default function NestingProgressPage() {
   const progress = nestingJob?.progress || 0
 
   return (
-    <DashboardLayout>
       <div className="space-y-6">
         {/* Header */}
         <div className="flex items-center justify-between">
@@ -351,7 +343,7 @@ export default function NestingProgressPage() {
                 <span className="text-primary">{fabricCode}</span>
               </h1>
               <p className="text-muted-foreground">
-                {order.order_number} • {pattern?.name || 'Pattern'} • {fabric?.width_inches || 60}" wide
+                {order.order_number} • {pattern?.name || 'Pattern'}
                 {searchParams.get('fullCoverage') === 'true' && (
                   <span className="ml-2 text-xs bg-amber-100 text-amber-800 px-2 py-0.5 rounded-full">
                     100% Coverage
@@ -438,19 +430,40 @@ export default function NestingProgressPage() {
 
             {/* Job Config Summary */}
             {nestingJob && (
-              <div className="flex flex-wrap gap-3 mb-4 text-xs">
-                <span className="bg-muted px-2 py-1 rounded">
-                  Width: {nestingJob.fabric_width_inches}"
-                </span>
-                <span className="bg-muted px-2 py-1 rounded">
-                  Max Bundles: {nestingJob.max_bundle_count}
-                </span>
-                <span className="bg-muted px-2 py-1 rounded">
-                  Top N: {nestingJob.top_n_results}
-                </span>
-                <span className={`px-2 py-1 rounded ${nestingJob.full_coverage ? 'bg-amber-100 text-amber-800' : 'bg-muted'}`}>
-                  {nestingJob.full_coverage ? '100% Coverage (All Ratios)' : 'GA Optimized'}
-                </span>
+              <div className="mb-4">
+                <div className="flex flex-wrap gap-3 text-xs">
+                  <span className="bg-muted px-2 py-1 rounded">
+                    Width: {nestingJob.fabric_width_inches}"
+                  </span>
+                  <span className="bg-muted px-2 py-1 rounded">
+                    Max Bundles: {nestingJob.max_bundle_count}
+                  </span>
+                  {nestingJob.full_coverage && (
+                    <span className="bg-amber-100 text-amber-800 px-2 py-1 rounded">
+                      100% Coverage
+                    </span>
+                  )}
+                  <button
+                    onClick={() => setShowConfigDetails(!showConfigDetails)}
+                    className="flex items-center gap-1 text-muted-foreground hover:text-foreground transition-colors px-1"
+                  >
+                    <ChevronDown className={`h-3 w-3 transition-transform ${showConfigDetails ? 'rotate-180' : ''}`} />
+                    Details
+                  </button>
+                </div>
+                {showConfigDetails && (
+                  <div className="flex flex-wrap gap-3 text-xs mt-2 pt-2 border-t border-border/50">
+                    <span className="bg-muted px-2 py-1 rounded">
+                      Top N: {nestingJob.top_n_results}
+                    </span>
+                    <span className="bg-muted px-2 py-1 rounded">
+                      {nestingJob.full_coverage ? 'Brute Force (All Ratios)' : 'GA Optimized'}
+                    </span>
+                    <span className="bg-muted px-2 py-1 rounded">
+                      Resolution: {nestingJob.gpu_scale || 0.15} px/mm
+                    </span>
+                  </div>
+                )}
               </div>
             )}
 
@@ -515,22 +528,35 @@ export default function NestingProgressPage() {
           {/* Marker Preview */}
           <Card>
             <CardHeader className="pb-3">
-              <CardTitle className="text-base">Current Marker Preview</CardTitle>
+              <CardTitle className="text-base">
+                {selectedMarkerIdx !== null && markers[selectedMarkerIdx]?.svgPreview
+                  ? 'Marker Preview (Vector)'
+                  : 'Current Marker Preview'}
+              </CardTitle>
               <CardDescription>
-                {currentPreviewRatio ? `Ratio: ${currentPreviewRatio} • ${(currentPreviewEfficiency * 100).toFixed(2)}% efficiency` : 'Waiting for nesting to start...'}
+                {selectedMarkerIdx !== null && markers[selectedMarkerIdx]
+                  ? `Ratio: ${markers[selectedMarkerIdx].ratio} • ${(markers[selectedMarkerIdx].efficiency * 100).toFixed(2)}% efficiency`
+                  : currentPreviewRatio
+                  ? `Ratio: ${currentPreviewRatio} • ${(currentPreviewEfficiency * 100).toFixed(2)}% efficiency`
+                  : 'Waiting for nesting to start...'}
               </CardDescription>
             </CardHeader>
             <CardContent>
-              <div className="bg-muted rounded-lg overflow-hidden border" style={{ height: '120px' }}>
-                {currentMarkerPreview ? (
+              <div className="bg-muted rounded-lg overflow-hidden border" style={{ minHeight: '120px' }}>
+                {selectedMarkerIdx !== null && markers[selectedMarkerIdx]?.svgPreview ? (
+                  <div
+                    className="w-full p-2 [&>svg]:w-full [&>svg]:h-auto [&>svg]:max-h-[200px]"
+                    dangerouslySetInnerHTML={{ __html: markers[selectedMarkerIdx].svgPreview! }}
+                  />
+                ) : currentMarkerPreview ? (
                   <img
                     src={currentMarkerPreview}
                     alt="Marker Preview"
                     className="w-full h-full object-contain"
-                    style={{ imageRendering: 'pixelated' }}
+                    style={{ height: '120px' }}
                   />
                 ) : (
-                  <div className="w-full h-full flex items-center justify-center text-muted-foreground">
+                  <div className="w-full flex items-center justify-center text-muted-foreground" style={{ height: '120px' }}>
                     <Package className="h-8 w-8 mr-2 opacity-30" />
                     <span>Marker preview will appear here</span>
                   </div>
@@ -606,16 +632,24 @@ export default function NestingProgressPage() {
                       {markers.map((marker, idx) => {
                         const effPercent = marker.efficiency * 100
                         const isNew = newMarkerRatios.has(marker.ratio)
+                        const isSelected = selectedMarkerIdx === idx
                         return (
                           <tr
                             key={marker.ratio}
-                            className={`border-b border-border/50 transition-colors ${
+                            className={`border-b border-border/50 transition-colors cursor-pointer ${
+                              isSelected ? 'bg-primary/10 ring-1 ring-primary/30' :
                               isNew ? 'marker-new-row' :
                               idx === 0 ? 'bg-green-50 dark:bg-green-950/30' : 'hover:bg-muted/30'
                             }`}
+                            onClick={() => setSelectedMarkerIdx(isSelected ? null : idx)}
                           >
                             <td className="py-2 px-3 text-muted-foreground">{idx + 1}</td>
-                            <td className="py-2 px-3 font-mono text-xs">{marker.ratio}</td>
+                            <td className="py-2 px-3 font-mono text-xs">
+                              {marker.ratio}
+                              {marker.svgPreview && (
+                                <span className="ml-1.5 text-[10px] text-primary/60" title="Vector preview available">SVG</span>
+                              )}
+                            </td>
                             <td className="py-2 px-3 text-center">
                               <span className="bg-primary/10 text-primary px-2 py-0.5 rounded text-xs">
                                 {marker.bundles}
@@ -677,6 +711,5 @@ export default function NestingProgressPage() {
           </Card>
         )}
       </div>
-    </DashboardLayout>
   )
 }

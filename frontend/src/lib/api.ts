@@ -153,12 +153,13 @@ class ApiClient {
     return this.request<Pattern>(`/patterns/${id}`)
   }
 
-  async uploadPattern(name: string, fileType: string, dxfFile: File, rulFile?: File) {
+  async uploadPattern(name: string, fileType: string, dxfFile: File, rulFile?: File, sizeNames?: string) {
     const formData = new FormData()
     formData.append('name', name)
     formData.append('file_type', fileType)
     formData.append('dxf_file', dxfFile)
     if (rulFile) formData.append('rul_file', rulFile)
+    if (sizeNames) formData.append('size_names', sizeNames)
 
     const token = this.getToken()
     const response = await fetch(`${API_URL}/patterns/upload`, {
@@ -260,6 +261,35 @@ class ApiClient {
     return this.request<{ message: string; status: string }>(`/nesting/jobs/${jobId}/cancel`, { method: 'POST' })
   }
 
+  async testMarker(request: TestMarkerRequest): Promise<TestMarkerResponse> {
+    return this.request<TestMarkerResponse>('/nesting/test-marker', {
+      method: 'POST',
+      body: JSON.stringify(request),
+    })
+  }
+
+  async getTestMarkers(patternId: string, orderId?: string) {
+    const params = new URLSearchParams()
+    params.set('pattern_id', patternId)
+    if (orderId) params.set('order_id', orderId)
+    return this.request<SavedTestMarkerResult[]>(`/nesting/test-markers?${params.toString()}`)
+  }
+
+  async getTestMarker(id: string) {
+    return this.request<SavedTestMarkerResult>(`/nesting/test-markers/${id}`)
+  }
+
+  async deleteTestMarker(id: string) {
+    return this.request<{ message: string }>(`/nesting/test-markers/${id}`, { method: 'DELETE' })
+  }
+
+  async updateTestMarkerNotes(id: string, notes: string) {
+    return this.request<SavedTestMarkerResult>(`/nesting/test-markers/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ notes }),
+    })
+  }
+
   async getMarkers(patternId?: string, fabricId?: string) {
     const params = new URLSearchParams()
     if (patternId) params.set('pattern_id', patternId)
@@ -334,6 +364,90 @@ class ApiClient {
       throw new Error(error.detail || 'Download failed')
     }
     return response.blob()
+  }
+
+  async downloadOrderExcel(orderId: string, includeMarkers: boolean = false): Promise<Blob> {
+    const token = this.getToken()
+    const headers: Record<string, string> = {}
+    if (token) headers['Authorization'] = `Bearer ${token}`
+
+    const params = includeMarkers ? '?include_markers=true' : ''
+    const response = await fetch(`${API_URL}/export/order/${orderId}/excel${params}`, { headers })
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}))
+      throw new Error(error.detail || 'Download failed')
+    }
+    return response.blob()
+  }
+
+  async downloadTestMarkerDxf(resultId: string): Promise<Blob> {
+    const token = this.getToken()
+    const headers: Record<string, string> = {}
+    if (token) headers['Authorization'] = `Bearer ${token}`
+
+    const response = await fetch(`${API_URL}/export/test-marker/${resultId}/dxf`, { headers })
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}))
+      throw new Error(error.detail || 'DXF download failed')
+    }
+    return response.blob()
+  }
+
+  // Roll Plans
+  async createRollPlan(data: RollPlanCreateRequest) {
+    return this.request<{ id: string; status: string }>('/rollplans', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    })
+  }
+
+  async uploadRolls(rollplanId: string, file: File) {
+    const formData = new FormData()
+    formData.append('file', file)
+
+    const token = this.getToken()
+    const response = await fetch(`${API_URL}/rollplans/${rollplanId}/upload-rolls`, {
+      method: 'POST',
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+      body: formData,
+    })
+
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}))
+      throw new Error(error.detail || 'Upload failed')
+    }
+
+    return response.json() as Promise<RollUploadResponse>
+  }
+
+  async startRollSimulation(rollplanId: string, params?: { ga_pop_size?: number; ga_generations?: number }) {
+    const query = params ? `?${new URLSearchParams(params as Record<string, string>)}` : ''
+    return this.request<{ id: string }>(`/rollplans/${rollplanId}/simulate${query}`, { method: 'POST' })
+  }
+
+  async getRollPlanStatus(rollplanId: string) {
+    return this.request<RollPlanStatus>(`/rollplans/${rollplanId}/status`)
+  }
+
+  async getRollPlan(rollplanId: string) {
+    return this.request<RollPlan>(`/rollplans/${rollplanId}`)
+  }
+
+  async listRollPlans(cutplanId?: string) {
+    const query = cutplanId ? `?cutplan_id=${cutplanId}` : ''
+    return this.request<RollPlan[]>(`/rollplans${query}`)
+  }
+
+  async getRollPlanDockets(rollplanId: string, source: string = 'mc') {
+    return this.request<CutDocket[]>(`/rollplans/${rollplanId}/dockets?source=${source}`)
+  }
+
+  async cancelRollSimulation(rollplanId: string) {
+    return this.request(`/rollplans/${rollplanId}/cancel`, { method: 'POST' })
+  }
+
+  async deleteRollPlan(rollplanId: string) {
+    return this.request(`/rollplans/${rollplanId}`, { method: 'DELETE' })
   }
 }
 
@@ -461,6 +575,8 @@ export interface NestingJobCreate {
   max_bundle_count?: number
   top_n_results?: number
   full_coverage?: boolean
+  gpu_scale?: number  // px/mm resolution. 0.15=fast (default), 0.3=demo quality
+  selected_sizes?: string[]  // Subset of pattern sizes to nest; omit = all sizes
 }
 
 export interface NestingJob {
@@ -475,6 +591,7 @@ export interface NestingJob {
   max_bundle_count: number
   top_n_results: number
   full_coverage: boolean
+  gpu_scale: number
   results: NestingJobResult[]
   created_at: string
   updated_at: string
@@ -489,6 +606,7 @@ export interface NestingJobResult {
   efficiency: number
   length_yards: number
   length_mm?: number
+  svg_preview?: string
 }
 
 export interface Marker {
@@ -501,6 +619,72 @@ export interface Marker {
   source_type: string
 }
 
+export interface TestMarkerRequest {
+  pattern_id: string
+  fabric_width_inches: number
+  size_bundles: Record<string, number>
+  material?: string           // e.g., "SHELL" — defaults to first available
+  time_limit?: number         // max seconds per marker (default 120, early stop)
+  piece_buffer_mm?: number    // gap between pieces in mm (default 0)
+  edge_buffer_mm?: number     // gap from edge in mm (default 0)
+  orientation?: string        // "free" or "nap_one_way" (default "free")
+  quadtree_depth?: number     // collision detection depth 3-5 (default 5)
+  early_termination?: boolean // stop when no improvement (default true)
+  exploration_time_s?: number | null  // custom explore time (seconds)
+  compression_time_s?: number | null  // custom compress time (seconds)
+  order_id?: string | null            // optional order context
+  use_cloud?: boolean                 // run on Modal cloud (default false)
+  seed_screening?: boolean            // run 6 seeds × 10s to find best seed
+}
+
+export interface TestMarkerResponse {
+  id: string | null
+  efficiency: number
+  length_mm: number
+  length_yards: number
+  fabric_width_mm: number
+  piece_count: number
+  bundle_count: number
+  ratio_str: string
+  computation_time_ms: number
+  svg_preview: string | null
+  exploration_time_s: number | null
+  compression_time_s: number | null
+  use_cloud?: boolean
+  seed_used?: number | null
+  seed_screening?: boolean
+}
+
+export interface SavedTestMarkerResult {
+  id: string
+  pattern_id: string
+  order_id: string | null
+  ratio_str: string
+  size_bundles: Record<string, number>
+  bundle_count: number
+  material: string | null
+  efficiency: number
+  length_mm: number
+  length_yards: number
+  fabric_width_mm: number
+  piece_count: number
+  computation_time_ms: number
+  svg_preview?: string | null  // only included in single-item fetch
+  time_limit_s: number
+  quadtree_depth: number
+  early_termination: boolean
+  piece_buffer_mm: number
+  edge_buffer_mm: number
+  orientation: string
+  exploration_time_s: number | null
+  compression_time_s: number | null
+  use_cloud?: boolean
+  seed_used?: number | null
+  seed_screening?: boolean
+  notes: string | null
+  created_at: string
+}
+
 export interface CutplanOptimizeRequest {
   order_id: string
   solver_type?: string
@@ -508,6 +692,8 @@ export interface CutplanOptimizeRequest {
   generate_options?: string[]
   color_code?: string
   fabric_cost_per_yard?: number
+  max_ply_height?: number
+  min_plies_by_bundle?: string  // e.g. "6:50,5:40,4:30,3:10,2:1,1:1"
 }
 
 export interface Cutplan {
@@ -536,6 +722,7 @@ export interface CutplanMarker {
   id: string
   cutplan_id: string
   marker_id?: string
+  marker_label?: string
   ratio_str: string
   efficiency?: number
   length_yards?: number
@@ -593,12 +780,19 @@ export interface RefinementConfig {
   piece_buffer_mm: number
   edge_buffer_mm: number
   time_limit_s: number
-  rotation_mode: string  // "free" or "nap_safe"
+  rotation_mode: string  // "free" or "nap_one_way"
+  quadtree_depth: number
+  early_termination: boolean
+  exploration_time_s?: number | null  // custom explore time (seconds), null = auto
+  compression_time_s?: number | null  // custom compress time (seconds), null = auto
+  seed_screening?: boolean            // run 6 seeds × 10s to find best seed
+  use_cloud?: boolean                 // run on Modal cloud
 }
 
 export interface MarkerLayout {
   id: string
   cutplan_marker_id: string
+  marker_label?: string
   ratio_str: string
   utilization: number
   strip_length_mm: number
@@ -619,4 +813,116 @@ export interface RefinementStatus {
   markers_total: number
   markers_done: number
   layouts: MarkerLayout[]
+}
+
+// Roll Plan types
+export interface RollPlanCreateRequest {
+  cutplan_id: string
+  name?: string
+  color_code?: string
+  mode?: string              // "monte_carlo" | "ga" | "both"
+  num_simulations?: number
+  min_reuse_length_yards?: number
+  pseudo_roll_avg_yards?: number
+  pseudo_roll_delta_yards?: number
+  ga_pop_size?: number
+  ga_generations?: number
+}
+
+export interface WasteStats {
+  avg: number
+  std: number
+  p95: number
+}
+
+export interface WasteBreakdown {
+  unusable_yards: number
+  endbit_yards: number
+  returnable_yards: number
+  real_waste_yards: number
+}
+
+export interface RollAssignment {
+  roll_id: string
+  roll_length_yards: number
+  plies_from_roll: number
+  end_bit_yards: number
+  is_pseudo: boolean
+}
+
+export interface CutDocket {
+  cut_number: number
+  marker_label: string
+  ratio_str: string
+  marker_length_yards: number
+  plies: number
+  assigned_rolls: RollAssignment[]
+  total_fabric_yards: number
+  total_end_bit_yards: number
+}
+
+export interface MonteCarloResult {
+  num_simulations: number
+  total_fabric_required?: number
+  unusable_waste: WasteStats
+  endbit_waste: WasteStats
+  returnable_waste: WasteStats
+  real_waste: WasteStats
+  best_run_dockets: CutDocket[]
+}
+
+export interface GAResult {
+  waste: WasteBreakdown
+  generations_run?: number
+  dockets: CutDocket[]
+}
+
+export interface RollPlan {
+  id: string
+  cutplan_id: string
+  name?: string
+  color_code?: string
+  status: string
+  mode: string
+  input_type?: string
+  num_simulations: number
+  min_reuse_length_yards: number
+  pseudo_roll_avg_yards?: number
+  pseudo_roll_delta_yards?: number
+  progress: number
+  progress_message?: string
+  error_message?: string
+  monte_carlo?: MonteCarloResult
+  ga?: GAResult
+  rolls_count: number
+  real_rolls_count: number
+  pseudo_rolls_count: number
+  created_at: string
+  updated_at: string
+}
+
+export interface RollPlanStatus {
+  id: string
+  status: string
+  progress: number
+  message: string
+}
+
+export interface FabricRoll {
+  id: string
+  roll_plan_id: string
+  roll_number: string
+  length_yards: number
+  is_pseudo: boolean
+  width_inches?: number
+  shade_group?: string
+  created_at: string
+}
+
+export interface RollUploadResponse {
+  rolls_count: number
+  total_length_yards: number
+  avg_length_yards: number
+  min_length_yards: number
+  max_length_yards: number
 }

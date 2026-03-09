@@ -54,6 +54,7 @@ class Cutplan(Base, TimestampMixin):
     # Relationships
     order = relationship("Order", back_populates="cutplans")
     markers = relationship("CutplanMarker", back_populates="cutplan", cascade="all, delete-orphan")
+    roll_plans = relationship("RollPlan", back_populates="cutplan", cascade="all, delete-orphan")
 
 
 class CutplanMarker(Base, TimestampMixin):
@@ -63,6 +64,7 @@ class CutplanMarker(Base, TimestampMixin):
     id = Column(UUID(as_uuid=False), primary_key=True, default=generate_uuid)
     cutplan_id = Column(UUID(as_uuid=False), ForeignKey("cutplans.id"), nullable=False)
     marker_id = Column(UUID(as_uuid=False), ForeignKey("marker_bank.id"))
+    marker_label = Column(String(10))  # Stable label: "M1", "M2", etc.
     ratio_str = Column(String(50), nullable=False)  # Denormalized for convenience
     efficiency = Column(Float)
     length_yards = Column(Float)

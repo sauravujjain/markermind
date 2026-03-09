@@ -10,6 +10,8 @@ class CutplanOptimizeRequest(BaseModel):
     generate_options: List[str] = ["balanced"]  # Which options to generate
     color_code: Optional[str] = None  # Filter to specific color, None = all colors
     fabric_cost_per_yard: Optional[float] = None  # User-specified fabric cost, None = use DB default
+    max_ply_height: Optional[int] = None  # Max plies per cut, None = use DB default
+    min_plies_by_bundle: Optional[str] = None  # e.g. "6:50,5:40,4:30,3:10,2:1,1:1", None = use DB default
 
 
 class CostBreakdownResponse(BaseModel):
@@ -27,6 +29,7 @@ class CutplanMarkerResponse(BaseModel):
     id: str
     cutplan_id: str
     marker_id: Optional[str]
+    marker_label: Optional[str] = None
     ratio_str: str
     efficiency: Optional[float]
     length_yards: Optional[float]
@@ -73,16 +76,23 @@ class CutplanComparisonResponse(BaseModel):
 
 class RefinementRequest(BaseModel):
     """Request to start CPU refinement (final nesting) for an approved cutplan."""
-    piece_buffer_mm: float = 2.0
-    edge_buffer_mm: float = 5.0
-    time_limit_s: float = 20.0
-    rotation_mode: str = "free"  # "free" or "nap_safe"
+    piece_buffer_mm: float = 0.0
+    edge_buffer_mm: float = 0.0
+    time_limit_s: float = 120.0
+    rotation_mode: str = "free"  # "free" or "nap_one_way"
+    quadtree_depth: int = 5
+    early_termination: bool = True
+    exploration_time_s: Optional[float] = None  # custom explore time (seconds), None = auto
+    compression_time_s: Optional[float] = None  # custom compress time (seconds), None = auto
+    seed_screening: bool = False  # run 6 seeds × 10s to find best seed
+    use_cloud: bool = False  # run on Modal cloud (not used yet, reserved)
 
 
 class MarkerLayoutResponse(BaseModel):
     """Response for a single refined marker layout."""
     id: str
     cutplan_marker_id: str
+    marker_label: Optional[str] = None
     ratio_str: str
     utilization: float
     strip_length_mm: float
@@ -94,6 +104,7 @@ class MarkerLayoutResponse(BaseModel):
     edge_buffer_mm: Optional[float] = None
     time_limit_s: Optional[float] = None
     rotation_mode: Optional[str] = None
+    quadtree_depth: Optional[int] = None
 
     class Config:
         from_attributes = True

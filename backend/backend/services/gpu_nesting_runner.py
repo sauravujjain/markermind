@@ -5,6 +5,7 @@ Extracted and parameterized from scripts/gpu_20260118_ga_ratio_optimizer.py
 for integration into the MarkerMind backend services.
 """
 
+import math
 import sys
 import time
 import random
@@ -17,9 +18,9 @@ from itertools import combinations_with_replacement
 import numpy as np
 from PIL import Image, ImageDraw
 
-# Add garment-nester to path
-GARMENT_NESTER_PATH = Path(__file__).parent.parent.parent.parent.parent / "garment-nester"
-sys.path.insert(0, str(GARMENT_NESTER_PATH))
+# Add MarkerMind project root to path so nesting_engine is importable
+PROJECT_ROOT = Path(__file__).parent.parent.parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
 
 from nesting_engine.io.aama_parser import load_aama_pattern, AAMAGrader
 
@@ -53,14 +54,12 @@ def _init_gpu():
 
 # Configuration defaults
 DEFAULT_GPU_SCALE = 0.15  # px/mm
-DEFAULT_PIECE_BUFFER = 0.1  # pixels
+DEFAULT_PIECE_BUFFER = 0  # pixels
 DEFAULT_EDGE_BUFFER = 0
 
-# GA Parameters
-GA_GENERATIONS = 3
-MIN_ISLAND_SIZE = 10  # Use GA for almost all cases (lowered from 50)
-MAX_ISLANDS = 5
-MIN_ISLANDS = 3
+# Ratio evaluation parameters
+BRUTE_FORCE_THRESHOLD = 1000  # Brute-force all ratios below this count
+RANDOM_SAMPLE_SIZE = 300      # Sample size for large search spaces (> threshold)
 
 
 class GPUPacker:
@@ -184,15 +183,14 @@ class GPUPacker:
         # Create PIL image - shape is (strip_width, visible_length) = (height, width)
         img = Image.fromarray(img_data, mode='L')
 
-        # Scale to reasonable display size (height ~80px for visibility)
-        target_height = 80
-        scale = target_height / self.strip_width
-        display_height = target_height
-        display_width = int(visible_length * scale)
-
-        # Resize for display (width, height) for PIL resize
-        if display_width > 0 and display_height > 0:
-            img = img.resize((display_width, display_height), Image.Resampling.NEAREST)
+        # Send at native resolution if container height <= 300px (covers 0.15 and 0.3 px/mm).
+        # Only downscale with LANCZOS for very high gpu_scale (0.5+) to keep PNGs reasonable.
+        if self.strip_width > 300:
+            target_height = 300
+            scale = target_height / self.strip_width
+            display_width = int(visible_length * scale)
+            if display_width > 0:
+                img = img.resize((display_width, target_height), Image.Resampling.LANCZOS)
 
         # Convert to PNG bytes
         buffer = io.BytesIO()
@@ -278,13 +276,57 @@ def _orient_vertices_for_grain(
         return [(x * unit_scale, y * unit_scale) for x, y in vertices]
 
 
+def _rasterize_vertices(
+    vertices_mm: List[Tuple[float, float]],
+    gpu_scale: float,
+    piece_buffer: float,
+) -> Tuple[np.ndarray, float, List[Tuple[float, float]]]:
+    """
+    Rasterize a piece polygon and return (raster, area, vertices_mm_norm).
+
+    Shared helper for both AAMA and DXF-only piece loading paths.
+    """
+    verts = np.array(vertices_mm)
+    min_xy = verts.min(axis=0)
+    verts_scaled = (verts - min_xy) * gpu_scale + piece_buffer
+    max_xy = verts_scaled.max(axis=0)
+    width = int(np.ceil(max_xy[0])) + int(np.ceil(piece_buffer * 2))
+    height = int(np.ceil(max_xy[1])) + int(np.ceil(piece_buffer * 2))
+
+    img = Image.new('L', (width, height), 0)
+    ImageDraw.Draw(img).polygon([tuple(p) for p in verts_scaled], fill=1)
+    raster = np.array(img, dtype=np.float32)
+    area = float(np.sum(raster))
+
+    vertices_mm_norm = [(v[0] - float(min_xy[0]), v[1] - float(min_xy[1])) for v in vertices_mm]
+    return raster, area, vertices_mm_norm
+
+
+def _compute_perimeter_mm(vertices_mm: List[Tuple[float, float]]) -> float:
+    """Sum of edge lengths for a closed polygon. Returns mm."""
+    if len(vertices_mm) < 2:
+        return 0.0
+    perim = 0.0
+    for i in range(len(vertices_mm) - 1):
+        x1, y1 = vertices_mm[i]
+        x2, y2 = vertices_mm[i + 1]
+        perim += math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
+    # Close if not already closed
+    if vertices_mm[0] != vertices_mm[-1]:
+        x1, y1 = vertices_mm[-1]
+        x2, y2 = vertices_mm[0]
+        perim += math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
+    return perim
+
+
 def load_pieces_for_material(
     dxf_path: str,
-    rul_path: str,
+    rul_path: Optional[str],
     material: str,
     sizes: List[str],
     gpu_scale: float = DEFAULT_GPU_SCALE,
     piece_buffer: float = DEFAULT_PIECE_BUFFER,
+    file_type: Optional[str] = None,
 ) -> Dict[str, List[Dict]]:
     """
     Load and rasterize pieces for a specific material.
@@ -294,17 +336,26 @@ def load_pieces_for_material(
 
     Args:
         dxf_path: Path to DXF file
-        rul_path: Path to RUL file
+        rul_path: Path to RUL file (None for DXF-only patterns)
         material: Material code to filter (e.g., "SO1", "SHELL")
         sizes: List of sizes to load
         gpu_scale: Rasterization resolution (px/mm)
         piece_buffer: Gap between pieces in pixels
+        file_type: Pattern file type ("aama", "dxf_only", "vt_dxf")
 
     Returns:
         Dictionary mapping size -> list of piece dicts with rasters
     """
     if not _init_gpu():
         raise RuntimeError("GPU not available")
+
+    # VT DXF path: Optitex Graded Nest format
+    if file_type == "vt_dxf":
+        return _load_pieces_vt_dxf(dxf_path, sizes, gpu_scale, piece_buffer)
+
+    # DXF-only path: no RUL grading, pieces already sized in DXF
+    if rul_path is None or not Path(rul_path).exists():
+        return _load_pieces_dxf_only(dxf_path, sizes, gpu_scale, piece_buffer)
 
     pieces, rules = load_aama_pattern(dxf_path, rul_path)
     grader = AAMAGrader(pieces, rules)
@@ -336,18 +387,7 @@ def load_pieces_for_material(
             if vertices_mm[0] != vertices_mm[-1]:
                 vertices_mm.append(vertices_mm[0])
 
-            # Rasterize
-            verts = np.array(vertices_mm)
-            min_xy = verts.min(axis=0)
-            verts_scaled = (verts - min_xy) * gpu_scale + piece_buffer
-            max_xy = verts_scaled.max(axis=0)
-            width = int(np.ceil(max_xy[0])) + int(np.ceil(piece_buffer * 2))
-            height = int(np.ceil(max_xy[1])) + int(np.ceil(piece_buffer * 2))
-
-            img = Image.new('L', (width, height), 0)
-            ImageDraw.Draw(img).polygon([tuple(p) for p in verts_scaled], fill=1)
-            raster = np.array(img, dtype=np.float32)
-            area = float(np.sum(raster))
+            raster, area, vertices_mm_norm = _rasterize_vertices(vertices_mm, gpu_scale, piece_buffer)
 
             demand = orig_piece.quantity.total
             if orig_piece.quantity.has_left_right:
@@ -355,13 +395,109 @@ def load_pieces_for_material(
 
             pieces_by_size[target_size].append({
                 'name': gp.name,
+                'size': target_size,
                 'raster': raster,
                 'raster_gpu': cp.asarray(raster),
                 'raster_180': np.rot90(raster, 2),
                 'raster_180_gpu': cp.asarray(np.rot90(raster, 2)),
                 'area': area,
                 'demand': demand,
+                'vertices_mm': vertices_mm_norm,  # normalized to origin, in mm
             })
+
+    return pieces_by_size
+
+
+def _load_pieces_dxf_only(
+    dxf_path: str,
+    sizes: List[str],
+    gpu_scale: float,
+    piece_buffer: float,
+) -> Dict[str, List[Dict]]:
+    """Load and rasterize pieces from a DXF-only pattern (no RUL)."""
+    from nesting_engine.io.dxf_parser import load_dxf_pieces_by_size
+
+    nesting_pieces, piece_config, _ = load_dxf_pieces_by_size(
+        dxf_path, sizes, size_names=sizes,  # Map SIZE_1..N labels to actual size names
+    )
+
+    pieces_by_size: Dict[str, List[Dict]] = {}
+
+    for piece in nesting_pieces:
+        size = piece.identifier.size
+        if not size:
+            continue
+
+        vertices_mm = list(piece.vertices)
+        if len(vertices_mm) < 3:
+            continue
+        if vertices_mm[0] != vertices_mm[-1]:
+            vertices_mm.append(vertices_mm[0])
+
+        raster, area, vertices_mm_norm = _rasterize_vertices(vertices_mm, gpu_scale, piece_buffer)
+
+        if size not in pieces_by_size:
+            pieces_by_size[size] = []
+
+        pieces_by_size[size].append({
+            'name': piece.identifier.piece_name,
+            'size': size,
+            'raster': raster,
+            'raster_gpu': cp.asarray(raster),
+            'raster_180': np.rot90(raster, 2),
+            'raster_180_gpu': cp.asarray(np.rot90(raster, 2)),
+            'area': area,
+            'demand': 1,  # Each DXF polyline is a unique piece instance
+            'vertices_mm': vertices_mm_norm,
+        })
+
+    return pieces_by_size
+
+
+def _load_pieces_vt_dxf(
+    dxf_path: str,
+    sizes: List[str],
+    gpu_scale: float,
+    piece_buffer: float,
+) -> Dict[str, List[Dict]]:
+    """Load and rasterize pieces from a VT DXF (Optitex Graded Nest) pattern."""
+    from nesting_engine.io.vt_dxf_parser import parse_vt_dxf
+
+    pieces, all_sizes, piece_quantities, _material = parse_vt_dxf(dxf_path)
+
+    pieces_by_size: Dict[str, List[Dict]] = {}
+
+    for piece in pieces:
+        size = piece.identifier.size
+        if not size or size not in sizes:
+            continue
+
+        vertices_mm = list(piece.vertices)
+        if len(vertices_mm) < 3:
+            continue
+        if vertices_mm[0] != vertices_mm[-1]:
+            vertices_mm.append(vertices_mm[0])
+
+        raster, area, vertices_mm_norm = _rasterize_vertices(vertices_mm, gpu_scale, piece_buffer)
+
+        # Demand from piece_quantities (qty=2 means L/R pair)
+        piece_name = piece.identifier.piece_name
+        demand = piece_quantities.get(piece_name, 1)
+
+        if size not in pieces_by_size:
+            pieces_by_size[size] = []
+
+        pieces_by_size[size].append({
+            'name': piece_name,
+            'size': size,
+            'raster': raster,
+            'raster_gpu': cp.asarray(raster),
+            'raster_180': np.rot90(raster, 2),
+            'raster_180_gpu': cp.asarray(np.rot90(raster, 2)),
+            'area': area,
+            'demand': demand,
+            'vertices_mm': vertices_mm_norm,
+        })
 
     return pieces_by_size
 
@@ -387,6 +523,46 @@ def generate_all_ratios(bundle_count: int, sizes: List[str]) -> List[Dict[str, i
     return all_ratios
 
 
+def _evaluate_single_sort(
+    pieces_list: List[Dict],
+    packer: GPUPacker,
+    strip_width_px: int,
+    gpu_scale: float,
+    sort_key,
+    capture_preview: bool = False,
+) -> Tuple[float, float, Optional[str], float]:
+    """Evaluate a pre-built pieces_list with a specific sort key. Returns (eff, length_yd, preview, perim_cm)."""
+    packer.reset()
+    pieces_sorted = sorted(pieces_list, key=sort_key)
+
+    placed_area = 0.0
+    current_length = 0
+    total_perimeter_mm = 0.0
+
+    for p in pieces_sorted:
+        result, raster = packer.find_best_position(p['raster_gpu'], p['raster_180_gpu'], current_length)
+        if result is None:
+            continue
+        packer.place(raster, result['x'], result['y'])
+        placed_area += p['area']
+        current_length = max(current_length, result['x'] + result['pw'])
+        total_perimeter_mm += _compute_perimeter_mm(p['vertices_mm'])
+
+    if current_length == 0:
+        return 0.0, 0.0, None, 0.0
+
+    strip_area = strip_width_px * current_length
+    efficiency = placed_area / strip_area
+    length_yards = current_length / gpu_scale / 25.4 / 36
+
+    preview_base64 = None
+    if capture_preview:
+        preview_base64 = packer.get_container_base64(current_length)
+
+    perimeter_cm = total_perimeter_mm / 10.0
+    return efficiency, length_yards, preview_base64, perimeter_cm
+
+
 def evaluate_ratio(
     pieces_by_size: Dict,
     ratio: Dict[str, int],
@@ -394,18 +570,17 @@ def evaluate_ratio(
     strip_width_px: int,
     gpu_scale: float,
     capture_preview: bool = False,
-) -> Tuple[float, float, Optional[str]]:
+    dual_sort: bool = False,
+) -> Tuple[float, float, Optional[str], float]:
     """
-    Evaluate a single ratio and return (efficiency, length_yards, preview_base64).
+    Evaluate a single ratio using width_desc sorting (primary strategy).
 
-    Args:
-        capture_preview: If True, capture and return the container as base64 PNG
+    When dual_sort=True, tries both width_desc and area_desc, returns the better result.
+    Use dual_sort=True for retained results refinement, False for fast screening.
 
     Returns:
-        Tuple of (efficiency, length_yards, preview_base64 or None)
+        Tuple of (efficiency, length_yards, preview_base64 or None, perimeter_cm)
     """
-    packer.reset()
-
     # Build piece list
     pieces_list = []
     for size, count in ratio.items():
@@ -417,38 +592,193 @@ def evaluate_ratio(
                     pieces_list.append(p)
 
     if not pieces_list:
-        return 0.0, 0.0, None
+        return 0.0, 0.0, None, 0.0
 
-    # Sort by area descending
-    pieces_list.sort(key=lambda p: -p['area'])
+    # Primary: width_desc (wins 67% of the time)
+    # "width" = piece extent along fabric width (raster height = rows)
+    eff_w, len_w, prev_w, perim_w = _evaluate_single_sort(
+        pieces_list, packer, strip_width_px, gpu_scale,
+        sort_key=lambda p: -p['raster'].shape[0],
+        capture_preview=capture_preview,
+    )
+
+    if not dual_sort:
+        return eff_w, len_w, prev_w, perim_w
+
+    # Secondary: area_desc (wins 28% of the time)
+    eff_a, len_a, prev_a, perim_a = _evaluate_single_sort(
+        pieces_list, packer, strip_width_px, gpu_scale,
+        sort_key=lambda p: -p['area'],
+        capture_preview=capture_preview,
+    )
+
+    # Return the better result
+    if eff_a > eff_w:
+        return eff_a, len_a, prev_a, perim_a
+    return eff_w, len_w, prev_w, perim_w
+
+
+def _evaluate_with_svg_single_sort(
+    pieces_list: List[Dict],
+    packer: GPUPacker,
+    strip_width_px: int,
+    gpu_scale: float,
+    sort_key,
+) -> Tuple[float, float, str, float]:
+    """Evaluate with SVG using a specific sort key."""
+    packer.reset()
+    pieces_sorted = sorted(pieces_list, key=sort_key)
 
     placed_area = 0.0
     current_length = 0
+    total_perimeter_mm = 0.0
+    placements = []
 
-    for p in pieces_list:
+    for p in pieces_sorted:
         result, raster = packer.find_best_position(p['raster_gpu'], p['raster_180_gpu'], current_length)
         if result is None:
             continue
-
         packer.place(raster, result['x'], result['y'])
         placed_area += p['area']
         current_length = max(current_length, result['x'] + result['pw'])
+        total_perimeter_mm += _compute_perimeter_mm(p['vertices_mm'])
+        is_rotated = (raster is not p['raster_gpu'])
+        placements.append({
+            'piece': p, 'x_px': result['x'], 'y_px': result['y'],
+            'rotated_180': is_rotated,
+        })
 
     if current_length == 0:
-        return 0.0, 0.0, None
+        return 0.0, 0.0, '', 0.0
 
     strip_area = strip_width_px * current_length
     efficiency = placed_area / strip_area
-
-    # Convert length from pixels to yards
     length_yards = current_length / gpu_scale / 25.4 / 36
+    fabric_width_mm = strip_width_px / gpu_scale
+    strip_length_mm = current_length / gpu_scale
+    svg = _generate_placement_svg(placements, fabric_width_mm, strip_length_mm, gpu_scale)
+    perimeter_cm = total_perimeter_mm / 10.0
+    return efficiency, length_yards, svg, perimeter_cm
 
-    # Capture preview if requested
-    preview_base64 = None
-    if capture_preview:
-        preview_base64 = packer.get_container_base64(current_length)
 
-    return efficiency, length_yards, preview_base64
+def evaluate_ratio_with_svg(
+    pieces_by_size: Dict,
+    ratio: Dict[str, int],
+    packer: GPUPacker,
+    strip_width_px: int,
+    gpu_scale: float,
+) -> Tuple[float, float, str, float]:
+    """
+    Evaluate a ratio AND produce an SVG preview from original polygon vertices.
+
+    Tries both width_desc and area_desc sorting, returns the better result.
+    This is expensive — only call for final best results, not during screening.
+
+    Returns:
+        Tuple of (efficiency, length_yards, svg_string, perimeter_cm)
+    """
+    pieces_list = []
+    for size, count in ratio.items():
+        if count <= 0 or size not in pieces_by_size:
+            continue
+        for _ in range(count):
+            for p in pieces_by_size[size]:
+                for _ in range(p['demand']):
+                    pieces_list.append(p)
+
+    if not pieces_list:
+        return 0.0, 0.0, '', 0.0
+
+    # Try both sorting strategies
+    eff_w, len_w, svg_w, perim_w = _evaluate_with_svg_single_sort(
+        pieces_list, packer, strip_width_px, gpu_scale,
+        sort_key=lambda p: -p['raster'].shape[0],
+    )
+    eff_a, len_a, svg_a, perim_a = _evaluate_with_svg_single_sort(
+        pieces_list, packer, strip_width_px, gpu_scale,
+        sort_key=lambda p: -p['area'],
+    )
+
+    if eff_a > eff_w:
+        return eff_a, len_a, svg_a, perim_a
+    return eff_w, len_w, svg_w, perim_w
+
+
+def _generate_placement_svg(
+    placements: List[Dict],
+    fabric_width_mm: float,
+    strip_length_mm: float,
+    gpu_scale: float,
+    max_width_px: int = 1200,
+) -> str:
+    """Generate SVG preview from GPU placements using original polygon vertices."""
+    import math
+
+    # Color palette — one color per size
+    colors = [
+        '#4CAF50', '#2196F3', '#FF9800', '#9C27B0', '#F44336',
+        '#00BCD4', '#795548', '#607D8B', '#E91E63', '#3F51B5',
+    ]
+    size_color_map: Dict[str, str] = {}
+    color_idx = 0
+
+    scale = max_width_px / strip_length_mm
+    svg_width = max_width_px
+    svg_height = int(fabric_width_mm * scale)
+
+    parts = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{svg_width}" height="{svg_height + 2}" '
+        f'viewBox="0 0 {strip_length_mm:.1f} {fabric_width_mm:.1f}" '
+        f'style="background:#f5f5f5;border:1px solid #ddd;border-radius:4px">',
+    ]
+
+    # Container outline
+    sw = max(strip_length_mm, fabric_width_mm) * 0.002
+    parts.append(
+        f'<rect x="0" y="0" width="{strip_length_mm:.1f}" height="{fabric_width_mm:.1f}" '
+        f'fill="none" stroke="#999" stroke-width="{sw:.2f}"/>'
+    )
+
+    for pl in placements:
+        piece = pl['piece']
+        size = piece.get('size', '')
+        verts_mm = piece.get('vertices_mm', [])
+        if not verts_mm:
+            continue
+
+        # Convert pixel position to mm
+        x_mm = pl['x_px'] / gpu_scale
+        y_mm = pl['y_px'] / gpu_scale
+
+        # Apply rotation if 180°
+        if pl['rotated_180']:
+            # Rotate around piece center
+            xs = [v[0] for v in verts_mm]
+            ys = [v[1] for v in verts_mm]
+            cx = (min(xs) + max(xs)) / 2
+            cy = (min(ys) + max(ys)) / 2
+            transformed = [(2 * cx - vx + x_mm, 2 * cy - vy + y_mm) for vx, vy in verts_mm]
+        else:
+            transformed = [(vx + x_mm, vy + y_mm) for vx, vy in verts_mm]
+
+        # Flip Y for SVG (origin top-left)
+        transformed = [(x, fabric_width_mm - y) for x, y in transformed]
+
+        # Color by size
+        if size not in size_color_map:
+            size_color_map[size] = colors[color_idx % len(colors)]
+            color_idx += 1
+        color = size_color_map[size]
+
+        points_str = ' '.join(f'{x:.1f},{y:.1f}' for x, y in transformed)
+        stroke_w = max(strip_length_mm, fabric_width_mm) * 0.001
+        parts.append(
+            f'<polygon points="{points_str}" fill="{color}" fill-opacity="0.5" '
+            f'stroke="{color}" stroke-width="{stroke_w:.2f}"/>'
+        )
+
+    parts.append('</svg>')
+    return '\n'.join(parts)
 
 
 class NestingCancelled(Exception):
@@ -471,6 +801,7 @@ def run_nesting_for_material(
     full_coverage: bool = False,
     result_callback: Optional[Callable[[int, List[Dict]], None]] = None,
     cancel_check: Optional[Callable[[], bool]] = None,
+    file_type: Optional[str] = None,
 ) -> Dict[int, List[Dict]]:
     """
     Run GPU nesting for a specific material.
@@ -487,7 +818,7 @@ def run_nesting_for_material(
         progress_callback: Optional callback for progress updates
         preview_callback: Optional callback for marker previews (ratio_str, preview_base64, efficiency)
         preview_interval_seconds: How often to capture previews
-        full_coverage: If True, evaluate ALL ratios (brute force). If False, use Island GA for larger search spaces.
+        full_coverage: If True, evaluate ALL ratios (brute force). If False, brute-force up to BRUTE_FORCE_THRESHOLD, random sample above.
         result_callback: Optional callback called after each bundle_count completes with (bundle_count, results_list)
 
     Returns:
@@ -505,7 +836,7 @@ def run_nesting_for_material(
         progress_callback(0, f"Loading pieces for material {material}...")
 
     pieces_by_size = load_pieces_for_material(
-        dxf_path, rul_path, material, sizes, gpu_scale
+        dxf_path, rul_path, material, sizes, gpu_scale, file_type=file_type
     )
 
     if not pieces_by_size:
@@ -533,8 +864,8 @@ def run_nesting_for_material(
         total_ratios += n
 
     if progress_callback:
-        mode = "brute-force (100% coverage)" if full_coverage else "GA + brute-force"
-        progress_callback(2, f"Total ratios to evaluate: {total_ratios} across {max_bundle_count} bundle counts ({mode})")
+        mode = "full coverage" if full_coverage else f"brute-force (≤{BRUTE_FORCE_THRESHOLD}) + sampling ({RANDOM_SAMPLE_SIZE})"
+        progress_callback(2, f"Ratio space: {total_ratios} across {max_bundle_count} bundle counts ({mode})")
 
     for bundle_count in range(1, max_bundle_count + 1):
         # Check for cancellation at start of each bundle count
@@ -544,81 +875,106 @@ def run_nesting_for_material(
         all_ratios = generate_all_ratios(bundle_count, sizes)
         n_combos = len(all_ratios)
 
+        # Decide: brute force (evaluate all) vs random sampling
+        use_brute_force = full_coverage or n_combos <= BRUTE_FORCE_THRESHOLD
+
         if progress_callback:
             progress = int((bundle_count - 1) / max_bundle_count * 80)
-            if full_coverage or n_combos < MIN_ISLAND_SIZE:
-                progress_callback(progress, f"Brute-force: {bundle_count}-bundle ({n_combos} ratios) — {evaluated_count}/{total_ratios} total")
+            if use_brute_force:
+                progress_callback(progress, f"Evaluating: {bundle_count}-bundle ({n_combos} ratios) — {evaluated_count} total")
             else:
-                progress_callback(progress, f"GA search: {bundle_count}-bundle ({n_combos} possible) — {evaluated_count}/{total_ratios} total")
+                progress_callback(progress, f"Sampling: {bundle_count}-bundle ({RANDOM_SAMPLE_SIZE}/{n_combos} ratios) — {evaluated_count} total")
 
-        if full_coverage or n_combos < MIN_ISLAND_SIZE:
-            # Brute force: evaluate all ratios (full_coverage=True or small search space)
-            results = []
-            cancel_check_counter = 0
-            for ratio in all_ratios:
-                # Check for cancellation every 20 ratios (avoid DB overhead)
-                cancel_check_counter += 1
-                if cancel_check and cancel_check_counter % 20 == 0 and cancel_check():
-                    raise NestingCancelled("Job cancelled by user")
-
-                # Check if we should capture a preview
-                current_time = time.time()
-                should_capture = preview_callback and (current_time - last_preview_time >= preview_interval_seconds)
-
-                eff, length, preview = evaluate_ratio(
-                    pieces_by_size, ratio, packer, strip_width_px, gpu_scale,
-                    capture_preview=should_capture
-                )
-
-                if should_capture and preview:
-                    ratio_str = ratio_to_str(ratio, sizes)
-                    preview_callback(ratio_str, preview, eff)
-                    last_preview_time = current_time
-
-                results.append({
-                    'ratio': ratio,
-                    'ratio_str': ratio_to_str(ratio, sizes),
-                    'efficiency': eff,
-                    'length_yards': length,
-                    'bundle_count': bundle_count,
-                })
-                evaluated_count += 1
-
-                # Update progress within bundle (every 20 ratios)
-                if progress_callback and cancel_check_counter % 20 == 0:
-                    progress = int((bundle_count - 1) / max_bundle_count * 80) + int(len(results) / n_combos * (80 / max_bundle_count))
-                    progress_callback(min(progress, 95), f"Brute-force: {bundle_count}-bundle ({len(results)}/{n_combos}) — {evaluated_count}/{total_ratios} total")
-
-            results.sort(key=lambda x: -x['efficiency'])
-            # Retention: ALL for 1-2 bundles, top 25% (floor 25) for 3+ bundles
-            if bundle_count <= 2:
-                all_results[bundle_count] = results  # Keep all
-            else:
-                keep_count = max(25, int(len(results) * 0.25))  # Top 25%, min 25
-                all_results[bundle_count] = results[:keep_count]
-            # Notify of incremental results
-            if result_callback:
-                result_callback(bundle_count, all_results[bundle_count])
+        if use_brute_force:
+            # Brute force: evaluate all ratios
+            ratios_to_eval = all_ratios
         else:
-            # Island GA for larger search spaces
-            results = _run_island_ga(
-                pieces_by_size, all_ratios, bundle_count,
-                packer, strip_width_px, gpu_scale, sizes, top_n,
-                preview_callback=preview_callback,
-                preview_interval_seconds=preview_interval_seconds,
-                cancel_check=cancel_check,
+            # Random sampling: pick RANDOM_SAMPLE_SIZE ratios uniformly
+            ratios_to_eval = random.sample(all_ratios, min(RANDOM_SAMPLE_SIZE, n_combos))
+
+        results = []
+        cancel_check_counter = 0
+        for ratio in ratios_to_eval:
+            cancel_check_counter += 1
+            if cancel_check and cancel_check_counter % 20 == 0 and cancel_check():
+                raise NestingCancelled("Job cancelled by user")
+
+            current_time = time.time()
+            should_capture = preview_callback and (current_time - last_preview_time >= preview_interval_seconds)
+
+            eff, length, preview, perim_cm = evaluate_ratio(
+                pieces_by_size, ratio, packer, strip_width_px, gpu_scale,
+                capture_preview=should_capture
             )
-            # GA evaluates a subset — count the results it returned
-            evaluated_count += len(results)
-            # Retention: ALL for 1-2 bundles, top 25% (floor 25) for 3+ bundles
-            if bundle_count <= 2:
-                all_results[bundle_count] = results  # Keep all
-            else:
-                keep_count = max(25, int(len(results) * 0.25))  # Top 25%, min 25
-                all_results[bundle_count] = results[:keep_count]
-            # Notify of incremental results
-            if result_callback:
-                result_callback(bundle_count, all_results[bundle_count])
+
+            if should_capture and preview:
+                ratio_str = ratio_to_str(ratio, sizes)
+                preview_callback(ratio_str, preview, eff)
+                last_preview_time = current_time
+
+            results.append({
+                'ratio': ratio,
+                'ratio_str': ratio_to_str(ratio, sizes),
+                'efficiency': eff,
+                'length_yards': length,
+                'bundle_count': bundle_count,
+                'perimeter_cm': perim_cm,
+            })
+            evaluated_count += 1
+
+            if progress_callback and cancel_check_counter % 20 == 0:
+                n_eval = len(ratios_to_eval)
+                progress = int((bundle_count - 1) / max_bundle_count * 80) + int(len(results) / n_eval * (80 / max_bundle_count))
+                label = "Evaluating" if use_brute_force else "Sampling"
+                progress_callback(min(progress, 95), f"{label}: {bundle_count}-bundle ({len(results)}/{n_eval}) — {evaluated_count} total")
+
+        results.sort(key=lambda x: -x['efficiency'])
+        # Retention: ALL for 1-2 bundles, top 25% (floor 25) for 3+ bundles
+        if bundle_count <= 2:
+            all_results[bundle_count] = results
+        else:
+            keep_count = max(25, int(len(results) * 0.25))
+            all_results[bundle_count] = results[:keep_count]
+        # Notify of incremental results
+        if result_callback:
+            result_callback(bundle_count, all_results[bundle_count])
+
+    # Dual-sort refinement: re-evaluate retained results with area_desc too, keep best
+    total_retained = sum(len(v) for v in all_results.values())
+    if progress_callback:
+        progress_callback(90, f"Refining {total_retained} retained markers with dual-sort...")
+
+    for bc, bc_results in all_results.items():
+        for r in bc_results:
+            ratio = r.get('ratio')
+            if not ratio:
+                continue
+            eff_dual, len_dual, _, perim_dual = evaluate_ratio(
+                pieces_by_size, ratio, packer, strip_width_px, gpu_scale,
+                dual_sort=True,
+            )
+            if eff_dual > r['efficiency']:
+                r['efficiency'] = eff_dual
+                r['length_yards'] = len_dual
+                r['perimeter_cm'] = perim_dual
+        # Re-sort after refinement
+        bc_results.sort(key=lambda x: -x['efficiency'])
+
+    # Generate SVG preview for the single best result per bundle count
+    svg_total = sum(1 for v in all_results.values() if v)
+    if progress_callback:
+        progress_callback(95, f"Generating vector previews for {svg_total} top markers...")
+
+    for bc, bc_results in all_results.items():
+        if bc_results:
+            r = bc_results[0]
+            ratio = r.get('ratio')
+            if ratio:
+                _, _, svg, perim_cm = evaluate_ratio_with_svg(
+                    pieces_by_size, ratio, packer, strip_width_px, gpu_scale
+                )
+                r['svg_preview'] = svg
+                r['perimeter_cm'] = perim_cm
 
     total_saved = sum(len(v) for v in all_results.values())
     if progress_callback:
@@ -627,197 +983,3 @@ def run_nesting_for_material(
     return all_results
 
 
-def _run_island_ga(
-    pieces_by_size: Dict,
-    all_ratios: List[Dict],
-    bundle_count: int,
-    packer: GPUPacker,
-    strip_width_px: int,
-    gpu_scale: float,
-    sizes: List[str],
-    top_n: int,
-    preview_callback: Optional[Callable[[str, str, float], None]] = None,
-    preview_interval_seconds: float = 5.0,
-    cancel_check: Optional[Callable[[], bool]] = None,
-) -> List[Dict]:
-    """Run island-based GA for larger search spaces."""
-    total_combos = len(all_ratios)
-
-    # Determine number of islands
-    if total_combos <= 150:
-        num_islands = MIN_ISLANDS
-    elif total_combos <= 250:
-        num_islands = min(MAX_ISLANDS, max(MIN_ISLANDS, total_combos // MIN_ISLAND_SIZE))
-    else:
-        num_islands = MAX_ISLANDS
-
-    # Linear partition into islands
-    island_size = total_combos // num_islands
-    islands = []
-    for i in range(num_islands):
-        start = i * island_size
-        end = start + island_size if i < num_islands - 1 else total_combos
-        islands.append(all_ratios[start:end])
-
-    global_cache = {}
-    island_bests = []
-    last_preview_time = [0.0]  # Use list for mutability in closure
-
-    for island_idx, island_pool in enumerate(islands):
-        if cancel_check and cancel_check():
-            raise NestingCancelled("Job cancelled by user")
-        best, _ = _run_island_ga_single(
-            pieces_by_size, island_pool, bundle_count,
-            packer, strip_width_px, gpu_scale, sizes, global_cache,
-            preview_callback=preview_callback,
-            preview_interval_seconds=preview_interval_seconds,
-            last_preview_time=last_preview_time,
-        )
-        best['bundle_count'] = bundle_count
-        best['ratio_str'] = ratio_to_str(best['ratio'], sizes)
-        island_bests.append(best)
-
-    # Sort by efficiency
-    island_bests.sort(key=lambda x: -x['efficiency'])
-    final_results = list(island_bests)
-
-    # Fill remaining slots from global cache
-    included_keys = set(ratio_to_key(r['ratio'], sizes) for r in final_results)
-    remaining_slots = top_n - len(final_results)
-
-    if remaining_slots > 0:
-        all_evaluated = list(global_cache.values())
-        all_evaluated.sort(key=lambda x: -x['efficiency'])
-
-        for r in all_evaluated:
-            if remaining_slots <= 0:
-                break
-            key = ratio_to_key(r['ratio'], sizes)
-            if key not in included_keys:
-                result = {
-                    'ratio': r['ratio'],
-                    'ratio_str': ratio_to_str(r['ratio'], sizes),
-                    'efficiency': r['efficiency'],
-                    'length_yards': r.get('length_yards', 0.0),
-                    'bundle_count': bundle_count,
-                }
-                final_results.append(result)
-                included_keys.add(key)
-                remaining_slots -= 1
-
-    return final_results[:top_n]
-
-
-def _run_island_ga_single(
-    pieces_by_size: Dict,
-    island_pool: List[Dict],
-    bundle_count: int,
-    packer: GPUPacker,
-    strip_width_px: int,
-    gpu_scale: float,
-    sizes: List[str],
-    global_cache: Dict,
-    preview_callback: Optional[Callable[[str, str, float], None]] = None,
-    preview_interval_seconds: float = 5.0,
-    last_preview_time: Optional[List[float]] = None,
-) -> Tuple[Dict, int]:
-    """Run GA on a single island."""
-    island_size = len(island_pool)
-    pop_size = max(5, min(10, island_size // 10))
-    elite_count = max(1, pop_size // 5)
-    mutation_rate = 0.4
-    eval_count = 0
-
-    if last_preview_time is None:
-        last_preview_time = [0.0]
-
-    def evaluate_and_cache(ratio: Dict) -> Dict:
-        nonlocal eval_count
-        key = ratio_to_key(ratio, sizes)
-        if key not in global_cache:
-            # Check if we should capture a preview
-            current_time = time.time()
-            should_capture = preview_callback and (current_time - last_preview_time[0] >= preview_interval_seconds)
-
-            eff, length, preview = evaluate_ratio(
-                pieces_by_size, ratio, packer, strip_width_px, gpu_scale,
-                capture_preview=should_capture
-            )
-            eval_count += 1
-            global_cache[key] = {'ratio': dict(ratio), 'efficiency': eff, 'length_yards': length}
-
-            if should_capture and preview:
-                ratio_str = ratio_to_str(ratio, sizes)
-                preview_callback(ratio_str, preview, eff)
-                last_preview_time[0] = current_time
-        return global_cache[key]
-
-    # Initialize population
-    sample_size = min(pop_size, island_size)
-    population = []
-    sampled = random.sample(island_pool, sample_size)
-    for ratio in sampled:
-        result = evaluate_and_cache(ratio)
-        population.append(result)
-
-    # Evolution
-    for gen in range(GA_GENERATIONS):
-        population.sort(key=lambda x: -x['efficiency'])
-        new_pop = population[:elite_count]
-
-        while len(new_pop) < pop_size:
-            sample_k = min(3, len(population))
-            p1 = max(random.sample(population, sample_k), key=lambda x: x['efficiency'])
-            p2 = max(random.sample(population, sample_k), key=lambda x: x['efficiency'])
-
-            # Crossover
-            child = {}
-            for size in sizes:
-                avg = (p1['ratio'].get(size, 0) + p2['ratio'].get(size, 0)) / 2
-                child[size] = int(avg + random.uniform(-0.5, 0.5))
-                child[size] = max(0, child[size])
-
-            # Normalize to bundle_count
-            total = sum(child.values())
-            while total != bundle_count:
-                if total < bundle_count:
-                    size = random.choice(sizes)
-                    child[size] += 1
-                    total += 1
-                elif total > bundle_count:
-                    sizes_with_count = [s for s in sizes if child[s] > 0]
-                    if sizes_with_count:
-                        size = random.choice(sizes_with_count)
-                        child[size] -= 1
-                        total -= 1
-                    else:
-                        break
-
-            # Check if child is in island pool
-            child_key = ratio_to_key(child, sizes)
-            found_in_pool = any(ratio_to_key(r, sizes) == child_key for r in island_pool)
-
-            if not found_in_pool:
-                child = random.choice(island_pool)
-
-            # Mutation
-            if random.random() < mutation_rate:
-                child = random.choice(island_pool)
-
-            result = evaluate_and_cache(child)
-
-            # Avoid duplicates
-            child_key = ratio_to_key(child, sizes)
-            if not any(ratio_to_key(p['ratio'], sizes) == child_key for p in new_pop):
-                new_pop.append(result)
-            else:
-                random_ratio = random.choice(island_pool)
-                random_result = evaluate_and_cache(random_ratio)
-                random_key = ratio_to_key(random_ratio, sizes)
-                if not any(ratio_to_key(p['ratio'], sizes) == random_key for p in new_pop):
-                    new_pop.append(random_result)
-
-        population = new_pop
-
-    population.sort(key=lambda x: -x['efficiency'])
-    return population[0], eval_count

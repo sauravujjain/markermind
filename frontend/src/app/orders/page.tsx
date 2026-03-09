@@ -1,11 +1,10 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { useRouter } from 'next/navigation'
 import Link from 'next/link'
-import { useAuthStore } from '@/lib/auth-store'
 import { api, Order } from '@/lib/api'
 import { DashboardLayout } from '@/components/dashboard-layout'
+import { AuthGuard } from '@/components/auth-guard'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
@@ -46,8 +45,6 @@ const statusSteps: Record<string, number> = {
 }
 
 export default function OrdersPage() {
-  const router = useRouter()
-  const { isAuthenticated, isLoading: authLoading, checkAuth } = useAuthStore()
   const { toast } = useToast()
   const [orders, setOrders] = useState<Order[]>([])
   const [isLoading, setIsLoading] = useState(true)
@@ -56,20 +53,8 @@ export default function OrdersPage() {
   const [isDeleting, setIsDeleting] = useState(false)
 
   useEffect(() => {
-    checkAuth()
-  }, [checkAuth])
-
-  useEffect(() => {
-    if (!authLoading && !isAuthenticated) {
-      router.push('/login')
-    }
-  }, [authLoading, isAuthenticated, router])
-
-  useEffect(() => {
-    if (isAuthenticated) {
-      loadOrders()
-    }
-  }, [isAuthenticated])
+    loadOrders()
+  }, [])
 
   const loadOrders = async () => {
     try {
@@ -141,18 +126,8 @@ export default function OrdersPage() {
     }
   }
 
-  if (authLoading || !isAuthenticated) {
-    return (
-      <div className="min-h-screen flex items-center justify-center bg-background">
-        <div className="flex flex-col items-center gap-3">
-          <Loader2 className="w-8 h-8 text-primary animate-spin" />
-          <p className="text-sm text-muted-foreground">Loading...</p>
-        </div>
-      </div>
-    )
-  }
-
   return (
+    <AuthGuard>
     <DashboardLayout>
       <div className="space-y-6">
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
@@ -324,5 +299,6 @@ export default function OrdersPage() {
         )}
       </div>
     </DashboardLayout>
+    </AuthGuard>
   )
 }

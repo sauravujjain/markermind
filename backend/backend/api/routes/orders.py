@@ -77,11 +77,12 @@ async def create_order(
         db.add(line)
         db.flush()
 
-        for qty_data in line_data.quantities:
+        for idx, qty_data in enumerate(line_data.quantities):
             qty = SizeQuantity(
                 order_line_id=line.id,
                 size_code=qty_data.size_code,
                 quantity=qty_data.quantity,
+                sort_order=idx,
             )
             db.add(qty)
 
@@ -122,6 +123,20 @@ async def update_order(
         raise HTTPException(status_code=404, detail="Order not found")
 
     update_data = order_data.model_dump(exclude_unset=True)
+
+    # Guard: block pattern changes after nesting has started
+    if "pattern_id" in update_data:
+        new_pid = update_data["pattern_id"]
+        if order.pattern_id and new_pid != order.pattern_id:
+            pre_nesting_statuses = ("draft", "pending_pattern", "pending_nesting")
+            if order.status not in pre_nesting_statuses:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Cannot change pattern after nesting has started. Create a new order instead.",
+                )
+            # Clearing the pattern resets status to pending_pattern
+            if not new_pid:
+                update_data["status"] = "pending_pattern"
 
     # Check if pattern is being linked
     linking_pattern = "pattern_id" in update_data and update_data["pattern_id"]
@@ -254,12 +269,13 @@ async def import_orders_batch(
             db.add(line)
             db.flush()
 
-            for size_code, qty in row.sizes.items():
+            for idx, (size_code, qty) in enumerate(row.sizes.items()):
                 if qty > 0:
                     sq = SizeQuantity(
                         order_line_id=line.id,
                         size_code=size_code,
                         quantity=qty,
+                        sort_order=idx,
                     )
                     db.add(sq)
 
@@ -340,12 +356,13 @@ async def import_order(
         db.add(line)
         db.flush()
 
-        for size_col in size_cols:
+        for idx, size_col in enumerate(size_cols):
             qty = row[size_col]
             if pd.notna(qty) and int(qty) > 0:
                 sq = SizeQuantity(
                     order_line_id=line.id,
                     size_code=str(size_col),
+                    sort_order=idx,
                     quantity=int(qty),
                 )
                 db.add(sq)
@@ -396,11 +413,12 @@ async def add_order_line(
     db.add(line)
     db.flush()
 
-    for qty_data in line_data.quantities:
+    for idx, qty_data in enumerate(line_data.quantities):
         qty = SizeQuantity(
             order_line_id=line.id,
             size_code=qty_data.size_code,
             quantity=qty_data.quantity,
+            sort_order=idx,
         )
         db.add(qty)
 
@@ -430,11 +448,12 @@ async def update_order_line(
     db.query(SizeQuantity).filter(SizeQuantity.order_line_id == line.id).delete()
 
     # Add new quantities
-    for qty_data in quantities:
+    for idx, qty_data in enumerate(quantities):
         qty = SizeQuantity(
             order_line_id=line.id,
             size_code=qty_data.size_code,
             quantity=qty_data.quantity,
+            sort_order=idx,
         )
         db.add(qty)
 
