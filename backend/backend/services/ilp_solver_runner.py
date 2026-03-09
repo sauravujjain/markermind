@@ -347,6 +347,7 @@ def solve_ilp(
     name: str = "ILP Solution",
     max_ply_height: int = 100,
     min_plies_by_bundle: Optional[Dict[int, int]] = None,
+    avg_roll_length_yards: Optional[float] = None,
 ) -> Tuple[CutPlan, float]:
     """
     Unified ILP solver with different objective functions.
@@ -421,6 +422,23 @@ def solve_ilp(
         c = np.zeros(num_vars)
         for i, m in enumerate(all_markers):
             c[i] = 1 - m.efficiency
+        c[n:2*n] = marker_penalty
+    elif objective == "roll_optimized":
+        # Penalize markers whose lengths produce large roll remainders
+        num_vars = 2 * n
+        c = np.zeros(num_vars)
+        roll_len = avg_roll_length_yards or 100.0
+        roll_penalty_weight = marker_penalty  # reuse penalty param
+        for i, m in enumerate(all_markers):
+            # Base efficiency cost
+            eff_cost = 1 - m.efficiency
+            # Roll remainder penalty: how poorly marker length divides into roll
+            if m.length_yards > 0 and roll_len > 0:
+                remainder = roll_len % m.length_yards
+                remainder_frac = remainder / roll_len
+            else:
+                remainder_frac = 0.0
+            c[i] = eff_cost + roll_penalty_weight * remainder_frac
         c[n:2*n] = marker_penalty
     else:
         raise ValueError(f"Unknown objective: {objective}")
@@ -602,6 +620,7 @@ def optimize_cutplan(
     pattern_sizes: Optional[List[str]] = None,
     max_ply_height: int = 100,
     min_plies_by_bundle_str: Optional[str] = None,
+    avg_roll_length_yards: Optional[float] = None,
 ) -> List[Dict]:
     """
     Run ILP optimization with multiple strategies.
@@ -662,6 +681,7 @@ def optimize_cutplan(
         "min_end_cuts": "Option C: Min End Cuts",
         "min_bundle_cuts": "Option D: Min Cutting Work",
         "balanced": "Option E: Balanced",
+        "roll_optimized": "Option F: Roll Optimized",
     }
 
     # Parse min_plies_by_bundle from custom string if provided
@@ -715,6 +735,7 @@ def optimize_cutplan(
                     max_ply_height=max_ply_height,
                     min_plies_by_bundle=custom_min_plies,
                     name=strategy_names.get(option, f"Option: {option}"),
+                    avg_roll_length_yards=avg_roll_length_yards,
                 )
             result = plan.to_dict()
             result["solve_time"] = solve_time

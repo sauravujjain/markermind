@@ -449,6 +449,84 @@ class ApiClient {
   async deleteRollPlan(rollplanId: string) {
     return this.request(`/rollplans/${rollplanId}`, { method: 'DELETE' })
   }
+
+  async downloadRollTemplate(): Promise<void> {
+    const token = this.getToken()
+    const headers: Record<string, string> = {}
+    if (token) headers['Authorization'] = `Bearer ${token}`
+
+    const response = await fetch(`${API_URL}/rollplans/sample-rolls-template`, { headers })
+    if (!response.ok) {
+      throw new Error('Template download failed')
+    }
+    const blob = await response.blob()
+    const url = window.URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = 'roll_inventory_template.xlsx'
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    window.URL.revokeObjectURL(url)
+  }
+
+  async parseRollsPreview(file: File, cutplanId?: string): Promise<RollPreviewResponse> {
+    const formData = new FormData()
+    formData.append('file', file)
+
+    const token = this.getToken()
+    const query = cutplanId ? `?cutplan_id=${cutplanId}` : ''
+    const response = await fetch(`${API_URL}/rollplans/parse-rolls-preview${query}`, {
+      method: 'POST',
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+      body: formData,
+    })
+
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}))
+      throw new Error(error.detail || 'Preview failed')
+    }
+
+    return response.json() as Promise<RollPreviewResponse>
+  }
+
+  async downloadRollPlanExcel(rollplanId: string, source: string = 'ga'): Promise<void> {
+    const token = this.getToken()
+    const headers: Record<string, string> = {}
+    if (token) headers['Authorization'] = `Bearer ${token}`
+
+    const response = await fetch(`${API_URL}/rollplans/${rollplanId}/export-excel?source=${source}`, { headers })
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}))
+      throw new Error(error.detail || 'Download failed')
+    }
+    const blob = await response.blob()
+    const url = window.URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = 'rollplan.xlsx'
+    // Try to extract filename from Content-Disposition header
+    const disposition = response.headers.get('Content-Disposition')
+    if (disposition) {
+      const match = disposition.match(/filename=(.+)/)
+      if (match) a.download = match[1]
+    }
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    window.URL.revokeObjectURL(url)
+  }
+
+  async tuneCutplan(rollplanId: string, data: { avg_roll_length_yards?: number; roll_penalty_weight?: number }) {
+    return this.request<{ status: string; message: string }>(`/rollplans/${rollplanId}/tune`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    })
+  }
+
+  async getTuneStatus(rollplanId: string) {
+    return this.request<TuneStatus>(`/rollplans/${rollplanId}/tune-status`)
+  }
 }
 
 export const api = new ApiClient()
@@ -848,6 +926,7 @@ export interface RollAssignment {
   plies_from_roll: number
   end_bit_yards: number
   is_pseudo: boolean
+  fabric_used_yards: number
 }
 
 export interface CutDocket {
@@ -856,6 +935,7 @@ export interface CutDocket {
   ratio_str: string
   marker_length_yards: number
   plies: number
+  plies_planned?: number  // Actual plies planned; undefined = same as plies (no shortfall)
   assigned_rolls: RollAssignment[]
   total_fabric_yards: number
   total_end_bit_yards: number
@@ -877,6 +957,25 @@ export interface GAResult {
   dockets: CutDocket[]
 }
 
+export interface PreflightWarning {
+  level: string   // "warning" | "error"
+  message: string
+}
+
+export interface WasteAssessment {
+  waste_pct: number
+  exceeds_threshold: boolean
+  threshold_pct: number
+  recommendation: string
+}
+
+export interface TuneStatus {
+  status: string
+  progress: number
+  message: string
+  new_cutplan_id?: string
+}
+
 export interface RollPlan {
   id: string
   cutplan_id: string
@@ -892,8 +991,10 @@ export interface RollPlan {
   progress: number
   progress_message?: string
   error_message?: string
+  preflight_warnings?: PreflightWarning[]
   monte_carlo?: MonteCarloResult
   ga?: GAResult
+  waste_assessment?: WasteAssessment
   rolls_count: number
   real_rolls_count: number
   pseudo_rolls_count: number
@@ -925,4 +1026,24 @@ export interface RollUploadResponse {
   avg_length_yards: number
   min_length_yards: number
   max_length_yards: number
+}
+
+export interface RollPreviewRow {
+  roll_number: string
+  length_yards: number
+  unit: string
+}
+
+export interface RollPreviewResponse {
+  rolls_count: number
+  total_length_yards: number
+  avg_length_yards: number
+  median_length_yards: number
+  min_length_yards: number
+  max_length_yards: number
+  preview_rows: RollPreviewRow[]
+  fabric_required_yards?: number
+  shortfall_yards?: number
+  synthetic_rolls_needed?: number
+  synthetic_roll_length_yards?: number
 }

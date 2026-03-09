@@ -19,6 +19,9 @@ import {
   CutDocket,
   MonteCarloResult,
   GAResult,
+  TuneStatus,
+  WasteAssessment,
+  RollPreviewResponse,
 } from '@/lib/api'
 import { useToast } from '@/hooks/use-toast'
 import {
@@ -32,6 +35,8 @@ import {
   Trash2,
   RotateCcw,
   Upload,
+  Wrench,
+  Download,
 } from 'lucide-react'
 
 export default function RollPlanPage() {
@@ -61,7 +66,8 @@ export default function RollPlanPage() {
   const [gaGenerations, setGaGenerations] = useState(50)
   const [showGATuning, setShowGATuning] = useState(false)
   const [uploadFile, setUploadFile] = useState<File | null>(null)
-  const [uploadSummary, setUploadSummary] = useState<{ count: number; totalYards: number; avgYards: number; minYards: number; maxYards: number } | null>(null)
+  const [uploadPreview, setUploadPreview] = useState<RollPreviewResponse | null>(null)
+  const [isParsingPreview, setIsParsingPreview] = useState(false)
 
   // Progress
   const [isRunning, setIsRunning] = useState(false)
@@ -74,6 +80,12 @@ export default function RollPlanPage() {
   const [dockets, setDockets] = useState<CutDocket[]>([])
   const [expandedDocket, setExpandedDocket] = useState<number | null>(null)
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
+  const [isDownloadingExcel, setIsDownloadingExcel] = useState(false)
+
+  // Tuning state
+  const [isTuning, setIsTuning] = useState(false)
+  const [tunedCutplanId, setTunedCutplanId] = useState<string | null>(null)
+  const tunePollingRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
   // Auto-select first eligible cutplan
   useEffect(() => {
@@ -105,6 +117,7 @@ export default function RollPlanPage() {
   useEffect(() => {
     return () => {
       if (pollingRef.current) clearInterval(pollingRef.current)
+      if (tunePollingRef.current) clearInterval(tunePollingRef.current)
     }
   }, [])
 
@@ -222,11 +235,80 @@ export default function RollPlanPage() {
     }
   }
 
-  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
-    if (file) {
-      setUploadFile(file)
-      setUploadSummary(null)
+    if (!file) return
+    setUploadFile(file)
+    setUploadPreview(null)
+    setIsParsingPreview(true)
+    try {
+      const preview = await api.parseRollsPreview(file, selectedCutplanId || undefined)
+      setUploadPreview(preview)
+    } catch (err) {
+      toast({ title: 'Failed to parse file', description: err instanceof Error ? err.message : 'Invalid file', variant: 'destructive' })
+    } finally {
+      setIsParsingPreview(false)
+    }
+  }
+
+  const handleDownloadTemplate = async () => {
+    try {
+      await api.downloadRollTemplate()
+    } catch {
+      toast({ title: 'Download failed', variant: 'destructive' })
+    }
+  }
+
+  const handleDownloadRollPlanExcel = async () => {
+    if (!rollPlan) return
+    setIsDownloadingExcel(true)
+    try {
+      await api.downloadRollPlanExcel(rollPlan.id, docketSource)
+      toast({ title: 'Roll plan downloaded' })
+    } catch (e: unknown) {
+      toast({ title: e instanceof Error ? e.message : 'Download failed', variant: 'destructive' })
+    } finally {
+      setIsDownloadingExcel(false)
+    }
+  }
+
+  const handleTuneCutplan = async () => {
+    if (!rollPlan) return
+    setIsTuning(true)
+    setTunedCutplanId(null)
+    try {
+      await api.tuneCutplan(rollPlan.id, {
+        avg_roll_length_yards: rollPlan.pseudo_roll_avg_yards || pseudoAvg,
+        roll_penalty_weight: 2.0,
+      })
+
+      // Poll tune status
+      if (tunePollingRef.current) clearInterval(tunePollingRef.current)
+      tunePollingRef.current = setInterval(async () => {
+        try {
+          const status: TuneStatus = await api.getTuneStatus(rollPlan.id)
+          if (status.status === 'completed') {
+            if (tunePollingRef.current) clearInterval(tunePollingRef.current)
+            tunePollingRef.current = null
+            setIsTuning(false)
+            setTunedCutplanId(status.new_cutplan_id || null)
+            toast({ title: 'Cutplan tuned', description: 'A roll-optimized cutplan has been created.' })
+            loadData()  // Refresh cutplans list
+          } else if (status.status === 'failed') {
+            if (tunePollingRef.current) clearInterval(tunePollingRef.current)
+            tunePollingRef.current = null
+            setIsTuning(false)
+            toast({ title: 'Tuning failed', description: status.message, variant: 'destructive' })
+          }
+        } catch {
+          if (tunePollingRef.current) clearInterval(tunePollingRef.current)
+          tunePollingRef.current = null
+          setIsTuning(false)
+        }
+      }, 2000)
+    } catch (e) {
+      setIsTuning(false)
+      toast({ title: 'Tuning failed', description: e instanceof Error ? e.message : 'Please try again', variant: 'destructive' })
     }
   }
 
@@ -419,7 +501,16 @@ export default function RollPlanPage() {
               {/* Upload file */}
               {rollSource === 'upload' && (
                 <div>
-                  <label className="text-sm font-medium mb-1 block">Roll Inventory Excel</label>
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="text-sm font-medium">Roll Inventory Excel</label>
+                    <button
+                      onClick={handleDownloadTemplate}
+                      className="flex items-center gap-1 text-xs text-primary hover:underline"
+                    >
+                      <Download className="h-3 w-3" />
+                      Download sample template
+                    </button>
+                  </div>
                   <input
                     type="file"
                     accept=".xlsx,.xls"
@@ -430,14 +521,62 @@ export default function RollPlanPage() {
                     Required columns: <span className="font-mono">Roll Number</span>, <span className="font-mono">Roll Length</span>.
                     Optional: <span className="font-mono">Unit</span> (default yd), <span className="font-mono">Roll Width</span>, <span className="font-mono">Shade Group</span>.
                   </p>
-                  {uploadFile && (
-                    <p className="text-xs text-muted-foreground mt-1">Selected: {uploadFile.name}</p>
+                  {isParsingPreview && (
+                    <div className="mt-2 flex items-center gap-2 text-xs text-muted-foreground">
+                      <Loader2 className="h-3 w-3 animate-spin" /> Parsing file...
+                    </div>
                   )}
-                  {uploadSummary && (
-                    <div className="mt-2 p-2 bg-muted/30 rounded text-xs">
-                      {uploadSummary.count} rolls, {uploadSummary.totalYards.toFixed(1)} yd total,
-                      avg {uploadSummary.avgYards.toFixed(1)} yd
-                      (min {uploadSummary.minYards.toFixed(1)}, max {uploadSummary.maxYards.toFixed(1)})
+                  {uploadPreview && (
+                    <div className="mt-2 space-y-2">
+                      {/* Summary */}
+                      <div className="p-2 bg-muted/30 rounded text-xs space-y-1">
+                        <div className="font-medium">
+                          {uploadPreview.rolls_count} rolls — {uploadPreview.total_length_yards.toFixed(1)} yd total
+                        </div>
+                        <div className="text-muted-foreground">
+                          Avg {uploadPreview.avg_length_yards.toFixed(1)} yd,
+                          Median {uploadPreview.median_length_yards.toFixed(1)} yd,
+                          Min {uploadPreview.min_length_yards.toFixed(1)} yd,
+                          Max {uploadPreview.max_length_yards.toFixed(1)} yd
+                        </div>
+                      </div>
+                      {/* Preview table */}
+                      {uploadPreview.preview_rows.length > 0 && (
+                        <table className="w-full text-xs border-collapse">
+                          <thead>
+                            <tr className="border-b text-left text-muted-foreground">
+                              <th className="py-1 pr-3">Roll #</th>
+                              <th className="py-1 pr-3 text-right">Length (yd)</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {uploadPreview.preview_rows.map((r, i) => (
+                              <tr key={i} className="border-b border-border/30">
+                                <td className="py-1 pr-3 font-mono">{r.roll_number}</td>
+                                <td className="py-1 pr-3 text-right">{r.length_yards.toFixed(1)}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      )}
+                      {uploadPreview.rolls_count > 10 && (
+                        <p className="text-xs text-muted-foreground">...and {uploadPreview.rolls_count - 10} more</p>
+                      )}
+                      {/* Shortfall banner */}
+                      {uploadPreview.fabric_required_yards != null && uploadPreview.shortfall_yards != null && (
+                        uploadPreview.shortfall_yards > 0 ? (
+                          <div className="p-2 rounded text-xs bg-amber-50 border border-amber-200 text-amber-800">
+                            Uploaded: {uploadPreview.total_length_yards.toFixed(1)} yd — Required: {uploadPreview.fabric_required_yards.toFixed(1)} yd (+ 5% buffer)
+                            {' → '}{uploadPreview.synthetic_rolls_needed} synthetic roll{uploadPreview.synthetic_rolls_needed !== 1 ? 's' : ''} will be added
+                            (median {uploadPreview.synthetic_roll_length_yards?.toFixed(1)} yd, marked with <span className="font-mono">_S</span> suffix)
+                          </div>
+                        ) : (
+                          <div className="p-2 rounded text-xs bg-green-50 border border-green-200 text-green-700">
+                            <CheckCircle2 className="inline h-3 w-3 mr-1" />
+                            Uploaded rolls cover cutplan requirement ({uploadPreview.fabric_required_yards.toFixed(1)} yd)
+                          </div>
+                        )
+                      )}
                     </div>
                   )}
                 </div>
@@ -529,6 +668,23 @@ export default function RollPlanPage() {
         </Card>
       )}
 
+      {/* Pre-flight Warnings */}
+      {rollPlan && rollPlan.preflight_warnings && rollPlan.preflight_warnings.length > 0 && (
+        <Card className="border-amber-200 bg-amber-50/30">
+          <CardContent className="py-4">
+            <div className="flex items-start gap-3">
+              <AlertCircle className="h-5 w-5 text-amber-500 mt-0.5 flex-shrink-0" />
+              <div className="space-y-1">
+                <div className="font-medium text-sm text-amber-700">Pre-flight Warnings</div>
+                {rollPlan.preflight_warnings.map((w, i) => (
+                  <p key={i} className="text-sm text-amber-600">{w.message}</p>
+                ))}
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
       {/* Section D: Results */}
       {rollPlan && rollPlan.status === 'completed' && (
         <div className="space-y-6">
@@ -596,6 +752,55 @@ export default function RollPlanPage() {
             ) : null}
           </div>
 
+          {/* Waste Assessment + Tune Button */}
+          {rollPlan.waste_assessment && (
+            <Card className={rollPlan.waste_assessment.exceeds_threshold
+              ? 'border-amber-200 bg-amber-50/30'
+              : 'border-green-200 bg-green-50/30'
+            }>
+              <CardContent className="py-4">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    {rollPlan.waste_assessment.exceeds_threshold ? (
+                      <AlertCircle className="h-5 w-5 text-amber-500" />
+                    ) : (
+                      <CheckCircle2 className="h-5 w-5 text-green-600" />
+                    )}
+                    <div>
+                      <div className="font-medium text-sm">
+                        Waste Assessment: {rollPlan.waste_assessment.waste_pct.toFixed(1)}%
+                      </div>
+                      <div className="text-xs text-muted-foreground">
+                        {rollPlan.waste_assessment.recommendation}
+                      </div>
+                    </div>
+                  </div>
+                  {rollPlan.waste_assessment.exceeds_threshold && (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={handleTuneCutplan}
+                      disabled={isTuning}
+                      className="border-amber-300 text-amber-700 hover:bg-amber-100"
+                    >
+                      {isTuning ? (
+                        <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                      ) : (
+                        <Wrench className="mr-2 h-4 w-4" />
+                      )}
+                      {isTuning ? 'Tuning...' : 'Tune Cutplan'}
+                    </Button>
+                  )}
+                </div>
+                {tunedCutplanId && (
+                  <div className="mt-3 p-2 bg-green-100 rounded text-sm text-green-700">
+                    Roll-tuned cutplan created. Select it from the cutplan dropdown above and run a new simulation to compare.
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+          )}
+
           {/* D2: MC vs GA Comparison */}
           {rollPlan.monte_carlo && rollPlan.ga && (
             <Card>
@@ -645,7 +850,7 @@ export default function RollPlanPage() {
             <CardHeader className="pb-3">
               <div className="flex items-center justify-between">
                 <CardTitle className="text-base">Cut Dockets</CardTitle>
-                <div className="flex gap-1">
+                <div className="flex gap-1 items-center">
                   {rollPlan.monte_carlo && (
                     <button
                       onClick={() => setDocketSource('mc')}
@@ -670,6 +875,22 @@ export default function RollPlanPage() {
                       Optimized Plan
                     </button>
                   )}
+                  {dockets.length > 0 && (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={handleDownloadRollPlanExcel}
+                      disabled={isDownloadingExcel}
+                      className="ml-2 h-7 text-xs"
+                    >
+                      {isDownloadingExcel ? (
+                        <Loader2 className="h-3 w-3 animate-spin mr-1" />
+                      ) : (
+                        <Download className="h-3 w-3 mr-1" />
+                      )}
+                      Download Excel
+                    </Button>
+                  )}
                 </div>
               </div>
             </CardHeader>
@@ -688,6 +909,7 @@ export default function RollPlanPage() {
                         <th className="text-right py-2 px-3 font-medium">Length (yd)</th>
                         <th className="text-right py-2 px-3 font-medium">Plies</th>
                         <th className="text-right py-2 px-3 font-medium">Rolls</th>
+                        <th className="text-right py-2 px-3 font-medium">Fabric Used (yd)</th>
                         <th className="text-right py-2 px-3 font-medium">End Bits (yd)</th>
                       </tr>
                     </thead>
@@ -708,10 +930,19 @@ export default function RollPlanPage() {
                           {dockets.reduce((s, d) => s + d.total_fabric_yards, 0).toFixed(1)}
                         </td>
                         <td className="py-2 px-3 text-right tabular-nums">
-                          {dockets.reduce((s, d) => s + d.plies, 0)}
+                          {(() => {
+                            const planned = dockets.reduce((s, d) => s + (d.plies_planned ?? d.plies), 0)
+                            const required = dockets.reduce((s, d) => s + d.plies, 0)
+                            return planned < required ? (
+                              <span className="text-amber-600">{planned}/{required}</span>
+                            ) : required
+                          })()}
                         </td>
                         <td className="py-2 px-3 text-right tabular-nums">
                           {dockets.reduce((s, d) => s + d.assigned_rolls.length, 0)}
+                        </td>
+                        <td className="py-2 px-3 text-right tabular-nums">
+                          {dockets.reduce((s, d) => s + d.assigned_rolls.reduce((rs, r) => rs + r.fabric_used_yards, 0), 0).toFixed(1)}
                         </td>
                         <td className="py-2 px-3 text-right tabular-nums">
                           {dockets.reduce((s, d) => s + d.total_end_bit_yards, 0).toFixed(2)}
@@ -890,13 +1121,24 @@ function DocketRow({
         <td className="py-2 px-3">{docket.marker_label}</td>
         <td className="py-2 px-3 font-mono text-xs">{docket.ratio_str}</td>
         <td className="py-2 px-3 text-right tabular-nums">{docket.marker_length_yards.toFixed(2)}</td>
-        <td className="py-2 px-3 text-right tabular-nums">{docket.plies}</td>
+        <td className="py-2 px-3 text-right tabular-nums">
+          {(docket.plies_planned ?? docket.plies) < docket.plies ? (
+            <span className="text-amber-600" title={`Shortfall: ${docket.plies - (docket.plies_planned ?? docket.plies)} plies`}>
+              {docket.plies_planned ?? docket.plies}/{docket.plies}
+            </span>
+          ) : (
+            docket.plies
+          )}
+        </td>
         <td className="py-2 px-3 text-right tabular-nums">{docket.assigned_rolls.length}</td>
+        <td className="py-2 px-3 text-right tabular-nums">
+          {docket.assigned_rolls.reduce((s, r) => s + r.fabric_used_yards, 0).toFixed(1)}
+        </td>
         <td className="py-2 px-3 text-right tabular-nums">{docket.total_end_bit_yards.toFixed(2)}</td>
       </tr>
       {isExpanded && (
         <tr className="bg-muted/10">
-          <td colSpan={8} className="p-0">
+          <td colSpan={9} className="p-0">
             <div className="px-6 py-3">
               <table className="w-full text-xs">
                 <thead>
@@ -904,6 +1146,7 @@ function DocketRow({
                     <th className="text-left py-1 px-2">Roll ID</th>
                     <th className="text-right py-1 px-2">Roll Length (yd)</th>
                     <th className="text-right py-1 px-2">Plies from Roll</th>
+                    <th className="text-right py-1 px-2">Fabric Used (yd)</th>
                     <th className="text-right py-1 px-2">End Bit (yd)</th>
                     <th className="text-center py-1 px-2">Type</th>
                   </tr>
@@ -914,6 +1157,7 @@ function DocketRow({
                       <td className="py-1 px-2 font-mono">{roll.roll_id}</td>
                       <td className="py-1 px-2 text-right tabular-nums">{roll.roll_length_yards.toFixed(1)}</td>
                       <td className="py-1 px-2 text-right tabular-nums">{roll.plies_from_roll}</td>
+                      <td className="py-1 px-2 text-right tabular-nums">{roll.fabric_used_yards.toFixed(1)}</td>
                       <td className="py-1 px-2 text-right tabular-nums">{roll.end_bit_yards.toFixed(2)}</td>
                       <td className="py-1 px-2 text-center">
                         {roll.is_pseudo ? (

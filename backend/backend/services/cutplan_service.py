@@ -270,6 +270,7 @@ class CutplanService:
         fabric_cost_per_yard: Optional[float] = None,
         max_ply_height: Optional[int] = None,
         min_plies_by_bundle: Optional[str] = None,
+        avg_roll_length_yards: Optional[float] = None,
     ) -> List[Cutplan]:
         """
         Run ILP optimization with multiple strategies and create cutplans for each.
@@ -469,6 +470,7 @@ class CutplanService:
             pattern_sizes=pattern_sizes,
             max_ply_height=effective_max_ply_height,
             min_plies_by_bundle_str=effective_min_plies_str,
+            avg_roll_length_yards=avg_roll_length_yards,
         )
 
         # Update order status if any strategies completed

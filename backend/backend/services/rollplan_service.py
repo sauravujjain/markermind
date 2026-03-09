@@ -15,6 +15,7 @@ from typing import Callable, Dict, List, Optional
 
 from sqlalchemy.orm import Session
 
+from ..models import Cutplan, Order
 from ..models.cutplan import CutplanMarker
 from ..models.rollplan import (
     FabricRoll,
@@ -27,12 +28,14 @@ from .rollplan_simulator import (
     GAResult,
     MarkerSpec,
     MonteCarloResult,
+    PreflightResult,
     PseudoRollConfig,
     RollSpec,
     generate_pseudo_rolls,
     optimize_rolls_ga,
     parse_roll_excel,
     simulate_roll_usage,
+    validate_rollplan_inputs,
 )
 
 
@@ -206,10 +209,19 @@ class RollPlanService:
         # Prepare rolls
         rolls = self.prepare_rolls(db, roll_plan, total_fabric)
 
+        # Pre-flight validation
         pseudo_config = PseudoRollConfig(
             avg_length_yards=roll_plan.pseudo_roll_avg_yards or 100.0,
             delta_yards=roll_plan.pseudo_roll_delta_yards or 20.0,
         )
+        preflight = validate_rollplan_inputs(markers, rolls, pseudo_config)
+        if preflight.warnings:
+            roll_plan.preflight_warnings = [
+                {"level": w.level, "message": w.message}
+                for w in preflight.warnings
+            ]
+        else:
+            roll_plan.preflight_warnings = None
 
         mode = roll_plan.mode or RollPlanMode.both
         mc_result: Optional[MonteCarloResult] = None
@@ -305,8 +317,115 @@ class RollPlanService:
             progress_callback(100, "Simulation complete")
 
     # ------------------------------------------------------------------
+    # Tune cutplan (re-run ILP with roll_optimized strategy)
+    # ------------------------------------------------------------------
+
+    def tune_cutplan(
+        self,
+        db: Session,
+        roll_plan: RollPlan,
+        avg_roll_length_yards: float,
+        roll_penalty_weight: float = 2.0,
+        progress_callback: Optional[Callable[[int, str], None]] = None,
+        cancel_check: Optional[Callable[[], bool]] = None,
+    ) -> str:
+        """
+        Re-run ILP with roll_optimized strategy. Creates a NEW cutplan.
+
+        Returns the new cutplan ID.
+        """
+        from .cutplan_service import CutplanService
+
+        cutplan = db.query(Cutplan).filter(Cutplan.id == roll_plan.cutplan_id).first()
+        if not cutplan:
+            raise ValueError("Original cutplan not found")
+
+        order = db.query(Order).filter(Order.id == cutplan.order_id).first()
+        if not order:
+            raise ValueError("Order not found")
+
+        if not order.pattern_id:
+            raise ValueError("Order has no pattern assigned")
+
+        # Find the fabric_id from the cutplan's markers
+        cutplan_marker = (
+            db.query(CutplanMarker)
+            .filter(CutplanMarker.cutplan_id == cutplan.id)
+            .first()
+        )
+        if not cutplan_marker or not cutplan_marker.marker_id:
+            raise ValueError("No markers found in cutplan")
+
+        from ..models import MarkerBank
+        marker_bank = db.query(MarkerBank).filter(MarkerBank.id == cutplan_marker.marker_id).first()
+        if not marker_bank:
+            raise ValueError("Marker bank entry not found")
+
+        fabric_id = marker_bank.fabric_id
+
+        svc = CutplanService()
+        results = svc.run_multi_strategy_optimization(
+            db=db,
+            order_id=cutplan.order_id,
+            pattern_id=order.pattern_id,
+            fabric_id=fabric_id,
+            customer_id=order.customer_id,
+            strategies=["roll_optimized"],
+            penalty=roll_penalty_weight,
+            progress_callback=progress_callback,
+            cancel_check=cancel_check,
+            avg_roll_length_yards=avg_roll_length_yards,
+        )
+
+        if not results:
+            raise ValueError("ILP solver produced no results")
+
+        new_cutplan = results[0]
+        new_cutplan.name = f"Roll-Tuned: {cutplan.name or 'Cutplan'}"
+        db.commit()
+
+        return new_cutplan.id
+
+    # ------------------------------------------------------------------
     # Build response
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def compute_waste_assessment(
+        roll_plan: RollPlan,
+        threshold_pct: float = 5.0,
+    ) -> Optional[Dict]:
+        """
+        Compute waste assessment from MC results.
+
+        Returns dict with waste_pct, exceeds_threshold, threshold_pct, recommendation.
+        """
+        if roll_plan.mc_unusable_avg is None or roll_plan.mc_endbit_avg is None:
+            return None
+
+        total_fabric = roll_plan.total_fabric_required or 0
+        if total_fabric <= 0:
+            return None
+
+        avg_unusable = roll_plan.mc_unusable_avg or 0
+        avg_endbit = roll_plan.mc_endbit_avg or 0
+        waste_pct = (avg_unusable + avg_endbit) / total_fabric * 100
+
+        exceeds = waste_pct > threshold_pct
+        if exceeds:
+            recommendation = (
+                f"Waste is {waste_pct:.1f}% of fabric needed (threshold: {threshold_pct}%). "
+                f"Consider re-optimizing the cutplan with roll-aware ILP to reduce roll remainders."
+            )
+        else:
+            recommendation = f"Waste is {waste_pct:.1f}% — within acceptable levels."
+
+        return {
+            "waste_pct": round(waste_pct, 2),
+            "exceeds_threshold": exceeds,
+            "threshold_pct": threshold_pct,
+            "recommendation": recommendation,
+        }
 
     @staticmethod
     def build_response_data(db: Session, roll_plan: RollPlan) -> Dict:
@@ -337,9 +456,15 @@ class RollPlanService:
             "rolls_count": len(rolls_db),
             "real_rolls_count": real_count,
             "pseudo_rolls_count": pseudo_count,
+            "preflight_warnings": roll_plan.preflight_warnings,
             "created_at": roll_plan.created_at,
             "updated_at": roll_plan.updated_at,
         }
+
+        # Waste assessment
+        waste_assessment = RollPlanService.compute_waste_assessment(roll_plan)
+        if waste_assessment:
+            data["waste_assessment"] = waste_assessment
 
         # MC results
         if roll_plan.mc_endbit_avg is not None:
@@ -402,6 +527,7 @@ def _serialize_dockets(dockets) -> List[Dict]:
             "ratio_str": d.ratio_str,
             "marker_length_yards": d.marker_length_yards,
             "plies": d.plies,
+            "plies_planned": d.plies_planned,
             "assigned_rolls": [
                 {
                     "roll_id": a.roll_id,
@@ -409,6 +535,7 @@ def _serialize_dockets(dockets) -> List[Dict]:
                     "plies_from_roll": a.plies_from_roll,
                     "end_bit_yards": a.end_bit_yards,
                     "is_pseudo": a.is_pseudo,
+                    "fabric_used_yards": a.fabric_used_yards,
                 }
                 for a in d.assigned_rolls
             ],

@@ -67,6 +67,7 @@ class RollAssignmentResponse(BaseModel):
     plies_from_roll: int
     end_bit_yards: float
     is_pseudo: bool = False
+    fabric_used_yards: float = 0.0
 
 
 class CutDocketResponse(BaseModel):
@@ -75,6 +76,7 @@ class CutDocketResponse(BaseModel):
     ratio_str: str
     marker_length_yards: float
     plies: int
+    plies_planned: Optional[int] = None  # Actual plies planned; None = same as plies (no shortfall)
     assigned_rolls: List[RollAssignmentResponse]
     total_fabric_yards: float
     total_end_bit_yards: float
@@ -97,7 +99,7 @@ class WasteStatsResponse(BaseModel):
 
 class WasteBreakdownResponse(BaseModel):
     """Single-run waste breakdown (for GA result)."""
-    unusable_yards: float = 0.0      # Type 1: < smallest marker
+    unusable_yards: float = 0.0      # Type 1: < yield per garment
     unusable_count: int = 0
     endbit_yards: float = 0.0        # Type 2: optimization target
     endbit_count: int = 0
@@ -156,6 +158,18 @@ class GAResultResponse(BaseModel):
     dockets: List[CutDocketResponse] = []
 
 
+class PreflightWarningResponse(BaseModel):
+    level: str     # "warning" or "error"
+    message: str
+
+
+class WasteAssessmentResponse(BaseModel):
+    waste_pct: float
+    exceeds_threshold: bool
+    threshold_pct: float
+    recommendation: str
+
+
 class RollPlanResponse(BaseModel):
     id: str
     cutplan_id: str
@@ -171,10 +185,12 @@ class RollPlanResponse(BaseModel):
     progress: int
     progress_message: Optional[str] = None
     error_message: Optional[str] = None
+    preflight_warnings: Optional[List[PreflightWarningResponse]] = None
 
     # Results
     monte_carlo: Optional[MonteCarloResultResponse] = None
     ga: Optional[GAResultResponse] = None
+    waste_assessment: Optional[WasteAssessmentResponse] = None
 
     # Roll count
     rolls_count: int = 0
@@ -186,3 +202,46 @@ class RollPlanResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+# ---------------------------------------------------------------------------
+# Roll Preview (parse-only, no DB save)
+# ---------------------------------------------------------------------------
+
+
+class RollPreviewRow(BaseModel):
+    roll_number: str
+    length_yards: float
+    unit: str = "yd"
+
+
+class RollPreviewResponse(BaseModel):
+    rolls_count: int
+    total_length_yards: float
+    avg_length_yards: float
+    median_length_yards: float
+    min_length_yards: float
+    max_length_yards: float
+    preview_rows: List[RollPreviewRow]  # First 10 rows
+    # Shortfall info (if cutplan_id provided)
+    fabric_required_yards: Optional[float] = None
+    shortfall_yards: Optional[float] = None
+    synthetic_rolls_needed: Optional[int] = None
+    synthetic_roll_length_yards: Optional[float] = None  # median
+
+
+# ---------------------------------------------------------------------------
+# Tune Cutplan
+# ---------------------------------------------------------------------------
+
+
+class TuneCutplanRequest(BaseModel):
+    avg_roll_length_yards: Optional[float] = None   # Auto-derived from pseudo config if None
+    roll_penalty_weight: float = 2.0
+
+
+class TuneStatusResponse(BaseModel):
+    status: str           # "running", "completed", "failed"
+    progress: int
+    message: str
+    new_cutplan_id: Optional[str] = None

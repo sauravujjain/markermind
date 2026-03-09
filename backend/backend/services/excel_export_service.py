@@ -736,3 +736,223 @@ def write_lay_plan_sheet(
             if cell.value:
                 max_len = max(max_len, len(str(cell.value)))
         ws.column_dimensions[col_letter].width = min(max_len + 3, 20)
+
+
+# ---------------------------------------------------------------------------
+# Write roll plan summary sheet
+# ---------------------------------------------------------------------------
+def write_roll_plan_summary_sheet(
+    wb,
+    dockets: List[Dict[str, Any]],
+    waste_data: Dict[str, float],
+) -> None:
+    """
+    Create a 'Roll Plan Summary' sheet with waste stats and docket overview.
+    waste_data keys: total_fabric_yards, unusable_yards, endbit_yards,
+                     returnable_yards, real_waste_yards
+    """
+    ws = wb.create_sheet(title="Roll Plan Summary")
+
+    row = 1
+    ws.cell(row=row, column=1, value="ROLL PLAN SUMMARY").font = TITLE_FONT
+    row += 2
+
+    # Waste stats block
+    total_fabric = waste_data.get("total_fabric_yards", 0)
+    unusable = waste_data.get("unusable_yards", 0)
+    endbit = waste_data.get("endbit_yards", 0)
+    returnable = waste_data.get("returnable_yards", 0)
+    real_waste = waste_data.get("real_waste_yards", 0)
+    waste_pct = (real_waste / total_fabric * 100) if total_fabric > 0 else 0
+
+    ws.cell(row=row, column=1, value="Total Fabric Required:").font = HEADER_FONT
+    ws.cell(row=row, column=2, value=f"{total_fabric:.2f} yd")
+    row += 1
+    ws.cell(row=row, column=1, value="Total Waste:").font = HEADER_FONT
+    ws.cell(row=row, column=2, value=f"{real_waste:.2f} yd ({waste_pct:.1f}%)")
+    row += 1
+    ws.cell(row=row, column=1, value="Breakdown:").font = HEADER_FONT
+    ws.cell(row=row, column=2, value=f"Unusable {unusable:.2f}  |  End-bit {endbit:.2f}  |  Returnable {returnable:.2f}")
+    row += 2
+
+    # Docket overview table
+    headers = [
+        "Cut #", "Marker", "Ratio", "Length (yd)", "Plies",
+        "Planned", "Rolls", "Fabric (yd)", "End Bits (yd)",
+    ]
+    for i, h in enumerate(headers):
+        cell = ws.cell(row=row, column=1 + i, value=h)
+        cell.font = HEADER_FONT
+        cell.fill = HEADER_FILL
+        cell.border = THIN_BORDER
+        cell.alignment = CENTER
+    row += 1
+
+    # Accumulators for totals
+    total_plies = 0
+    total_planned = 0
+    total_rolls = 0
+    total_fabric_used = 0.0
+    total_end_bits = 0.0
+
+    for d_idx, d in enumerate(dockets):
+        plies = d.get("plies", 0)
+        planned = d.get("plies_planned") if d.get("plies_planned") is not None else plies
+        rolls_count = len(d.get("assigned_rolls", []))
+        fabric_used = d.get("total_fabric_yards", 0)
+        end_bits = d.get("total_end_bit_yards", 0)
+
+        total_plies += plies
+        total_planned += planned
+        total_rolls += rolls_count
+        total_fabric_used += fabric_used
+        total_end_bits += end_bits
+
+        is_alt = d_idx % 2 == 1
+        is_shortfall = planned < plies
+
+        def _s(cell, shortfall_highlight=False):
+            cell.border = THIN_BORDER
+            cell.alignment = CENTER
+            if shortfall_highlight and is_shortfall:
+                cell.fill = RED_FILL
+            elif is_alt:
+                cell.fill = ALT_ROW_FILL
+
+        _s(ws.cell(row=row, column=1, value=d.get("cut_number", d_idx + 1)))
+        _s(ws.cell(row=row, column=2, value=d.get("marker_label", "")))
+        _s(ws.cell(row=row, column=3, value=d.get("ratio_str", "")))
+        _s(ws.cell(row=row, column=4, value=round(d.get("marker_length_yards", 0), 2)))
+        _s(ws.cell(row=row, column=5, value=plies))
+        c = ws.cell(row=row, column=6, value=planned)
+        _s(c, shortfall_highlight=True)
+        _s(ws.cell(row=row, column=7, value=rolls_count))
+        _s(ws.cell(row=row, column=8, value=round(fabric_used, 2)))
+        _s(ws.cell(row=row, column=9, value=round(end_bits, 2)))
+        row += 1
+
+    # Totals row
+    for ci in range(1, 1 + len(headers)):
+        cell = ws.cell(row=row, column=ci)
+        cell.fill = TOTAL_ROW_FILL
+        cell.font = TOTAL_ROW_FONT
+        cell.border = THIN_BORDER
+        cell.alignment = CENTER
+
+    ws.cell(row=row, column=1, value="TOTAL").font = TOTAL_ROW_FONT
+    ws.cell(row=row, column=1).fill = TOTAL_ROW_FILL
+    ws.cell(row=row, column=5, value=total_plies)
+    ws.cell(row=row, column=6, value=total_planned)
+    ws.cell(row=row, column=7, value=total_rolls)
+    ws.cell(row=row, column=8, value=round(total_fabric_used, 2))
+    ws.cell(row=row, column=9, value=round(total_end_bits, 2))
+
+    # Auto-fit columns
+    for col in ws.columns:
+        max_len = 0
+        col_letter = col[0].column_letter
+        for cell in col:
+            if cell.value:
+                max_len = max(max_len, len(str(cell.value)))
+        ws.column_dimensions[col_letter].width = min(max_len + 3, 22)
+
+
+# ---------------------------------------------------------------------------
+# Write individual docket sheet
+# ---------------------------------------------------------------------------
+def write_docket_sheet(
+    wb,
+    sheet_name: str,
+    docket: Dict[str, Any],
+) -> None:
+    """
+    Create a per-cut docket sheet with header block and roll assignment table.
+    """
+    safe_name = re.sub(r'[\\/?*\[\]:]', '-', sheet_name)[:31]
+    ws = wb.create_sheet(title=safe_name)
+
+    cut_num = docket.get("cut_number", "?")
+    marker_label = docket.get("marker_label", "")
+    marker_length = docket.get("marker_length_yards", 0)
+    ratio_str = docket.get("ratio_str", "")
+    plies = docket.get("plies", 0)
+    planned = docket.get("plies_planned") if docket.get("plies_planned") is not None else plies
+
+    # Header block
+    row = 1
+    ws.cell(row=row, column=1, value=f"Cut #{cut_num} — Marker: {marker_label}").font = TITLE_FONT
+    row += 1
+    ws.cell(row=row, column=1, value=f"Marker Length: {marker_length:.2f} yd").font = HEADER_FONT
+    ws.cell(row=row, column=3, value=f"Ratio: {ratio_str}").font = HEADER_FONT
+    row += 1
+    plies_str = f"Plies: {planned}/{plies}" if planned != plies else f"Plies: {plies}"
+    ws.cell(row=row, column=1, value=plies_str).font = HEADER_FONT
+    if planned < plies:
+        ws.cell(row=row, column=1).fill = RED_FILL
+    row += 2
+
+    # Roll assignment table
+    headers = ["Roll ID", "Roll Length (yd)", "Source", "Plies", "Fabric Used (yd)", "End Bit (yd)"]
+    for i, h in enumerate(headers):
+        cell = ws.cell(row=row, column=1 + i, value=h)
+        cell.font = HEADER_FONT
+        cell.fill = HEADER_FILL
+        cell.border = THIN_BORDER
+        cell.alignment = CENTER
+    row += 1
+
+    rolls = docket.get("assigned_rolls", [])
+    total_plies = 0
+    total_fabric = 0.0
+    total_endbits = 0.0
+
+    for r_idx, roll in enumerate(rolls):
+        roll_id = roll.get("roll_id", "")
+        roll_length = roll.get("roll_length_yards", 0)
+        roll_plies = roll.get("plies_from_roll", 0)
+        fabric_used = roll.get("fabric_used_yards", 0)
+        end_bit = roll.get("end_bit_yards", 0)
+        source = "Reuse" if "-bit" in str(roll_id) else "Fresh"
+
+        total_plies += roll_plies
+        total_fabric += fabric_used
+        total_endbits += end_bit
+
+        is_alt = r_idx % 2 == 1
+
+        def _s(cell):
+            cell.border = THIN_BORDER
+            cell.alignment = CENTER
+            if is_alt:
+                cell.fill = ALT_ROW_FILL
+
+        _s(ws.cell(row=row, column=1, value=roll_id))
+        _s(ws.cell(row=row, column=2, value=round(roll_length, 2)))
+        _s(ws.cell(row=row, column=3, value=source))
+        _s(ws.cell(row=row, column=4, value=roll_plies))
+        _s(ws.cell(row=row, column=5, value=round(fabric_used, 2)))
+        _s(ws.cell(row=row, column=6, value=round(end_bit, 2)))
+        row += 1
+
+    # Totals row
+    for ci in range(1, 1 + len(headers)):
+        cell = ws.cell(row=row, column=ci)
+        cell.fill = TOTAL_ROW_FILL
+        cell.font = TOTAL_ROW_FONT
+        cell.border = THIN_BORDER
+        cell.alignment = CENTER
+
+    ws.cell(row=row, column=1, value="TOTAL").font = TOTAL_ROW_FONT
+    ws.cell(row=row, column=1).fill = TOTAL_ROW_FILL
+    ws.cell(row=row, column=4, value=total_plies)
+    ws.cell(row=row, column=5, value=round(total_fabric, 2))
+    ws.cell(row=row, column=6, value=round(total_endbits, 2))
+
+    # Auto-fit columns
+    for col in ws.columns:
+        max_len = 0
+        col_letter = col[0].column_letter
+        for cell in col:
+            if cell.value:
+                max_len = max(max_len, len(str(cell.value)))
+        ws.column_dimensions[col_letter].width = min(max_len + 3, 22)
