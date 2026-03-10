@@ -29,11 +29,13 @@ class NestingJob(Base, TimestampMixin):
 
     # Job parameters (stored for reproducibility)
     fabric_width_inches = Column(Float)
+    fabric_widths = Column(JSON, nullable=True)  # Multi-width: list of widths in inches (e.g., [54, 58, 62])
     max_bundle_count = Column(Integer, default=6)
     top_n_results = Column(Integer, default=10)  # Top N results per bundle count
     full_coverage = Column(Boolean, default=False)  # If True, evaluate ALL ratios (brute force)
     gpu_scale = Column(Float, default=0.15)  # Rasterization resolution (px/mm). 0.15=fast, 0.3=demo quality
     selected_sizes = Column(JSON, nullable=True)  # Optional subset of pattern sizes to nest (list of strings)
+    strategy = Column(String(20), default="auto")  # "auto", "brute_force", "lhs_predict"
 
     # Relationships
     order = relationship("Order", back_populates="nesting_jobs")
@@ -53,6 +55,7 @@ class NestingJobResult(Base, TimestampMixin):
     efficiency = Column(Float, nullable=False)  # 0-100%
     length_yards = Column(Float, nullable=False)
     length_mm = Column(Float)
+    fabric_width_inches = Column(Float, nullable=True)  # Width this result was evaluated at
     svg_preview = Column(Text)  # SVG string of marker layout (vector preview)
 
     # Relationships

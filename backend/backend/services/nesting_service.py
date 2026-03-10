@@ -51,17 +51,21 @@ class NestingService:
         full_coverage: bool = False,
         gpu_scale: float = 0.15,
         selected_sizes: list = None,
+        strategy: str = "auto",
+        fabric_widths: list = None,
     ) -> NestingJob:
         """Create a new nesting job."""
         job = NestingJob(
             order_id=order_id,
             pattern_id=pattern_id,
             fabric_width_inches=fabric_width_inches,
+            fabric_widths=fabric_widths,
             max_bundle_count=max_bundle_count,
             top_n_results=top_n_results,
             full_coverage=full_coverage,
             gpu_scale=gpu_scale,
             selected_sizes=selected_sizes,
+            strategy=strategy,
         )
         db.add(job)
         db.commit()
@@ -94,7 +98,8 @@ class NestingService:
         ratio_str: str,
         efficiency: float,
         length_yards: float,
-        length_mm: Optional[float] = None
+        length_mm: Optional[float] = None,
+        fabric_width_inches: Optional[float] = None,
     ) -> NestingJobResult:
         """Save a nesting job result."""
         result = NestingJobResult(
@@ -105,6 +110,7 @@ class NestingService:
             efficiency=efficiency,
             length_yards=length_yards,
             length_mm=length_mm,
+            fabric_width_inches=fabric_width_inches,
         )
         db.add(result)
         db.commit()
@@ -121,15 +127,21 @@ class NestingService:
         length_yards: float,
         length_mm: Optional[float] = None,
         source_type: str = "gpu_nesting",
-        metadata: Optional[Dict] = None
+        metadata: Optional[Dict] = None,
+        fabric_width_inches: Optional[float] = None,
     ) -> MarkerBank:
         """Add a marker to the marker bank."""
-        # Check if marker already exists
-        existing = db.query(MarkerBank).filter(
+        # Check if marker already exists (dedup includes fabric width)
+        query = db.query(MarkerBank).filter(
             MarkerBank.pattern_id == pattern_id,
             MarkerBank.fabric_id == fabric_id,
-            MarkerBank.ratio_str == ratio_str
-        ).first()
+            MarkerBank.ratio_str == ratio_str,
+        )
+        if fabric_width_inches is not None:
+            query = query.filter(MarkerBank.fabric_width_inches == fabric_width_inches)
+        else:
+            query = query.filter(MarkerBank.fabric_width_inches.is_(None))
+        existing = query.first()
 
         if existing:
             # Update if new efficiency is better
@@ -158,6 +170,7 @@ class NestingService:
             efficiency=efficiency,
             length_yards=length_yards,
             length_mm=length_mm,
+            fabric_width_inches=fabric_width_inches,
             source_type=source_type,
             extra_data=metadata or {},
         )
@@ -259,6 +272,7 @@ class NestingService:
                 self.set_preview(job.id, preview_base64, ratio_str, efficiency)
 
             # Result callback - save results incrementally as each bundle_count completes
+            # (only for base width during nesting; extra widths saved in post-processing)
             def save_incremental_results(bundle_count: int, bundle_results: list):
                 for rank, result in enumerate(bundle_results, 1):
                     self.save_result(
@@ -269,6 +283,7 @@ class NestingService:
                         ratio_str=result['ratio_str'],
                         efficiency=result['efficiency'],
                         length_yards=result['length_yards'],
+                        fabric_width_inches=job.fabric_width_inches,
                     )
                     results.append(result)
                 db.commit()  # Commit so frontend can see results immediately
@@ -298,37 +313,62 @@ class NestingService:
                 result_callback=save_incremental_results,
                 cancel_check=check_cancelled,
                 file_type=pattern.file_type,
+                nesting_strategy=job.strategy or "auto",
+                fabric_widths=job.fabric_widths,
             )
 
-            # Results already saved incrementally, now add to marker bank
-            # and update SVG previews (generated at end of nesting)
-            for bundle_count, bundle_results in nesting_results.items():
-                for rank, result in enumerate(bundle_results, 1):
-                    # Add to marker bank (results already saved to job)
-                    self.add_to_marker_bank(
-                        db=db,
-                        pattern_id=pattern.id,
-                        fabric_id=fabric.id,
-                        ratio_str=result['ratio_str'],
-                        efficiency=result['efficiency'],
-                        length_yards=result['length_yards'],
-                        source_type="gpu_nesting",
-                        metadata={
-                            "bundle_count": bundle_count,
-                            "job_id": job.id,
-                            "perimeter_cm": result.get('perimeter_cm', 0),
-                        }
-                    )
+            # nesting_results is now {width_inches: {bc: [results]}}
+            # Base width results were saved incrementally via callback.
+            # Now add to marker bank and save extra-width results.
+            for width_inches, width_results in nesting_results.items():
+                is_base = (width_inches == job.fabric_width_inches) or (
+                    not job.fabric_widths or len(job.fabric_widths) <= 1
+                )
 
-                    # Update SVG preview on the DB result record
-                    svg_preview = result.get('svg_preview')
-                    if svg_preview:
-                        db_result = db.query(NestingJobResult).filter(
-                            NestingJobResult.nesting_job_id == job.id,
-                            NestingJobResult.ratio_str == result['ratio_str'],
-                        ).first()
-                        if db_result:
-                            db_result.svg_preview = svg_preview
+                for bundle_count, bundle_results in width_results.items():
+                    for rank, result in enumerate(bundle_results, 1):
+                        # Save extra-width results to DB (base already saved incrementally)
+                        if not is_base:
+                            self.save_result(
+                                db=db,
+                                job_id=job.id,
+                                bundle_count=bundle_count,
+                                rank=rank,
+                                ratio_str=result['ratio_str'],
+                                efficiency=result['efficiency'],
+                                length_yards=result['length_yards'],
+                                fabric_width_inches=width_inches,
+                            )
+                            results.append(result)
+
+                        # Add to marker bank
+                        self.add_to_marker_bank(
+                            db=db,
+                            pattern_id=pattern.id,
+                            fabric_id=fabric.id,
+                            ratio_str=result['ratio_str'],
+                            efficiency=result['efficiency'],
+                            length_yards=result['length_yards'],
+                            source_type="gpu_nesting",
+                            metadata={
+                                "bundle_count": bundle_count,
+                                "job_id": job.id,
+                                "perimeter_cm": result.get('perimeter_cm', 0),
+                            },
+                            fabric_width_inches=width_inches,
+                        )
+
+                        # Update SVG preview on the DB result record (base width only)
+                        if is_base:
+                            svg_preview = result.get('svg_preview')
+                            if svg_preview:
+                                db_result = db.query(NestingJobResult).filter(
+                                    NestingJobResult.nesting_job_id == job.id,
+                                    NestingJobResult.ratio_str == result['ratio_str'],
+                                    NestingJobResult.fabric_width_inches == width_inches,
+                                ).first()
+                                if db_result:
+                                    db_result.svg_preview = svg_preview
 
             # Mark job complete
             job.status = "completed"

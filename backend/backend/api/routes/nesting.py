@@ -3,7 +3,10 @@ from fastapi import APIRouter, Depends, HTTPException, status, WebSocket, WebSoc
 from sqlalchemy.orm import Session, joinedload, defer
 import asyncio
 import json
+import logging
 import traceback
+
+logger = logging.getLogger(__name__)
 
 from ...database import get_db, SessionLocal
 from ...schemas.nesting import (
@@ -80,6 +83,9 @@ async def create_nesting_job(
     # Clamp gpu_scale to safe range (0.05 - 1.0 px/mm)
     gpu_scale = max(0.05, min(1.0, job_data.gpu_scale))
 
+    # Validate strategy
+    strategy = job_data.strategy if job_data.strategy in ("auto", "brute_force", "lhs_predict") else "auto"
+
     # Create job
     job = nesting_service.create_job(
         db=db,
@@ -91,6 +97,8 @@ async def create_nesting_job(
         full_coverage=job_data.full_coverage,
         gpu_scale=gpu_scale,
         selected_sizes=job_data.selected_sizes,
+        strategy=strategy,
+        fabric_widths=job_data.fabric_widths,
     )
 
     # Update order status to pending_nesting
@@ -415,10 +423,13 @@ async def test_marker(
         )
 
         if use_cloud:
-            # --- Cloud path: anonymize pieces and send to Modal ---
+            # --- Remote path: SSH to Surface nesting worker ---
+            import subprocess
             from ...services.spyrrow_nesting_runner import (
                 _group_pieces_by_name, build_bundle_pieces,
             )
+            from nesting_engine.core.solution import PlacedPiece
+
             grouped = _group_pieces_by_name(nesting_pieces)
             bundle_pieces = build_bundle_pieces(grouped, piece_config, request.size_bundles)
 
@@ -427,53 +438,60 @@ async def test_marker(
 
             effective_width = fabric_width_mm - 2 * edge_buffer_mm
 
-            # Anonymize: strip names, keep only vertices/demand/orientations
-            anonymous_pieces = []
+            # Build job payload: vertices + config (no names sent to remote)
+            remote_pieces = []
             for bp in bundle_pieces:
-                verts = list(bp.piece.vertices)
+                verts = [list(v) for v in bp.piece.vertices]
                 if verts and verts[0] != verts[-1]:
                     verts.append(verts[0])
-                anonymous_pieces.append({
+                remote_pieces.append({
                     "vertices": verts,
                     "demand": 1,
                     "allowed_orientations": [0.0, 180.0] if orientation == "free" else [0.0],
                 })
 
-            # Build config for remote solver
-            cloud_config = {
+            remote_config = {
                 "quadtree_depth": quadtree_depth,
                 "early_termination": early_termination,
                 "seed": 42,
-                "num_workers": 0,  # 0 = auto-detect cores on Modal container
+                "num_workers": 0,
                 "min_items_separation": piece_buffer_mm if piece_buffer_mm > 0 else None,
             }
             if exploration_time_s is not None and compression_time_s is not None:
-                cloud_config["exploration_time"] = exploration_time_s
-                cloud_config["compression_time"] = compression_time_s
+                remote_config["exploration_time"] = exploration_time_s
+                remote_config["compression_time"] = compression_time_s
             else:
-                cloud_config["time_limit_s"] = int(time_limit)
+                remote_config["time_limit_s"] = int(time_limit)
 
-            # Import and call Modal remote_nest
-            import importlib.util
-            from pathlib import Path as _Path
-            benchmark_path = _Path(__file__).parent.parent.parent.parent.parent / "scripts" / "modal_benchmark.py"
-            spec = importlib.util.spec_from_file_location("modal_benchmark", str(benchmark_path))
-            modal_mod = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(modal_mod)
+            job_payload = json.dumps({
+                "pieces": remote_pieces,
+                "strip_width_mm": effective_width,
+                "config": remote_config,
+                "label": ratio_str if 'ratio_str' in dir() else "test",
+            })
 
-            if not modal_mod.MODAL_AVAILABLE:
-                raise HTTPException(status_code=500, detail="Modal not installed on server")
-
-            with modal_mod.app.run():
-                cloud_result = modal_mod.remote_nest.remote(
-                    effective_width, anonymous_pieces, cloud_config
+            # SSH pipe to Surface worker
+            ssh_cmd = [
+                "ssh", "-o", "ConnectTimeout=5", "surface",
+                "source ~/nester/bin/activate && python3 ~/surface_nesting_worker.py --stdin",
+            ]
+            logger.info(f"Dispatching to Surface: {len(remote_pieces)} pieces, width={effective_width:.0f}mm")
+            proc = subprocess.run(
+                ssh_cmd,
+                input=job_payload,
+                capture_output=True,
+                text=True,
+                timeout=int(time_limit) + 30,  # extra 30s for SSH overhead
+            )
+            if proc.returncode != 0:
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Surface nesting failed: {proc.stderr.strip()[-500:]}"
                 )
 
-            # Build solution_data from cloud result for SVG rendering
-            # Map cloud placements back to local bundle_pieces
-            import math as _math
-            from nesting_engine.core.solution import NestingSolution, PlacedPiece
+            cloud_result = json.loads(proc.stdout)
 
+            # Map placements back to local bundle_pieces
             placements = []
             for cp in cloud_result["placements"]:
                 idx = cp["piece_index"]
@@ -488,14 +506,13 @@ async def test_marker(
                         flipped=False,
                     ))
 
-            # Create a mock solution object for SVG export
-            class _CloudSolution:
+            class _RemoteSolution:
                 def __init__(self, strip_length, util_pct, placed):
                     self.strip_length = strip_length
                     self.utilization_percent = util_pct * 100
                     self.placements = placed
 
-            mock_solution = _CloudSolution(
+            mock_solution = _RemoteSolution(
                 cloud_result["strip_length_mm"],
                 cloud_result["utilization"],
                 placements,

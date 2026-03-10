@@ -778,6 +778,138 @@ def export_marker_dxf(
 
 
 # --------------------------------------------------------------------------
+# Remote nesting via Surface SSH
+# --------------------------------------------------------------------------
+
+def nest_single_marker_surface(
+    ratio: Dict[str, int],
+    nesting_pieces: List[Piece],
+    piece_config: Dict[str, dict],
+    fabric_width_mm: float,
+    piece_buffer_mm: float = 0.0,
+    edge_buffer_mm: float = 0.0,
+    time_limit: float = 20.0,
+    rotation_mode: str = "free",
+    quadtree_depth: int = 4,
+    early_termination: bool = True,
+    exploration_time: Optional[int] = None,
+    compression_time: Optional[int] = None,
+    seed: int = 42,
+    seed_screening: bool = False,
+) -> Dict:
+    """
+    Run nesting on the Surface worker via SSH pipe.
+
+    Same interface as nest_single_marker() — builds bundle_pieces locally,
+    sends anonymous vertices to Surface, maps placements back.
+    """
+    import subprocess
+    import json
+    from nesting_engine.core.solution import PlacedPiece
+
+    grouped = _group_pieces_by_name(nesting_pieces)
+    bundle_pieces = build_bundle_pieces(grouped, piece_config, ratio)
+
+    if not bundle_pieces:
+        return {
+            'utilization': 0.0,
+            'strip_length_mm': 0.0,
+            'length_yards': 0.0,
+            'solution': None,
+            'bundle_pieces': [],
+            'computation_time_s': 0.0,
+        }
+
+    effective_width = fabric_width_mm - 2 * edge_buffer_mm
+    orientation = "free" if rotation_mode == "free" else "nap_one_way"
+
+    # Build job payload
+    remote_pieces = []
+    for bp in bundle_pieces:
+        verts = [list(v) for v in bp.piece.vertices]
+        if verts and verts[0] != verts[-1]:
+            verts.append(verts[0])
+        remote_pieces.append({
+            "vertices": verts,
+            "demand": 1,
+            "allowed_orientations": [0.0, 180.0] if orientation == "free" else [0.0],
+        })
+
+    remote_config = {
+        "quadtree_depth": quadtree_depth,
+        "early_termination": early_termination,
+        "seed": seed,
+        "num_workers": 0,
+        "min_items_separation": piece_buffer_mm if piece_buffer_mm > 0 else None,
+    }
+    if exploration_time is not None and compression_time is not None:
+        remote_config["exploration_time"] = exploration_time
+        remote_config["compression_time"] = compression_time
+    else:
+        remote_config["time_limit_s"] = int(time_limit)
+
+    job_payload = json.dumps({
+        "pieces": remote_pieces,
+        "strip_width_mm": effective_width,
+        "config": remote_config,
+        "label": "-".join(str(ratio.get(s, 0)) for s in ratio),
+    })
+
+    ssh_cmd = [
+        "ssh", "-o", "ConnectTimeout=5", "surface",
+        "source ~/nester/bin/activate && python3 ~/surface_nesting_worker.py --stdin",
+    ]
+    logger.info(f"Surface nest: {len(remote_pieces)} pieces, width={effective_width:.0f}mm")
+    proc = subprocess.run(
+        ssh_cmd,
+        input=job_payload,
+        capture_output=True,
+        text=True,
+        timeout=int(time_limit) + 30,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(f"Surface nesting failed: {proc.stderr.strip()[-500:]}")
+
+    result = json.loads(proc.stdout)
+
+    # Map placements back to local bundle_pieces
+    placements = []
+    for cp in result["placements"]:
+        idx = cp["piece_index"]
+        if idx < len(bundle_pieces):
+            bp = bundle_pieces[idx]
+            placements.append(PlacedPiece(
+                piece_id=bp.piece.id,
+                instance_index=0,
+                x=cp["x"],
+                y=cp["y"],
+                rotation=cp["rotation"],
+                flipped=False,
+            ))
+
+    class _RemoteSolution:
+        def __init__(self, strip_length, util_pct, placed):
+            self.strip_length = strip_length
+            self.utilization_percent = util_pct * 100
+            self.placements = placed
+
+    mock_solution = _RemoteSolution(
+        result["strip_length_mm"],
+        result["utilization"],
+        placements,
+    )
+
+    return {
+        'utilization': result["utilization"],
+        'strip_length_mm': result["strip_length_mm"],
+        'length_yards': result["strip_length_mm"] / 914.4,
+        'solution': mock_solution,
+        'bundle_pieces': bundle_pieces,
+        'computation_time_s': result.get("computation_time_s", 0),
+    }
+
+
+# --------------------------------------------------------------------------
 # Full Cutplan Refinement
 # --------------------------------------------------------------------------
 
@@ -800,6 +932,7 @@ def refine_cutplan_markers(
     exploration_time: Optional[int] = None,
     compression_time: Optional[int] = None,
     seed_screening: bool = False,
+    use_surface: bool = False,
 ) -> List[Dict]:
     """
     Refine all markers in a cutplan sequentially with Spyrrow.
@@ -842,8 +975,9 @@ def refine_cutplan_markers(
 
         marker_label = f"M{idx + 1}"
 
-        # Run Spyrrow
-        solution_data = nest_single_marker(
+        # Run Spyrrow (local or Surface)
+        nest_fn = nest_single_marker_surface if use_surface else nest_single_marker
+        solution_data = nest_fn(
             ratio=ratio,
             nesting_pieces=nesting_pieces,
             piece_config=piece_config,

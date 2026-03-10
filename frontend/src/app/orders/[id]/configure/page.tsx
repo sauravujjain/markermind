@@ -45,6 +45,8 @@ export default function ConfigurePage() {
     topN: number
     fullCoverage: boolean
     gpuScale: number
+    strategy: string
+    additionalWidths: string
   }>>({})
   const [activeNestingFabric, setActiveNestingFabric] = useState<string>('')
   const [editablePieces, setEditablePieces] = useState<Record<string, Record<string, { qty: number; leftQty: number; rightQty: number }>>>({})
@@ -89,7 +91,7 @@ export default function ConfigurePage() {
     setEditablePieces(editables)
 
     // Initialize per-fabric nesting config
-    const fabricConfigs: Record<string, { widthInches: number; maxBundles: number; maxMarkerLengthYards: number; topN: number; fullCoverage: boolean; gpuScale: number }> = {}
+    const fabricConfigs: Record<string, { widthInches: number; maxBundles: number; maxMarkerLengthYards: number; topN: number; fullCoverage: boolean; gpuScale: number; strategy: string; additionalWidths: string }> = {}
     orderFabricCodes.forEach(code => {
       const fabric = fabrics.find(f => f.code === code)
       fabricConfigs[code] = {
@@ -99,6 +101,8 @@ export default function ConfigurePage() {
         topN: 10,
         fullCoverage: false,
         gpuScale: 0.15,
+        strategy: 'auto',
+        additionalWidths: '',
       }
     })
     setPerFabricConfig(fabricConfigs)
@@ -204,15 +208,31 @@ export default function ConfigurePage() {
 
     try {
       const fabricConfig = activeNestingFabric ? perFabricConfig[activeNestingFabric] : undefined
+      const primaryWidth = fabricConfig?.widthInches || nestingConfig.fabricWidthInches
+
+      // Parse additional widths into fabric_widths array
+      let fabricWidths: number[] | undefined = undefined
+      if (fabricConfig?.additionalWidths) {
+        const extras = fabricConfig.additionalWidths
+          .split(',')
+          .map(s => parseFloat(s.trim()))
+          .filter(v => !isNaN(v) && v > 0)
+        if (extras.length > 0) {
+          fabricWidths = [primaryWidth, ...extras]
+        }
+      }
+
       await api.createNestingJob({
         order_id: orderId,
         pattern_id: order.pattern_id,
-        fabric_width_inches: fabricConfig?.widthInches || nestingConfig.fabricWidthInches,
+        fabric_width_inches: primaryWidth,
+        fabric_widths: fabricWidths,
         max_bundle_count: fabricConfig?.maxBundles || nestingConfig.maxBundleCount,
         top_n_results: fabricConfig?.topN || nestingConfig.topNResults,
         full_coverage: fabricConfig?.fullCoverage || nestingConfig.fullCoverage,
         gpu_scale: fabricConfig?.gpuScale || 0.15,
         selected_sizes: selectedSizes.length > 0 ? selectedSizes : undefined,
+        strategy: fabricConfig?.strategy || 'auto',
       })
       toast({ title: 'Nesting job started', description: 'The GPU nesting job has been queued' })
       loadData()
@@ -225,6 +245,7 @@ export default function ConfigurePage() {
         topN: String(fabricConfig?.topN || nestingConfig.topNResults),
         fullCoverage: String(fabricConfig?.fullCoverage || nestingConfig.fullCoverage),
         gpuScale: String(fabricConfig?.gpuScale || 0.15),
+        strategy: fabricConfig?.strategy || 'auto',
       })
       router.push(`/orders/${orderId}/nesting?${params.toString()}`)
     } catch (error) {
@@ -501,6 +522,7 @@ export default function ConfigurePage() {
                   topN: 10,
                   fullCoverage: false,
                   gpuScale: 0.15,
+                  strategy: 'auto',
                 }
                 const editables = editablePieces[activeNestingFabric] || {}
                 const totalPiecesPerBundle = pieces.reduce((sum, p) => {
@@ -560,6 +582,21 @@ export default function ConfigurePage() {
                             />
                             <span className="text-muted-foreground">&quot;</span>
                           </div>
+                          <div className="mt-1.5">
+                            <label className="text-muted-foreground/70 block mb-0.5" style={{ fontSize: '10px' }}>Additional Widths</label>
+                            <input
+                              type="text"
+                              value={config.additionalWidths}
+                              onChange={(e) => {
+                                setPerFabricConfig({
+                                  ...perFabricConfig,
+                                  [activeNestingFabric]: { ...config, additionalWidths: e.target.value }
+                                })
+                              }}
+                              placeholder="e.g. 54, 62"
+                              className="w-24 px-2 py-0.5 border rounded text-xs text-muted-foreground"
+                            />
+                          </div>
                         </div>
                         <div>
                           <label className="text-muted-foreground block mb-1">Max Bundles</label>
@@ -618,6 +655,33 @@ export default function ConfigurePage() {
                           <span className="text-xs font-medium">100% Coverage</span>
                         </label>
                         <span className="text-xs text-muted-foreground">(Evaluate all ratio combinations - slower but thorough)</span>
+                      </div>
+                      {/* Nesting Strategy */}
+                      <div className="mt-3 flex items-center gap-3">
+                        <label className="text-xs text-muted-foreground whitespace-nowrap">Strategy</label>
+                        <div className="flex gap-1">
+                          {[
+                            { value: 'auto', label: 'Auto', desc: 'Brute force for small spaces, LHS+predict for large (default)' },
+                            { value: 'brute_force', label: 'Brute Force', desc: 'GPU-evaluate all ratios (thorough but slow for 1000+ ratios)' },
+                            { value: 'lhs_predict', label: 'LHS + Predict', desc: 'Sample 12% via LHS, predict rest with Ridge regression (fast)' },
+                          ].map(opt => (
+                            <button
+                              key={opt.value}
+                              onClick={() => setPerFabricConfig({
+                                ...perFabricConfig,
+                                [activeNestingFabric]: { ...config, strategy: opt.value }
+                              })}
+                              className={`px-2.5 py-1 rounded text-xs font-medium border transition-colors ${
+                                (config.strategy || 'auto') === opt.value
+                                  ? 'bg-primary text-primary-foreground border-primary'
+                                  : 'bg-background text-foreground border-border hover:border-primary/50'
+                              }`}
+                              title={opt.desc}
+                            >
+                              {opt.label}
+                            </button>
+                          ))}
+                        </div>
                       </div>
                       {/* GPU Resolution */}
                       <div className="mt-3 flex items-center gap-3">

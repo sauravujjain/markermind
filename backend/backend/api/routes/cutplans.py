@@ -541,6 +541,7 @@ def execute_refinement_job(
     exploration_time_s: float = None,
     compression_time_s: float = None,
     seed_screening: bool = False,
+    use_surface: bool = False,
 ):
     """Execute CPU refinement in the background."""
     db = SessionLocal()
@@ -730,6 +731,7 @@ def execute_refinement_job(
             exploration_time=int(exploration_time_s) if exploration_time_s else None,
             compression_time=int(compression_time_s) if compression_time_s else None,
             seed_screening=seed_screening,
+            use_surface=use_surface,
         )
 
         elapsed = time.time() - _refinement_jobs[cutplan_id]["started_at"]
@@ -825,6 +827,7 @@ async def start_refinement(
         exploration_time_s=request.exploration_time_s,
         compression_time_s=request.compression_time_s,
         seed_screening=request.seed_screening,
+        use_surface=request.use_cloud,
     )
 
     return {"message": "Refinement started", "cutplan_id": cutplan_id}

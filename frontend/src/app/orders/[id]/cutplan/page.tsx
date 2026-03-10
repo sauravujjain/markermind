@@ -709,7 +709,9 @@ export default function CutplanPage() {
                           {[...plan.markers].sort((a, b) => (b.length_yards || 0) - (a.length_yards || 0)).map((marker, idx) => {
                             const ratioValues = marker.ratio_str.split('-').map(v => parseInt(v) || 0)
                             const bundles = ratioValues.reduce((a, b) => a + b, 0)
-                            const gpuWidth = nestingJobs.find(j => j.status === 'completed')?.fabric_width_inches
+                            const completedJob = nestingJobs.find(j => j.status === 'completed')
+                            const markerResult = completedJob?.results?.find(r => r.ratio_str === marker.ratio_str)
+                            const markerWidth = markerResult?.fabric_width_inches || completedJob?.fabric_width_inches
                             return (
                               <tr key={marker.id || idx} className="border-b border-border/50 hover:bg-muted/20">
                                 <td className="py-2 px-3 font-medium">{marker.marker_label || `M${idx + 1}`}</td>
@@ -724,7 +726,7 @@ export default function CutplanPage() {
                                   </span>
                                 </td>
                                 <td className="text-center py-2 px-3 text-xs text-muted-foreground">
-                                  {gpuWidth ? `${gpuWidth}"` : '-'}
+                                  {markerWidth ? `${markerWidth}"` : '-'}
                                 </td>
                                 <td className="text-center py-2 px-3 tabular-nums font-medium">{marker.total_plies}</td>
                                 <td className="text-center py-2 px-3 tabular-nums">{marker.cuts}</td>
@@ -840,6 +842,7 @@ export default function CutplanPage() {
                           if (config.edge_buffer_mm > 0) paramParts.push(`eb${config.edge_buffer_mm}`)
                           if (config.rotation_mode === 'nap_one_way') paramParts.push('nap')
                           if (config.seed_screening) paramParts.push('seed-screen')
+                          if (config.use_cloud) paramParts.push('surface')
                           const paramSummary = paramParts.join(' ')
 
                           return (
@@ -976,6 +979,17 @@ export default function CutplanPage() {
                               </label>
                             </div>
 
+                            {/* Row 5: Surface CPU */}
+                            <div className="flex items-center gap-3">
+                              <label className="text-xs font-medium text-muted-foreground w-28 shrink-0">Compute</label>
+                              <label className="flex items-center gap-1.5 text-xs text-muted-foreground cursor-pointer">
+                                <input type="checkbox" checked={config.use_cloud || false}
+                                  onChange={(e) => setRefinementConfig(cpId, { ...config, use_cloud: e.target.checked })}
+                                  className="rounded" />
+                                Surface CPU (remote)
+                              </label>
+                            </div>
+
                             {/* Summary + Start button */}
                             <div className="flex items-center justify-between pt-1 border-t border-border/50">
                               <div>
@@ -1024,7 +1038,12 @@ export default function CutplanPage() {
                           const layouts = refStatus!.layouts
                           const expanded = expandedMarkers[cpId] || new Set<number>()
                           const allExpanded = expanded.size === layouts.length
-                          const fabricWidth = nestingJobs.find(j => j.status === 'completed')?.fabric_width_inches
+                          const completedJob = nestingJobs.find(j => j.status === 'completed')
+                          const defaultFabricWidth = completedJob?.fabric_width_inches
+                          const lookupWidth = (ratioStr: string) => {
+                            const result = completedJob?.results?.find(r => r.ratio_str === ratioStr)
+                            return result?.fabric_width_inches || defaultFabricWidth
+                          }
 
                           const toggleMarker = (idx: number) => {
                             setExpandedMarkers(prev => {
@@ -1093,8 +1112,8 @@ export default function CutplanPage() {
                                         : <ChevronRight className="h-4 w-4 text-muted-foreground shrink-0" />
                                       }
                                       <span className="font-semibold text-sm w-8 shrink-0">{layout.marker_label || `M${idx + 1}`}</span>
-                                      {fabricWidth && (
-                                        <span className="text-xs text-muted-foreground shrink-0">{fabricWidth}&quot;W</span>
+                                      {lookupWidth(layout.ratio_str) && (
+                                        <span className="text-xs text-muted-foreground shrink-0">{lookupWidth(layout.ratio_str)}&quot;W</span>
                                       )}
                                       <span className="text-xs text-muted-foreground flex-1 truncate font-mono">
                                         {formatRatio(layout.ratio_str)}

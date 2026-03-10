@@ -650,11 +650,13 @@ export interface NestingJobCreate {
   order_id: string
   pattern_id: string
   fabric_width_inches: number
+  fabric_widths?: number[]  // Multi-width: e.g. [54, 58, 62]. Overrides fabric_width_inches if set.
   max_bundle_count?: number
   top_n_results?: number
   full_coverage?: boolean
   gpu_scale?: number  // px/mm resolution. 0.15=fast (default), 0.3=demo quality
   selected_sizes?: string[]  // Subset of pattern sizes to nest; omit = all sizes
+  strategy?: string  // "auto" (default), "brute_force", "lhs_predict"
 }
 
 export interface NestingJob {
@@ -666,10 +668,12 @@ export interface NestingJob {
   progress_message?: string
   error_message?: string
   fabric_width_inches?: number
+  fabric_widths?: number[]
   max_bundle_count: number
   top_n_results: number
   full_coverage: boolean
   gpu_scale: number
+  strategy: string
   results: NestingJobResult[]
   created_at: string
   updated_at: string
@@ -684,6 +688,7 @@ export interface NestingJobResult {
   efficiency: number
   length_yards: number
   length_mm?: number
+  fabric_width_inches?: number
   svg_preview?: string
 }
 
