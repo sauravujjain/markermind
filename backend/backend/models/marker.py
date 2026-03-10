@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, ForeignKey, Float, Enum as SQLEnum, JSON
+from sqlalchemy import Column, String, ForeignKey, Float, Enum as SQLEnum, JSON, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 from ..database import Base
@@ -24,6 +24,7 @@ class MarkerBank(Base, TimestampMixin):
     efficiency = Column(Float, nullable=False)  # 0-100%
     length_yards = Column(Float, nullable=False)
     length_mm = Column(Float)
+    fabric_width_inches = Column(Float, nullable=True)  # Fabric width this marker was evaluated at
     source_type = Column(SQLEnum(MarkerSourceType, name="markersourcetype", create_type=False), default=MarkerSourceType.gpu_nesting)
     extra_data = Column(JSON, default=dict)  # Additional data (sorting strategy, etc.)
 

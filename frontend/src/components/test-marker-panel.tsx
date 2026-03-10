@@ -639,7 +639,7 @@ export function TestMarkerPanel({ pattern, fabricWidthInches, orderId }: TestMar
                   <button onClick={() => setUseCloud(true)}
                     className={`px-2.5 py-1 rounded text-xs font-medium border transition-colors flex items-center gap-1 ${
                       useCloud ? 'bg-blue-600 text-white border-blue-600' : 'bg-white text-foreground border-border hover:border-blue-400'
-                    }`}><Cloud className="h-3 w-3" />Cloud (16 vCPU)</button>
+                    }`}><Cloud className="h-3 w-3" />Surface CPU</button>
                 </div>
               </div>
               <div className="flex items-center gap-3">

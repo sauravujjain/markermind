@@ -30,6 +30,12 @@ This applies to:
 
 ---
 
+## CRITICAL: GPU Nesting — Bundle Counts 1 and 2 Always Brute-Forced
+
+**Bundle counts 1 and 2 MUST ALWAYS be brute-forced in GPU nesting.** They have trivially few ratios (≤28 for 7 sizes), complete in seconds, and their results are saved to the marker bank. Never apply sampling, prediction, or any shortcut to bc=1 or bc=2. This is a hard rule across all future iterations of GPU nesting.
+
+---
+
 ## CRITICAL: Testing First Requirement
 
 **Before any design, improvement, or feature work, you MUST first complete the full workflow test through the web application using Puppeteer.**
@@ -307,6 +313,7 @@ For in-depth algorithm documentation, see:
 | [`docs/cutplan_optimizer.md`](docs/cutplan_optimizer.md) | ILP cutplan optimization: single-color, multicolor joint, two-stage solvers |
 | [`docs/cutting_costs.md`](docs/cutting_costs.md) | Cost calculation methodology: fabric, spreading, cutting, prep costs |
 | [`docs/production_deployment.md`](docs/production_deployment.md) | **Production deployment guide**: GCP architecture, Cloud Run GPU, multi-tenant subdomain routing, pricing, cost analysis |
+| [`docs/multi_width_nesting.md`](docs/multi_width_nesting.md) | Multi-width GPU nesting: cross-width Ridge prediction, sampling strategy |
 
 ## GPU Raster Nesting (Fast Marker Algorithm)
 

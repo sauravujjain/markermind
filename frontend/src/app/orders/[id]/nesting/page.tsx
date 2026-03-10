@@ -16,6 +16,7 @@ interface MarkerResult {
   lengthYards: number
   rank: number
   svgPreview?: string
+  fabricWidthInches?: number
 }
 
 export default function NestingProgressPage() {
@@ -41,6 +42,7 @@ export default function NestingProgressPage() {
   const [startTime, setStartTime] = useState<number | null>(null)
   const [selectedMarkerIdx, setSelectedMarkerIdx] = useState<number | null>(null)
   const [showConfigDetails, setShowConfigDetails] = useState(false)
+  const [activeWidthTab, setActiveWidthTab] = useState<number | null>(null)
 
   const timerRef = useRef<NodeJS.Timeout | null>(null)
   const pollingRef = useRef<NodeJS.Timeout | null>(null)
@@ -128,6 +130,7 @@ export default function NestingProgressPage() {
               lengthYards: r.length_yards,
               rank: r.rank,
               svgPreview: r.svg_preview || undefined,
+              fabricWidthInches: r.fabric_width_inches,
             }))
             .sort((a, b) => b.efficiency - a.efficiency)
           setMarkers(sortedResults)
@@ -184,6 +187,7 @@ export default function NestingProgressPage() {
               lengthYards: r.length_yards,
               rank: r.rank,
               svgPreview: r.svg_preview || undefined,
+              fabricWidthInches: r.fabric_width_inches,
             }))
             .sort((a, b) => b.efficiency - a.efficiency)
 
@@ -323,7 +327,18 @@ export default function NestingProgressPage() {
     )
   }
 
-  const bestMarker = markers.length > 0 ? markers[0] : null
+  // Multi-width: derive available widths and filter markers
+  const availableWidths = (() => {
+    const widthSet = new Set<number>()
+    markers.forEach(m => { if (m.fabricWidthInches) widthSet.add(m.fabricWidthInches) })
+    return Array.from(widthSet).sort((a, b) => b - a) // widest first
+  })()
+  const isMultiWidth = availableWidths.length > 1
+  const filteredMarkers = isMultiWidth && activeWidthTab !== null
+    ? markers.filter(m => m.fabricWidthInches === activeWidthTab)
+    : markers
+
+  const bestMarker = filteredMarkers.length > 0 ? filteredMarkers[0] : null
   const progress = nestingJob?.progress || 0
 
   return (
@@ -588,6 +603,33 @@ export default function NestingProgressPage() {
                   <CardDescription>
                     Sorted by efficiency — {isNesting ? 'updating live' : markers.length > 0 ? 'nesting complete' : 'waiting to start'}
                   </CardDescription>
+                  {isMultiWidth && (
+                    <div className="flex gap-1 mt-2">
+                      <button
+                        onClick={() => setActiveWidthTab(null)}
+                        className={`px-2 py-0.5 rounded text-xs transition-colors ${
+                          activeWidthTab === null
+                            ? 'bg-primary text-primary-foreground'
+                            : 'bg-muted text-muted-foreground hover:bg-muted/80'
+                        }`}
+                      >
+                        All ({markers.length})
+                      </button>
+                      {availableWidths.map(w => (
+                        <button
+                          key={w}
+                          onClick={() => setActiveWidthTab(w)}
+                          className={`px-2 py-0.5 rounded text-xs transition-colors ${
+                            activeWidthTab === w
+                              ? 'bg-primary text-primary-foreground'
+                              : 'bg-muted text-muted-foreground hover:bg-muted/80'
+                          }`}
+                        >
+                          {w}&quot; ({markers.filter(m => m.fabricWidthInches === w).length})
+                        </button>
+                      ))}
+                    </div>
+                  )}
                 </div>
                 <div className="flex items-center gap-2">
                   {newMarkerRatios.size > 0 && (
@@ -625,17 +667,18 @@ export default function NestingProgressPage() {
                         <th className="text-left py-2 px-3 font-medium">#</th>
                         <th className="text-left py-2 px-3 font-medium">Ratio</th>
                         <th className="text-center py-2 px-3 font-medium">Bundles</th>
+                        {isMultiWidth && <th className="text-center py-2 px-3 font-medium">Width</th>}
                         <th className="text-center py-2 px-3 font-medium">Efficiency</th>
                       </tr>
                     </thead>
                     <tbody>
-                      {markers.map((marker, idx) => {
+                      {filteredMarkers.map((marker, idx) => {
                         const effPercent = marker.efficiency * 100
                         const isNew = newMarkerRatios.has(marker.ratio)
                         const isSelected = selectedMarkerIdx === idx
                         return (
                           <tr
-                            key={marker.ratio}
+                            key={`${marker.ratio}-${marker.fabricWidthInches || ''}`}
                             className={`border-b border-border/50 transition-colors cursor-pointer ${
                               isSelected ? 'bg-primary/10 ring-1 ring-primary/30' :
                               isNew ? 'marker-new-row' :
@@ -655,6 +698,11 @@ export default function NestingProgressPage() {
                                 {marker.bundles}
                               </span>
                             </td>
+                            {isMultiWidth && (
+                              <td className="py-2 px-3 text-center text-xs text-muted-foreground">
+                                {marker.fabricWidthInches ? `${marker.fabricWidthInches}"` : '-'}
+                              </td>
+                            )}
                             <td className="py-2 px-3 text-center">
                               <span className={`font-medium ${
                                 effPercent >= 80 ? 'text-green-600 dark:text-green-400' :
@@ -666,9 +714,9 @@ export default function NestingProgressPage() {
                           </tr>
                         )
                       })}
-                      {markers.length === 0 && (
+                      {filteredMarkers.length === 0 && (
                         <tr>
-                          <td colSpan={4} className="py-8 text-center text-muted-foreground">
+                          <td colSpan={isMultiWidth ? 5 : 4} className="py-8 text-center text-muted-foreground">
                             {isNesting ? 'Finding markers...' : 'No markers yet. Start nesting to see results.'}
                           </td>
                         </tr>

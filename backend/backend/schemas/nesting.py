@@ -7,11 +7,13 @@ class NestingJobCreate(BaseModel):
     order_id: str
     pattern_id: str
     fabric_width_inches: float
+    fabric_widths: Optional[List[float]] = None  # Multi-width: e.g. [54, 58, 62]. Overrides fabric_width_inches if set.
     max_bundle_count: int = 6
     top_n_results: int = 10
     full_coverage: bool = False  # If True, evaluate ALL ratios (brute force / 100% coverage)
     gpu_scale: float = 0.15     # Rasterization resolution (px/mm). Default 0.15, use 0.3 for higher-quality demos
     selected_sizes: Optional[List[str]] = None  # Subset of pattern sizes to nest; None = all sizes
+    strategy: str = "auto"      # "auto", "brute_force", "lhs_predict"
 
 
 class NestingJobResultResponse(BaseModel):
@@ -23,6 +25,7 @@ class NestingJobResultResponse(BaseModel):
     efficiency: float
     length_yards: float
     length_mm: Optional[float]
+    fabric_width_inches: Optional[float] = None
     svg_preview: Optional[str] = None
 
     class Config:
@@ -39,6 +42,7 @@ class NestingJobResultSummary(BaseModel):
     efficiency: float
     length_yards: float
     length_mm: Optional[float]
+    fabric_width_inches: Optional[float] = None
 
     class Config:
         from_attributes = True
@@ -53,10 +57,12 @@ class NestingJobResponse(BaseModel):
     progress_message: Optional[str]
     error_message: Optional[str]
     fabric_width_inches: Optional[float]
+    fabric_widths: Optional[List[float]] = None
     max_bundle_count: int
     top_n_results: int
     full_coverage: bool = False
     gpu_scale: float = 0.15
+    strategy: str = "auto"
     results: List[NestingJobResultResponse] = []
     created_at: datetime
     updated_at: datetime
@@ -75,10 +81,12 @@ class NestingJobListResponse(BaseModel):
     progress_message: Optional[str]
     error_message: Optional[str]
     fabric_width_inches: Optional[float]
+    fabric_widths: Optional[List[float]] = None
     max_bundle_count: int
     top_n_results: int
     full_coverage: bool = False
     gpu_scale: float = 0.15
+    strategy: str = "auto"
     results: List[NestingJobResultSummary] = []
     created_at: datetime
     updated_at: datetime

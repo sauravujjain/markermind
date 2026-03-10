@@ -8,15 +8,17 @@ for integration into the MarkerMind backend services.
 import math
 import sys
 import time
-import random
 import io
 import base64
+import logging
 from pathlib import Path
 from typing import Dict, List, Tuple, Callable, Optional
 from itertools import combinations_with_replacement
 
 import numpy as np
 from PIL import Image, ImageDraw
+
+logger = logging.getLogger(__name__)
 
 # Add MarkerMind project root to path so nesting_engine is importable
 PROJECT_ROOT = Path(__file__).parent.parent.parent.parent
@@ -57,9 +59,19 @@ DEFAULT_GPU_SCALE = 0.15  # px/mm
 DEFAULT_PIECE_BUFFER = 0  # pixels
 DEFAULT_EDGE_BUFFER = 0
 
-# Ratio evaluation parameters
-BRUTE_FORCE_THRESHOLD = 1000  # Brute-force all ratios below this count
-RANDOM_SAMPLE_SIZE = 300      # Sample size for large search spaces (> threshold)
+# Adaptive nesting parameters
+WHOLE_ORDER_THRESHOLD = 1500   # Brute-force ALL BCs when total ratios ≤ this
+LHS_SAMPLE_RATE = 0.12         # 12% LHS sampling rate per BC in adaptive mode
+LHS_SAMPLE_MIN = 50            # Floor: never sample fewer than this
+LHS_SAMPLE_MAX = 500           # Cap: never sample more than this per BC
+BASE_MAX_BC = 12               # Explore up to this BC in Phase 1 (adaptive sampling)
+SEED_COUNT = 30                # Top diverse seeds per productive BC for multiplier expansion
+PLATEAU_DELTA = 0.003          # Efficiency improvement threshold (0.3%) for plateau detection
+NEIGHBORHOOD_TOP_N = 100       # Top multiplied candidates to perturb in Phase 4
+CROSS_WIDTH_SAMPLE_RATE = 0.10   # 10% of bc=3+ base results sampled per extra width
+CROSS_WIDTH_SAMPLE_MIN = 15      # Floor: never fewer than this
+CROSS_WIDTH_SAMPLE_MAX = 100     # Cap: never more than this
+CROSS_WIDTH_TOP_N_VERIFY = 25    # GPU-verify top-N predicted ratios per extra width
 
 
 class GPUPacker:
@@ -786,6 +798,823 @@ class NestingCancelled(Exception):
     pass
 
 
+# ---------------------------------------------------------------------------
+# LHS + Ridge Prediction Pipeline
+# ---------------------------------------------------------------------------
+
+def _extract_geometry(
+    pieces_by_size: Dict[str, List[Dict]],
+    sizes: List[str],
+    fabric_width_mm: float,
+    gpu_scale: float,
+) -> Dict:
+    """
+    Extract per-piece per-size geometry features from already-loaded pieces.
+
+    Returns a dict with:
+      piece_names: list of unique piece names (consistent order)
+      demands: {piece_name: demand}
+      features: {(piece_name, size): {area_mm2, perimeter_mm, bbox_width_mm, bbox_height_mm, bbox_width_ratio}}
+      bundle_area: {size: total area in mm² for one bundle}
+      max_piece_width: {size: widest piece in mm}
+    """
+    # Collect unique piece names (from first size that has pieces)
+    piece_names = []
+    seen = set()
+    for size in sizes:
+        for p in pieces_by_size.get(size, []):
+            if p['name'] not in seen:
+                piece_names.append(p['name'])
+                seen.add(p['name'])
+
+    demands = {}
+    features = {}
+    bundle_area = {}
+    max_piece_width = {}
+
+    for size in sizes:
+        size_pieces = pieces_by_size.get(size, [])
+        total_area = 0.0
+        max_w = 0.0
+
+        for p in size_pieces:
+            name = p['name']
+            demands[name] = p['demand']
+
+            verts = p['vertices_mm']
+            xs = [v[0] for v in verts]
+            ys = [v[1] for v in verts]
+            bbox_w = max(xs) - min(xs) if xs else 0
+            bbox_h = max(ys) - min(ys) if ys else 0
+            area_mm2 = p['area'] / (gpu_scale ** 2)  # convert pixel area back to mm²
+            perimeter_mm = _compute_perimeter_mm(verts)
+
+            features[(name, size)] = {
+                'area_mm2': area_mm2,
+                'perimeter_mm': perimeter_mm,
+                'bbox_width_mm': bbox_w,
+                'bbox_height_mm': bbox_h,
+                'bbox_width_ratio': bbox_w / fabric_width_mm if fabric_width_mm > 0 else 0,
+            }
+
+            total_area += area_mm2 * p['demand']
+            max_w = max(max_w, bbox_w)
+
+        bundle_area[size] = total_area
+        max_piece_width[size] = max_w
+
+    return {
+        'piece_names': piece_names,
+        'demands': demands,
+        'features': features,
+        'bundle_area': bundle_area,
+        'max_piece_width': max_piece_width,
+    }
+
+
+def _lhs_sample(
+    all_ratios: List[Dict[str, int]],
+    sizes: List[str],
+    sample_size: int,
+) -> List[Dict[str, int]]:
+    """
+    Latin Hypercube Sampling on the discrete ratio space.
+
+    1. Normalize each ratio to proportions (sum-to-1 vector)
+    2. Generate LHS points in [0,1]^n_sizes
+    3. Map each LHS point to nearest actual ratio (greedy, no duplicates)
+    4. Always include boundary ratios (single-size ratios)
+    """
+    from scipy.stats.qmc import LatinHypercube
+
+    n_sizes = len(sizes)
+    n_ratios = len(all_ratios)
+
+    if sample_size >= n_ratios:
+        return list(all_ratios)
+
+    # Convert ratios to proportion vectors for distance calculation
+    ratio_props = np.zeros((n_ratios, n_sizes))
+    for i, ratio in enumerate(all_ratios):
+        vals = [ratio.get(s, 0) for s in sizes]
+        total = sum(vals)
+        if total > 0:
+            ratio_props[i] = [v / total for v in vals]
+
+    # Identify boundary ratios (single-size: all bundles in one size)
+    boundary_indices = set()
+    for i, ratio in enumerate(all_ratios):
+        nonzero = [s for s in sizes if ratio.get(s, 0) > 0]
+        if len(nonzero) == 1:
+            boundary_indices.add(i)
+
+    # Generate LHS points
+    n_lhs = min(sample_size - len(boundary_indices), n_ratios - len(boundary_indices))
+    if n_lhs <= 0:
+        # Boundaries already fill the sample
+        return [all_ratios[i] for i in list(boundary_indices)[:sample_size]]
+
+    sampler = LatinHypercube(d=n_sizes, seed=42)
+    lhs_points = sampler.random(n=n_lhs)
+
+    # Map each LHS point to nearest unused ratio (greedy)
+    used = set(boundary_indices)
+    selected = list(boundary_indices)
+
+    for pt in lhs_points:
+        if len(selected) >= sample_size:
+            break
+        # Find nearest unused ratio
+        best_idx = -1
+        best_dist = float('inf')
+        for j in range(n_ratios):
+            if j in used:
+                continue
+            dist = np.sum((ratio_props[j] - pt) ** 2)
+            if dist < best_dist:
+                best_dist = dist
+                best_idx = j
+        if best_idx >= 0:
+            selected.append(best_idx)
+            used.add(best_idx)
+
+    return [all_ratios[i] for i in selected]
+
+
+def _lhs_predict_ratios(
+    all_ratios: List[Dict[str, int]],
+    sample_results: List[Dict],
+    sizes: List[str],
+    geom: Dict,
+    fabric_width_mm: float,
+    gpu_scale: float,
+    strip_width_px: int,
+    pieces_by_size: Dict[str, List[Dict]],
+) -> List[Dict]:
+    """
+    Train Ridge on GPU-evaluated sample, predict length for all remaining ratios.
+
+    Returns list of result dicts for predicted ratios (same format as evaluate_ratio output),
+    tagged with source="predicted".
+    """
+    from sklearn.linear_model import Ridge
+
+    piece_names = geom['piece_names']
+    demands = geom['demands']
+
+    def _build_features(ratio: Dict[str, int]) -> List[float]:
+        """Build feature vector for a single ratio."""
+        feats = []
+        bc = sum(ratio.get(s, 0) for s in sizes)
+        if bc == 0:
+            bc = 1
+
+        # Group 1: Ratio features
+        props = [ratio.get(s, 0) / bc for s in sizes]
+        feats.extend(props)
+        feats.append(bc)
+
+        # Total bundle area (mm²) for this ratio
+        total_area = sum(
+            ratio.get(s, 0) * geom['bundle_area'].get(s, 0)
+            for s in sizes
+        )
+        feats.append(total_area)
+
+        # Max piece width ratio
+        max_wr = max(
+            (geom['max_piece_width'].get(s, 0) / fabric_width_mm
+             if ratio.get(s, 0) > 0 and fabric_width_mm > 0 else 0)
+            for s in sizes
+        )
+        feats.append(max_wr)
+
+        # Group 2: Ratio × geometry cross features
+        for s in sizes:
+            s_count = ratio.get(s, 0)
+            if s_count > 0:
+                feats.append(s_count * geom['bundle_area'].get(s, 0))
+                feats.append(s_count * geom['max_piece_width'].get(s, 0))
+            else:
+                feats.append(0)
+                feats.append(0)
+
+        # Group 3: Pairwise interactions (proportion products)
+        for i in range(len(sizes)):
+            for j in range(i + 1, len(sizes)):
+                feats.append(props[i] * props[j])
+
+        return feats
+
+    # Build feature matrices
+    # Sample features + targets (strip length in px for numerical stability)
+    sample_ratio_strs = {r['ratio_str'] for r in sample_results}
+    sample_map = {r['ratio_str']: r for r in sample_results}
+
+    X_train = []
+    y_train = []
+    for r in sample_results:
+        ratio = r['ratio']
+        X_train.append(_build_features(ratio))
+        # Target: length in yards (directly useful)
+        y_train.append(r['length_yards'])
+
+    X_train = np.array(X_train)
+    y_train = np.array(y_train)
+
+    if len(X_train) < 5:
+        logger.warning("LHS predict: too few samples (%d), skipping prediction", len(X_train))
+        return []
+
+    # Train Ridge
+    model = Ridge(alpha=1.0)
+    model.fit(X_train, y_train)
+
+    # Training R² for logging
+    y_pred_train = model.predict(X_train)
+    ss_res = np.sum((y_train - y_pred_train) ** 2)
+    ss_tot = np.sum((y_train - np.mean(y_train)) ** 2)
+    r2 = 1 - ss_res / ss_tot if ss_tot > 0 else 0
+    logger.info("LHS Ridge R²=%.4f on %d training samples", r2, len(X_train))
+
+    # Predict remaining ratios
+    predicted = []
+    for ratio in all_ratios:
+        rstr = ratio_to_str(ratio, sizes)
+        if rstr in sample_ratio_strs:
+            continue  # Already GPU-evaluated
+
+        feats = _build_features(ratio)
+        pred_length_yards = float(model.predict([feats])[0])
+        if pred_length_yards <= 0:
+            pred_length_yards = 0.001  # Avoid division by zero
+
+        # Compute efficiency from predicted length
+        bc = sum(ratio.get(s, 0) for s in sizes)
+        total_piece_area_px = 0
+        for size, count in ratio.items():
+            if count <= 0 or size not in pieces_by_size:
+                continue
+            for _ in range(count):
+                for p in pieces_by_size[size]:
+                    total_piece_area_px += p['area'] * p['demand']
+
+        pred_length_px = pred_length_yards * 25.4 * 36 * gpu_scale
+        strip_area = strip_width_px * pred_length_px if pred_length_px > 0 else 1
+        eff = total_piece_area_px / strip_area if strip_area > 0 else 0
+        eff = max(0, min(1, eff))  # clamp
+
+        # Estimate perimeter (sum of all piece perimeters for this ratio)
+        total_perimeter_mm = 0
+        for size, count in ratio.items():
+            if count <= 0 or size not in pieces_by_size:
+                continue
+            for _ in range(count):
+                for p in pieces_by_size[size]:
+                    for _ in range(p['demand']):
+                        total_perimeter_mm += _compute_perimeter_mm(p['vertices_mm'])
+
+        predicted.append({
+            'ratio': ratio,
+            'ratio_str': rstr,
+            'efficiency': eff,
+            'length_yards': pred_length_yards,
+            'bundle_count': bc,
+            'perimeter_cm': total_perimeter_mm / 10.0,
+            'source': 'predicted',
+        })
+
+    return predicted
+
+
+# ---------------------------------------------------------------------------
+# Adaptive Nesting Helpers
+# ---------------------------------------------------------------------------
+
+def _compute_total_ratios(n_sizes: int, max_bc: int) -> int:
+    """Sum of C(n_sizes + bc - 1, bc) for bc=1..max_bc."""
+    total = 0
+    for bc in range(1, max_bc + 1):
+        total += math.comb(n_sizes + bc - 1, bc)
+    return total
+
+
+def _detect_plateau(results_by_bc: Dict[int, List[Dict]]) -> Tuple[int, List[int]]:
+    """
+    Detect efficiency plateau and return productive BCs.
+
+    Returns:
+        (plateau_bc, productive_bcs) where productive_bcs are BCs whose best
+        efficiency is within 3% of plateau.
+    """
+    explored = sorted(results_by_bc.keys())
+    if not explored:
+        return 3, []
+
+    best_eff = {}
+    for bc in explored:
+        if results_by_bc[bc]:
+            best_eff[bc] = max(r['efficiency'] for r in results_by_bc[bc])
+        else:
+            best_eff[bc] = 0.0
+
+    # Find plateau: Δeff < 0.3% for 2 consecutive BCs
+    plateau_bc = explored[-1]
+    for i, bc in enumerate(explored):
+        if bc < 4:
+            continue
+        prev_bc = explored[i - 1] if i > 0 else None
+        if prev_bc is None:
+            continue
+        delta = best_eff.get(bc, 0) - best_eff.get(prev_bc, 0)
+        if delta < PLATEAU_DELTA:
+            # Check next BC too
+            next_bc = explored[i + 1] if i + 1 < len(explored) else None
+            if next_bc and best_eff.get(next_bc, 0) - best_eff.get(bc, 0) < PLATEAU_DELTA:
+                plateau_bc = prev_bc
+                break
+
+    # Productive BCs: those within 3% of plateau best efficiency
+    plateau_eff = best_eff.get(plateau_bc, 0)
+    productive_bcs = [
+        bc for bc in explored
+        if bc >= 3 and best_eff.get(bc, 0) >= plateau_eff - 0.03
+    ]
+
+    return plateau_bc, productive_bcs
+
+
+def _select_seeds(
+    results_by_bc: Dict[int, List[Dict]],
+    productive_bcs: List[int],
+    sizes: List[str],
+    n: int = SEED_COUNT,
+) -> Dict[int, List[Dict[str, int]]]:
+    """
+    Select top-n diverse seed ratios from each productive BC.
+
+    Diversity: greedy farthest-first selection in proportion space after
+    picking the top result by efficiency.
+    """
+    seeds = {}
+    for bc in productive_bcs:
+        bc_results = results_by_bc.get(bc, [])
+        if not bc_results:
+            continue
+
+        # Sort by efficiency descending
+        sorted_results = sorted(bc_results, key=lambda r: -r['efficiency'])
+
+        if len(sorted_results) <= n:
+            seeds[bc] = [r['ratio'] for r in sorted_results]
+            continue
+
+        # Greedy farthest-first for diversity
+        n_sizes = len(sizes)
+        selected = [sorted_results[0]]  # Start with best
+        selected_props = []
+
+        def _to_props(ratio):
+            vals = [ratio.get(s, 0) for s in sizes]
+            total = sum(vals)
+            return [v / total for v in vals] if total > 0 else [0] * n_sizes
+
+        selected_props.append(_to_props(selected[0]['ratio']))
+
+        remaining = sorted_results[1:]
+        while len(selected) < n and remaining:
+            best_idx = -1
+            best_min_dist = -1
+            for i, r in enumerate(remaining):
+                props = _to_props(r['ratio'])
+                min_dist = min(
+                    sum((a - b) ** 2 for a, b in zip(props, sp))
+                    for sp in selected_props
+                )
+                # Weight by efficiency (top results preferred even if close)
+                weighted = min_dist * (0.5 + 0.5 * r['efficiency'] / sorted_results[0]['efficiency'])
+                if weighted > best_min_dist:
+                    best_min_dist = weighted
+                    best_idx = i
+            if best_idx >= 0:
+                selected.append(remaining[best_idx])
+                selected_props.append(_to_props(remaining[best_idx]['ratio']))
+                remaining.pop(best_idx)
+            else:
+                break
+
+        seeds[bc] = [r['ratio'] for r in selected]
+
+    return seeds
+
+
+def _generate_multiplied(
+    seeds: Dict[int, List[Dict[str, int]]],
+    max_bc: int,
+    sizes: List[str],
+) -> List[Dict[str, int]]:
+    """
+    Generate multiplied candidates from seed ratios (Phase 3).
+
+    For each seed at base BC b, scale by multiplier 2,3,... while target_bc ≤ max_bc.
+    Dedup across all seeds.
+    """
+    seen = set()
+    candidates = []
+
+    for base_bc, seed_list in seeds.items():
+        for seed in seed_list:
+            for multiplier in range(2, max_bc // base_bc + 1):
+                target_bc = base_bc * multiplier
+                if target_bc > max_bc:
+                    break
+                scaled = {s: seed.get(s, 0) * multiplier for s in sizes}
+                key = ratio_to_key(scaled, sizes)
+                if key not in seen:
+                    seen.add(key)
+                    candidates.append(scaled)
+
+    return candidates
+
+
+def _generate_neighborhoods(
+    top_ratios: List[Dict[str, int]],
+    sizes: List[str],
+    already_evaluated: set,
+) -> List[Dict[str, int]]:
+    """
+    Generate ±1 perturbation neighbors for top ratios (Phase 4).
+
+    For each ratio, swap one bundle between each pair of sizes
+    (maintaining total BC). Skip already-evaluated ratios.
+    """
+    neighbors = []
+    seen = set(already_evaluated)
+
+    for ratio in top_ratios:
+        for i in range(len(sizes)):
+            si = sizes[i]
+            if ratio.get(si, 0) == 0:
+                continue
+            for j in range(len(sizes)):
+                if i == j:
+                    continue
+                sj = sizes[j]
+                neighbor = dict(ratio)
+                neighbor[si] = ratio.get(si, 0) - 1
+                neighbor[sj] = ratio.get(sj, 0) + 1
+                key = ratio_to_key(neighbor, sizes)
+                if key not in seen:
+                    seen.add(key)
+                    neighbors.append(neighbor)
+
+    return neighbors
+
+
+def _evaluate_ratios_batch(
+    ratios: List[Dict[str, int]],
+    bundle_count_label: str,
+    pieces_by_size: Dict,
+    packer: GPUPacker,
+    strip_width_px: int,
+    gpu_scale: float,
+    sizes: List[str],
+    source_tag: str = 'gpu',
+    cancel_check: Optional[Callable[[], bool]] = None,
+    progress_callback: Optional[Callable[[int, str], None]] = None,
+    preview_callback: Optional[Callable[[str, str, float], None]] = None,
+    preview_interval_seconds: float = 5.0,
+    base_progress: int = 0,
+    progress_span: int = 10,
+    evaluated_count_ref: Optional[List[int]] = None,
+) -> List[Dict]:
+    """
+    GPU-evaluate a batch of ratios with cancellation, progress, and preview support.
+
+    Args:
+        ratios: List of ratio dicts to evaluate
+        bundle_count_label: Display label for progress messages
+        source_tag: Tag for result source ('gpu', 'multiplied', 'neighborhood')
+        evaluated_count_ref: Mutable [int] for tracking total evals across batches
+        base_progress: Starting progress percentage for this batch
+        progress_span: Progress percentage range allocated to this batch
+
+    Returns:
+        List of result dicts
+    """
+    results = []
+    last_preview_time = 0.0
+    n_total = len(ratios)
+    if n_total == 0:
+        return results
+
+    for idx, ratio in enumerate(ratios):
+        if cancel_check and idx % 20 == 0 and idx > 0 and cancel_check():
+            raise NestingCancelled("Job cancelled by user")
+
+        current_time = time.time()
+        should_capture = preview_callback and (current_time - last_preview_time >= preview_interval_seconds)
+
+        eff, length, preview, perim_cm = evaluate_ratio(
+            pieces_by_size, ratio, packer, strip_width_px, gpu_scale,
+            capture_preview=should_capture,
+        )
+
+        if should_capture and preview:
+            r_str = ratio_to_str(ratio, sizes)
+            preview_callback(r_str, preview, eff)
+            last_preview_time = current_time
+
+        bc = sum(ratio.get(s, 0) for s in sizes)
+        results.append({
+            'ratio': ratio,
+            'ratio_str': ratio_to_str(ratio, sizes),
+            'efficiency': eff,
+            'length_yards': length,
+            'bundle_count': bc,
+            'perimeter_cm': perim_cm,
+            'source': source_tag,
+        })
+
+        if evaluated_count_ref is not None:
+            evaluated_count_ref[0] += 1
+
+        if progress_callback and idx % 20 == 0:
+            pct = base_progress + int((idx + 1) / n_total * progress_span)
+            total_str = f" — {evaluated_count_ref[0]} total" if evaluated_count_ref else ""
+            progress_callback(
+                min(pct, 95),
+                f"{bundle_count_label} ({idx + 1}/{n_total}){total_str}",
+            )
+
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Cross-Width Ridge Prediction
+# ---------------------------------------------------------------------------
+
+def _select_cross_width_anchors(
+    base_results: Dict[int, List[Dict]],
+    sizes: List[str],
+) -> List[Dict[str, int]]:
+    """
+    Select diverse anchor ratios from bc=3+ base results for cross-width sampling.
+
+    bc=1,2 are handled separately (always brute-forced), so this function
+    only selects from bc=3+ GPU-evaluated results using farthest-first diversity.
+
+    Count is determined by CROSS_WIDTH_SAMPLE_RATE/MIN/MAX applied to bc=3+ pool size.
+
+    Returns list of ratio dicts (bc=3+ only).
+    """
+    # Collect all bc=3+ GPU-evaluated results
+    remaining_pool = []
+    for bc, bc_results in base_results.items():
+        if bc <= 2:
+            continue
+        for r in bc_results:
+            if r.get('source') == 'predicted':
+                continue
+            ratio = r.get('ratio')
+            if not ratio:
+                continue
+            remaining_pool.append(r)
+
+    if not remaining_pool:
+        return []
+
+    # Determine anchor count from rate, clamped to min/max
+    n = int(len(remaining_pool) * CROSS_WIDTH_SAMPLE_RATE)
+    n = max(CROSS_WIDTH_SAMPLE_MIN, min(CROSS_WIDTH_SAMPLE_MAX, n))
+    n = min(n, len(remaining_pool))
+
+    # Greedy farthest-first diversity selection
+    n_sizes = len(sizes)
+
+    def _to_props(ratio):
+        vals = [ratio.get(s, 0) for s in sizes]
+        total = sum(vals)
+        return [v / total for v in vals] if total > 0 else [0] * n_sizes
+
+    # Sort by efficiency descending, seed with best
+    remaining_pool.sort(key=lambda r: -r['efficiency'])
+
+    selected = [remaining_pool[0]]
+    selected_props = [_to_props(remaining_pool[0]['ratio'])]
+    used = {ratio_to_key(remaining_pool[0]['ratio'], sizes)}
+
+    candidates = remaining_pool[1:]
+    while len(selected) < n and candidates:
+        best_idx = -1
+        best_min_dist = -1
+        for i, r in enumerate(candidates):
+            key = ratio_to_key(r['ratio'], sizes)
+            if key in used:
+                continue
+            props = _to_props(r['ratio'])
+            min_dist = min(
+                sum((a - b) ** 2 for a, b in zip(props, sp))
+                for sp in selected_props
+            )
+            weighted = min_dist * (0.5 + 0.5 * r['efficiency'] / remaining_pool[0]['efficiency'])
+            if weighted > best_min_dist:
+                best_min_dist = weighted
+                best_idx = i
+        if best_idx >= 0:
+            r = candidates[best_idx]
+            selected.append(r)
+            selected_props.append(_to_props(r['ratio']))
+            used.add(ratio_to_key(r['ratio'], sizes))
+            candidates.pop(best_idx)
+        else:
+            break
+
+    return [r['ratio'] for r in selected]
+
+
+def _build_features_with_width(
+    ratio: Dict[str, int],
+    sizes: List[str],
+    geom: Dict,
+    fabric_width_mm: float,
+) -> List[float]:
+    """
+    Build Ridge feature vector with fabric_width_mm prepended.
+
+    Same as _build_features in _lhs_predict_ratios but with absolute width
+    as the first feature for cross-width generalization.
+    """
+    feats = []
+
+    # Feature 0: absolute fabric width in mm
+    feats.append(fabric_width_mm)
+
+    bc = sum(ratio.get(s, 0) for s in sizes)
+    if bc == 0:
+        bc = 1
+
+    # Ratio proportions
+    props = [ratio.get(s, 0) / bc for s in sizes]
+    feats.extend(props)
+    feats.append(bc)
+
+    # Total bundle area
+    total_area = sum(
+        ratio.get(s, 0) * geom['bundle_area'].get(s, 0)
+        for s in sizes
+    )
+    feats.append(total_area)
+
+    # Max piece width ratio (relative to this width)
+    max_wr = max(
+        (geom['max_piece_width'].get(s, 0) / fabric_width_mm
+         if ratio.get(s, 0) > 0 and fabric_width_mm > 0 else 0)
+        for s in sizes
+    )
+    feats.append(max_wr)
+
+    # Ratio × geometry cross features
+    for s in sizes:
+        s_count = ratio.get(s, 0)
+        if s_count > 0:
+            feats.append(s_count * geom['bundle_area'].get(s, 0))
+            feats.append(s_count * geom['max_piece_width'].get(s, 0))
+        else:
+            feats.append(0)
+            feats.append(0)
+
+    # Pairwise interactions
+    for i in range(len(sizes)):
+        for j in range(i + 1, len(sizes)):
+            feats.append(props[i] * props[j])
+
+    return feats
+
+
+def _cross_width_predict(
+    base_results: Dict[int, List[Dict]],
+    anchor_results: List[Dict],
+    base_width_inches: float,
+    target_width_inches: float,
+    sizes: List[str],
+    geom: Dict,
+    pieces_by_size: Dict[str, List[Dict]],
+    gpu_scale: float,
+) -> Dict[int, List[Dict]]:
+    """
+    Predict nesting results at target_width using Ridge trained on
+    base_width GPU data + anchor GPU data at target_width.
+
+    Returns: {bc: [result dicts]} for predicted ratios at target_width.
+    """
+    from sklearn.linear_model import Ridge
+
+    base_width_mm = base_width_inches * 25.4
+    target_width_mm = target_width_inches * 25.4
+    target_strip_px = int(target_width_mm * gpu_scale)
+
+    # Build training data from base results (all GPU-evaluated)
+    X_train = []
+    y_train = []
+    train_ratio_strs = set()
+
+    for bc, bc_results in base_results.items():
+        for r in bc_results:
+            if r.get('source') == 'predicted':
+                continue
+            ratio = r.get('ratio')
+            if not ratio:
+                continue
+            feats = _build_features_with_width(ratio, sizes, geom, base_width_mm)
+            X_train.append(feats)
+            y_train.append(r['length_yards'])
+            train_ratio_strs.add(r['ratio_str'])
+
+    # Add anchor results at target width
+    anchor_ratio_strs = set()
+    for r in anchor_results:
+        ratio = r.get('ratio')
+        if not ratio:
+            continue
+        feats = _build_features_with_width(ratio, sizes, geom, target_width_mm)
+        X_train.append(feats)
+        y_train.append(r['length_yards'])
+        anchor_ratio_strs.add(r['ratio_str'])
+
+    X_train = np.array(X_train)
+    y_train = np.array(y_train)
+
+    if len(X_train) < 5:
+        logger.warning("Cross-width predict: too few samples (%d)", len(X_train))
+        return {}
+
+    model = Ridge(alpha=1.0)
+    model.fit(X_train, y_train)
+
+    # Log training R²
+    y_pred_train = model.predict(X_train)
+    ss_res = np.sum((y_train - y_pred_train) ** 2)
+    ss_tot = np.sum((y_train - np.mean(y_train)) ** 2)
+    r2 = 1 - ss_res / ss_tot if ss_tot > 0 else 0
+    logger.info(
+        "Cross-width Ridge: base=%.0f\" → target=%.0f\", R²=%.4f, %d train samples",
+        base_width_inches, target_width_inches, r2, len(X_train),
+    )
+
+    # Predict all ratios from base results that weren't anchored
+    predicted_by_bc: Dict[int, List[Dict]] = {}
+
+    for bc, bc_results in base_results.items():
+        predicted_by_bc[bc] = []
+        for r in bc_results:
+            ratio = r.get('ratio')
+            if not ratio:
+                continue
+            rstr = r['ratio_str']
+
+            # If this ratio was anchored, use its actual GPU result
+            if rstr in anchor_ratio_strs:
+                # Find the anchor result
+                for ar in anchor_results:
+                    if ar['ratio_str'] == rstr:
+                        predicted_by_bc[bc].append(ar)
+                        break
+                continue
+
+            # Predict at target width
+            feats = _build_features_with_width(ratio, sizes, geom, target_width_mm)
+            pred_length = float(model.predict([feats])[0])
+            if pred_length <= 0:
+                pred_length = 0.001
+
+            # Compute efficiency from predicted length
+            total_piece_area_px = 0
+            for size, count in ratio.items():
+                if count <= 0 or size not in pieces_by_size:
+                    continue
+                for _ in range(count):
+                    for p in pieces_by_size[size]:
+                        total_piece_area_px += p['area'] * p['demand']
+
+            pred_length_px = pred_length * 25.4 * 36 * gpu_scale
+            strip_area = target_strip_px * pred_length_px if pred_length_px > 0 else 1
+            eff = total_piece_area_px / strip_area if strip_area > 0 else 0
+            eff = max(0, min(1, eff))
+
+            predicted_by_bc[bc].append({
+                'ratio': ratio,
+                'ratio_str': rstr,
+                'efficiency': eff,
+                'length_yards': pred_length,
+                'bundle_count': r['bundle_count'],
+                'perimeter_cm': r.get('perimeter_cm', 0),
+                'source': 'cross_width_predicted',
+            })
+
+    return predicted_by_bc
+
+
 def run_nesting_for_material(
     dxf_path: str,
     rul_path: str,
@@ -802,36 +1631,64 @@ def run_nesting_for_material(
     result_callback: Optional[Callable[[int, List[Dict]], None]] = None,
     cancel_check: Optional[Callable[[], bool]] = None,
     file_type: Optional[str] = None,
-) -> Dict[int, List[Dict]]:
+    nesting_strategy: str = "auto",
+    fabric_widths: Optional[List[float]] = None,
+) -> Dict[float, Dict[int, List[Dict]]]:
     """
-    Run GPU nesting for a specific material.
+    Run GPU nesting for a specific material at one or more fabric widths.
+
+    Adaptive architecture that scales to any order size:
+    - total_ratios ≤ 1,500: whole-order brute force (all BCs, all ratios)
+    - total_ratios > 1,500: adaptive pipeline
+      - bc=1,2: always brute force (hard rule)
+      - bc=3 to base_max_bc: Phase 1 adaptive sampling (+Ridge where ≤10K ratios)
+      - bc > base_max_bc: Phase 2-4 multiplier expansion + neighborhood refinement
+
+    Multi-width mode (fabric_widths has >1 entry):
+    - Runs full pipeline at the widest (base) width
+    - Uses cross-width Ridge prediction for other widths with anchor sampling
 
     Args:
         dxf_path: Path to DXF pattern file
         rul_path: Path to RUL grading file
         material: Material code to filter
         sizes: List of sizes to process
-        fabric_width_inches: Fabric width in inches
-        max_bundle_count: Maximum bundles per marker (1-6)
+        fabric_width_inches: Fabric width in inches (used when fabric_widths is None)
+        max_bundle_count: Maximum bundles per marker
         top_n: Number of top results per bundle count
         gpu_scale: Rasterization resolution (px/mm)
         progress_callback: Optional callback for progress updates
-        preview_callback: Optional callback for marker previews (ratio_str, preview_base64, efficiency)
+        preview_callback: Optional callback for marker previews
         preview_interval_seconds: How often to capture previews
-        full_coverage: If True, evaluate ALL ratios (brute force). If False, brute-force up to BRUTE_FORCE_THRESHOLD, random sample above.
-        result_callback: Optional callback called after each bundle_count completes with (bundle_count, results_list)
+        full_coverage: If True, force brute force at all BCs
+        result_callback: Optional callback called after each bundle_count completes
+        cancel_check: Optional callable returning True to cancel
+        file_type: Pattern file type ("aama", "dxf_only", "vt_dxf")
+        nesting_strategy: "auto" (adaptive), "brute_force", or "lhs_predict" (legacy)
+        fabric_widths: Optional list of fabric widths in inches for multi-width mode
 
     Returns:
-        Dictionary mapping bundle_count -> list of result dicts
-        Each result: {ratio_str, efficiency, length_yards, bundle_count}
+        Dictionary mapping width_inches -> {bundle_count -> list of result dicts}
     """
     if not _init_gpu():
         raise RuntimeError("GPU not available for nesting")
 
-    fabric_width_mm = fabric_width_inches * 25.4
+    # Determine widths list
+    if fabric_widths and len(fabric_widths) > 1:
+        widths = sorted(fabric_widths)
+        base_width = max(widths)  # Widest as base
+        extra_widths = [w for w in widths if w != base_width]
+        multi_width = True
+    else:
+        base_width = fabric_widths[0] if fabric_widths and len(fabric_widths) == 1 else fabric_width_inches
+        widths = [base_width]
+        extra_widths = []
+        multi_width = False
+
+    fabric_width_mm = base_width * 25.4
     strip_width_px = int(fabric_width_mm * gpu_scale)
 
-    # Load and rasterize pieces
+    # Load and rasterize pieces (once — rasters are width-independent)
     if progress_callback:
         progress_callback(0, f"Loading pieces for material {material}...")
 
@@ -851,101 +1708,93 @@ def run_nesting_for_material(
 
     packer = GPUPacker(strip_width_px, max_length)
 
-    all_results = {}
-    last_preview_time = 0.0
-    evaluated_count = 0
+    n_sizes = len(sizes)
+    total_ratios = _compute_total_ratios(n_sizes, max_bundle_count)
+    evaluated_count_ref = [0]  # Mutable for batch helper
 
-    # Pre-compute total ratio counts per bundle for progress display
-    ratios_per_bundle = {}
-    total_ratios = 0
-    for bc in range(1, max_bundle_count + 1):
-        n = len(generate_all_ratios(bc, sizes))
-        ratios_per_bundle[bc] = n
-        total_ratios += n
+    # Common kwargs for _evaluate_ratios_batch
+    batch_kwargs = dict(
+        pieces_by_size=pieces_by_size,
+        packer=packer,
+        strip_width_px=strip_width_px,
+        gpu_scale=gpu_scale,
+        sizes=sizes,
+        cancel_check=cancel_check,
+        progress_callback=progress_callback,
+        preview_callback=preview_callback,
+        preview_interval_seconds=preview_interval_seconds,
+        evaluated_count_ref=evaluated_count_ref,
+    )
 
+    # -------------------------------------------------------------------
+    # Strategy dispatch
+    # -------------------------------------------------------------------
+    if nesting_strategy == "brute_force" or full_coverage:
+        strategy = "brute_force"
+    elif nesting_strategy == "lhs_predict":
+        strategy = "lhs_predict"
+    else:
+        strategy = "auto"
+
+    width_label = f"{base_width}\"" if not multi_width else f"{base_width}\" (base of {len(widths)} widths)"
     if progress_callback:
-        mode = "full coverage" if full_coverage else f"brute-force (≤{BRUTE_FORCE_THRESHOLD}) + sampling ({RANDOM_SAMPLE_SIZE})"
-        progress_callback(2, f"Ratio space: {total_ratios} across {max_bundle_count} bundle counts ({mode})")
-
-    for bundle_count in range(1, max_bundle_count + 1):
-        # Check for cancellation at start of each bundle count
-        if cancel_check and cancel_check():
-            raise NestingCancelled("Job cancelled by user")
-
-        all_ratios = generate_all_ratios(bundle_count, sizes)
-        n_combos = len(all_ratios)
-
-        # Decide: brute force (evaluate all) vs random sampling
-        use_brute_force = full_coverage or n_combos <= BRUTE_FORCE_THRESHOLD
-
-        if progress_callback:
-            progress = int((bundle_count - 1) / max_bundle_count * 80)
-            if use_brute_force:
-                progress_callback(progress, f"Evaluating: {bundle_count}-bundle ({n_combos} ratios) — {evaluated_count} total")
-            else:
-                progress_callback(progress, f"Sampling: {bundle_count}-bundle ({RANDOM_SAMPLE_SIZE}/{n_combos} ratios) — {evaluated_count} total")
-
-        if use_brute_force:
-            # Brute force: evaluate all ratios
-            ratios_to_eval = all_ratios
+        if strategy == "brute_force":
+            mode = "full coverage (brute force)"
+        elif strategy == "lhs_predict":
+            mode = "LHS + Ridge predict (legacy)"
+        elif total_ratios <= WHOLE_ORDER_THRESHOLD:
+            mode = f"whole-order brute force ({total_ratios} ≤ {WHOLE_ORDER_THRESHOLD})"
         else:
-            # Random sampling: pick RANDOM_SAMPLE_SIZE ratios uniformly
-            ratios_to_eval = random.sample(all_ratios, min(RANDOM_SAMPLE_SIZE, n_combos))
+            mode = f"adaptive ({total_ratios:,} ratios, {int(LHS_SAMPLE_RATE*100)}% LHS + Ridge)"
+        progress_callback(2, f"Ratio space: {total_ratios:,} across {max_bundle_count} BCs @ {width_label} ({mode})")
 
-        results = []
-        cancel_check_counter = 0
-        for ratio in ratios_to_eval:
-            cancel_check_counter += 1
-            if cancel_check and cancel_check_counter % 20 == 0 and cancel_check():
-                raise NestingCancelled("Job cancelled by user")
+    # -------------------------------------------------------------------
+    # STRATEGY 1: Forced brute force
+    # -------------------------------------------------------------------
+    if strategy == "brute_force":
+        base_results = _run_brute_force_all(
+            max_bundle_count, sizes, result_callback, **batch_kwargs
+        )
 
-            current_time = time.time()
-            should_capture = preview_callback and (current_time - last_preview_time >= preview_interval_seconds)
+    # -------------------------------------------------------------------
+    # STRATEGY 2: Legacy LHS+predict (backward compat)
+    # -------------------------------------------------------------------
+    elif strategy == "lhs_predict":
+        base_results = _run_lhs_predict_all(
+            max_bundle_count, sizes, fabric_width_mm, pieces_by_size,
+            result_callback, **batch_kwargs
+        )
 
-            eff, length, preview, perim_cm = evaluate_ratio(
-                pieces_by_size, ratio, packer, strip_width_px, gpu_scale,
-                capture_preview=should_capture
+    # -------------------------------------------------------------------
+    # STRATEGY 3: Auto — adaptive architecture
+    # -------------------------------------------------------------------
+    else:
+        if total_ratios <= WHOLE_ORDER_THRESHOLD:
+            # Small order: evaluate everything
+            base_results = _run_brute_force_all(
+                max_bundle_count, sizes, result_callback, **batch_kwargs
+            )
+        else:
+            # Large order: adaptive pipeline
+            base_results = _run_adaptive_pipeline(
+                max_bundle_count, sizes, fabric_width_mm, pieces_by_size,
+                total_ratios, result_callback, **batch_kwargs
             )
 
-            if should_capture and preview:
-                ratio_str = ratio_to_str(ratio, sizes)
-                preview_callback(ratio_str, preview, eff)
-                last_preview_time = current_time
-
-            results.append({
-                'ratio': ratio,
-                'ratio_str': ratio_to_str(ratio, sizes),
-                'efficiency': eff,
-                'length_yards': length,
-                'bundle_count': bundle_count,
-                'perimeter_cm': perim_cm,
-            })
-            evaluated_count += 1
-
-            if progress_callback and cancel_check_counter % 20 == 0:
-                n_eval = len(ratios_to_eval)
-                progress = int((bundle_count - 1) / max_bundle_count * 80) + int(len(results) / n_eval * (80 / max_bundle_count))
-                label = "Evaluating" if use_brute_force else "Sampling"
-                progress_callback(min(progress, 95), f"{label}: {bundle_count}-bundle ({len(results)}/{n_eval}) — {evaluated_count} total")
-
-        results.sort(key=lambda x: -x['efficiency'])
-        # Retention: ALL for 1-2 bundles, top 25% (floor 25) for 3+ bundles
-        if bundle_count <= 2:
-            all_results[bundle_count] = results
-        else:
-            keep_count = max(25, int(len(results) * 0.25))
-            all_results[bundle_count] = results[:keep_count]
-        # Notify of incremental results
-        if result_callback:
-            result_callback(bundle_count, all_results[bundle_count])
-
-    # Dual-sort refinement: re-evaluate retained results with area_desc too, keep best
-    total_retained = sum(len(v) for v in all_results.values())
+    # -------------------------------------------------------------------
+    # Post-processing: dual-sort refinement, SVG previews (base width)
+    # -------------------------------------------------------------------
+    gpu_retained = sum(
+        1 for v in base_results.values() for r in v
+        if r.get('source') not in ('predicted',)
+    )
     if progress_callback:
-        progress_callback(90, f"Refining {total_retained} retained markers with dual-sort...")
+        progress_callback(90, f"Refining {gpu_retained} GPU-evaluated markers with dual-sort...")
 
-    for bc, bc_results in all_results.items():
+    for bc, bc_results in base_results.items():
         for r in bc_results:
+            if r.get('source') == 'predicted':
+                continue
             ratio = r.get('ratio')
             if not ratio:
                 continue
@@ -957,15 +1806,14 @@ def run_nesting_for_material(
                 r['efficiency'] = eff_dual
                 r['length_yards'] = len_dual
                 r['perimeter_cm'] = perim_dual
-        # Re-sort after refinement
         bc_results.sort(key=lambda x: -x['efficiency'])
 
-    # Generate SVG preview for the single best result per bundle count
-    svg_total = sum(1 for v in all_results.values() if v)
+    # SVG preview for best result per BC
+    svg_total = sum(1 for v in base_results.values() if v)
     if progress_callback:
         progress_callback(95, f"Generating vector previews for {svg_total} top markers...")
 
-    for bc, bc_results in all_results.items():
+    for bc, bc_results in base_results.items():
         if bc_results:
             r = bc_results[0]
             ratio = r.get('ratio')
@@ -976,9 +1824,519 @@ def run_nesting_for_material(
                 r['svg_preview'] = svg
                 r['perimeter_cm'] = perim_cm
 
-    total_saved = sum(len(v) for v in all_results.values())
+    total_saved = sum(len(v) for v in base_results.values())
+    evaluated_count = evaluated_count_ref[0]
+
+    # -------------------------------------------------------------------
+    # Multi-width: cross-width Ridge prediction for extra widths
+    # -------------------------------------------------------------------
+    all_width_results: Dict[float, Dict[int, List[Dict]]] = {base_width: base_results}
+
+    if multi_width and extra_widths:
+        geom = _extract_geometry(pieces_by_size, sizes, fabric_width_mm, gpu_scale)
+
+        for extra_w in extra_widths:
+            if cancel_check and cancel_check():
+                raise NestingCancelled("Job cancelled by user")
+
+            extra_w_mm = extra_w * 25.4
+            extra_strip_px = int(extra_w_mm * gpu_scale)
+            extra_max_length = int((max_bundle_count * max_area * 2) / extra_strip_px) + 500
+            extra_packer = GPUPacker(extra_strip_px, extra_max_length)
+
+            # ----------------------------------------------------------
+            # Step 1: Brute-force bc=1,2 at extra width (hard rule)
+            # ----------------------------------------------------------
+            if progress_callback:
+                progress_callback(96, f"Cross-width {extra_w}\": brute-forcing bc=1,2...")
+
+            bf_results: List[Dict] = []
+            for bc in [1, 2]:
+                if bc > max_bundle_count:
+                    continue
+                all_ratios = generate_all_ratios(bc, sizes)
+                for ratio in all_ratios:
+                    eff, length, _, perim = evaluate_ratio(
+                        pieces_by_size, ratio, extra_packer, extra_strip_px, gpu_scale,
+                        dual_sort=True,
+                    )
+                    bf_results.append({
+                        'ratio': ratio,
+                        'ratio_str': ratio_to_str(ratio, sizes),
+                        'efficiency': eff,
+                        'length_yards': length,
+                        'bundle_count': bc,
+                        'perimeter_cm': perim,
+                        'source': 'gpu',
+                    })
+            evaluated_count_ref[0] += len(bf_results)
+
+            # ----------------------------------------------------------
+            # Step 2: Sample diverse bc=3+ anchors and GPU-eval at extra width
+            # ----------------------------------------------------------
+            anchor_ratios = _select_cross_width_anchors(base_results, sizes)
+
+            if progress_callback:
+                progress_callback(
+                    96,
+                    f"Cross-width {extra_w}\": {len(bf_results)} bc=1,2 done, "
+                    f"evaluating {len(anchor_ratios)} bc=3+ anchors...",
+                )
+
+            anchor_results: List[Dict] = []
+            for ratio in anchor_ratios:
+                eff, length, _, perim = evaluate_ratio(
+                    pieces_by_size, ratio, extra_packer, extra_strip_px, gpu_scale,
+                    dual_sort=True,
+                )
+                bc = sum(ratio.get(s, 0) for s in sizes)
+                anchor_results.append({
+                    'ratio': ratio,
+                    'ratio_str': ratio_to_str(ratio, sizes),
+                    'efficiency': eff,
+                    'length_yards': length,
+                    'bundle_count': bc,
+                    'perimeter_cm': perim,
+                    'source': 'gpu',
+                })
+            evaluated_count_ref[0] += len(anchor_ratios)
+
+            logger.info(
+                "Cross-width %s\": %d bc=1,2 brute-forced, %d bc=3+ anchors GPU-evaluated",
+                extra_w, len(bf_results), len(anchor_ratios),
+            )
+
+            # ----------------------------------------------------------
+            # Step 3: Train Ridge on all data and predict remaining bc=3+
+            # ----------------------------------------------------------
+            if progress_callback:
+                progress_callback(97, f"Cross-width {extra_w}\": Ridge predicting bc=3+...")
+
+            # Combine bf + anchor as the anchor set for Ridge training
+            all_anchor_results = bf_results + anchor_results
+
+            extra_results = _cross_width_predict(
+                base_results, all_anchor_results,
+                base_width, extra_w,
+                sizes, geom, pieces_by_size, gpu_scale,
+            )
+
+            # ----------------------------------------------------------
+            # Step 4: GPU-verify top-N predicted ratios at extra width
+            # ----------------------------------------------------------
+            if progress_callback:
+                progress_callback(
+                    98,
+                    f"Cross-width {extra_w}\": verifying top {CROSS_WIDTH_TOP_N_VERIFY} predictions...",
+                )
+
+            verified_count = 0
+            for bc in sorted(extra_results.keys()):
+                if bc <= 2:
+                    continue  # bc=1,2 already fully GPU-evaluated
+                bc_preds = extra_results[bc]
+                # Sort by predicted efficiency to find top candidates
+                bc_preds.sort(key=lambda x: -x['efficiency'])
+                # Verify top-N that were predicted (not already GPU-evaluated)
+                to_verify = [
+                    r for r in bc_preds
+                    if r.get('source') == 'cross_width_predicted'
+                ][:CROSS_WIDTH_TOP_N_VERIFY]
+
+                for r in to_verify:
+                    ratio = r.get('ratio')
+                    if not ratio:
+                        continue
+                    eff, length, _, perim = evaluate_ratio(
+                        pieces_by_size, ratio, extra_packer, extra_strip_px, gpu_scale,
+                        dual_sort=True,
+                    )
+                    # Replace predicted values with actuals
+                    r['efficiency'] = eff
+                    r['length_yards'] = length
+                    r['perimeter_cm'] = perim
+                    r['source'] = 'gpu_verified'
+                    verified_count += 1
+
+            evaluated_count_ref[0] += verified_count
+
+            logger.info(
+                "Cross-width %s\": %d top predictions GPU-verified",
+                extra_w, verified_count,
+            )
+
+            # Sort and retain per BC
+            for bc in sorted(extra_results.keys()):
+                bc_results = extra_results[bc]
+                bc_results.sort(key=lambda x: -x['efficiency'])
+                if bc > 2:
+                    keep_count = max(25, int(len(bc_results) * 0.25))
+                    extra_results[bc] = bc_results[:keep_count]
+
+            all_width_results[extra_w] = extra_results
+
+        total_saved += sum(
+            len(v) for w in extra_widths for v in all_width_results.get(w, {}).values()
+        )
+
     if progress_callback:
-        progress_callback(100, f"Complete — {evaluated_count} ratios evaluated, {total_saved} markers saved")
+        width_str = f" across {len(widths)} widths" if multi_width else ""
+        progress_callback(
+            100,
+            f"Complete — {evaluated_count_ref[0]} ratios evaluated, {total_saved} markers saved{width_str}",
+        )
+
+    return all_width_results
+
+
+# ---------------------------------------------------------------------------
+# Strategy Implementations
+# ---------------------------------------------------------------------------
+
+def _run_brute_force_all(
+    max_bundle_count: int,
+    sizes: List[str],
+    result_callback: Optional[Callable],
+    **batch_kwargs,
+) -> Dict[int, List[Dict]]:
+    """Brute-force all ratios at all BCs."""
+    all_results = {}
+
+    for bc in range(1, max_bundle_count + 1):
+        if batch_kwargs.get('cancel_check') and batch_kwargs['cancel_check']():
+            raise NestingCancelled("Job cancelled by user")
+
+        all_ratios = generate_all_ratios(bc, sizes)
+        progress_span = max(1, int(80 / max_bundle_count))
+        base_progress = int((bc - 1) / max_bundle_count * 80)
+
+        results = _evaluate_ratios_batch(
+            ratios=all_ratios,
+            bundle_count_label=f"Brute force: {bc}-bundle",
+            source_tag='gpu',
+            base_progress=base_progress,
+            progress_span=progress_span,
+            **batch_kwargs,
+        )
+
+        results.sort(key=lambda x: -x['efficiency'])
+        if bc <= 2:
+            all_results[bc] = results
+        else:
+            keep_count = max(25, int(len(results) * 0.25))
+            all_results[bc] = results[:keep_count]
+
+        if result_callback:
+            result_callback(bc, all_results[bc])
+
+    return all_results
+
+
+def _run_lhs_predict_all(
+    max_bundle_count: int,
+    sizes: List[str],
+    fabric_width_mm: float,
+    pieces_by_size: Dict,
+    result_callback: Optional[Callable],
+    **batch_kwargs,
+) -> Dict[int, List[Dict]]:
+    """Legacy LHS+Ridge predict path for all BCs."""
+    all_results = {}
+    gpu_scale = batch_kwargs['gpu_scale']
+    strip_width_px = batch_kwargs['strip_width_px']
+    progress_callback = batch_kwargs.get('progress_callback')
+    geom = None
+
+    for bc in range(1, max_bundle_count + 1):
+        if batch_kwargs.get('cancel_check') and batch_kwargs['cancel_check']():
+            raise NestingCancelled("Job cancelled by user")
+
+        all_ratios = generate_all_ratios(bc, sizes)
+        n_combos = len(all_ratios)
+        progress_span = max(1, int(80 / max_bundle_count))
+        base_progress = int((bc - 1) / max_bundle_count * 80)
+
+        # bc=1,2 always brute force (hard rule)
+        if bc <= 2:
+            results = _evaluate_ratios_batch(
+                ratios=all_ratios,
+                bundle_count_label=f"Brute force: {bc}-bundle",
+                source_tag='gpu',
+                base_progress=base_progress,
+                progress_span=progress_span,
+                **batch_kwargs,
+            )
+        else:
+            # LHS sample + Ridge predict
+            if geom is None:
+                geom = _extract_geometry(pieces_by_size, sizes, fabric_width_mm, gpu_scale)
+
+            sample_size = max(LHS_SAMPLE_MIN, min(LHS_SAMPLE_MAX, int(n_combos * LHS_SAMPLE_RATE)))
+            sample_ratios = _lhs_sample(all_ratios, sizes, sample_size)
+
+            sample_results = _evaluate_ratios_batch(
+                ratios=sample_ratios,
+                bundle_count_label=f"LHS sample: {bc}-bundle",
+                source_tag='gpu',
+                base_progress=base_progress,
+                progress_span=progress_span // 2,
+                **batch_kwargs,
+            )
+
+            if progress_callback:
+                n_remaining = n_combos - len(sample_results)
+                progress_callback(
+                    min(base_progress + progress_span // 2, 95),
+                    f"Ridge predicting: {bc}-bundle ({n_remaining} remaining)...",
+                )
+
+            predicted = _lhs_predict_ratios(
+                all_ratios, sample_results, sizes, geom,
+                fabric_width_mm, gpu_scale, strip_width_px, pieces_by_size,
+            )
+            results = sample_results + predicted
+
+        results.sort(key=lambda x: -x['efficiency'])
+        if bc <= 2:
+            all_results[bc] = results
+        else:
+            keep_count = max(25, int(len(results) * 0.25))
+            all_results[bc] = results[:keep_count]
+
+        if result_callback:
+            result_callback(bc, all_results[bc])
+
+    return all_results
+
+
+def _run_adaptive_pipeline(
+    max_bundle_count: int,
+    sizes: List[str],
+    fabric_width_mm: float,
+    pieces_by_size: Dict,
+    total_ratios: int,
+    result_callback: Optional[Callable],
+    **batch_kwargs,
+) -> Dict[int, List[Dict]]:
+    """
+    Adaptive nesting pipeline for large ratio spaces.
+
+    Phase 1: bc=1,2 brute force; bc=3..base_max adaptive sampling (+Ridge where ≤10K)
+    Phase 2: Plateau detection + seed selection from Phase 1 results
+    Phase 3: Multiplier expansion of seeds to higher BCs
+    Phase 4: Neighborhood perturbation of top multiplied candidates
+    """
+    all_results = {}
+    gpu_scale = batch_kwargs['gpu_scale']
+    strip_width_px = batch_kwargs['strip_width_px']
+    progress_callback = batch_kwargs.get('progress_callback')
+
+    base_max_bc = min(max_bundle_count, BASE_MAX_BC)
+    needs_expansion = max_bundle_count > base_max_bc
+
+    # Allocate progress budget:
+    #   Phase 1: 0-60%  (bc=1..base_max exploration)
+    #   Phase 3: 60-75% (multiplier expansion)
+    #   Phase 4: 75-85% (neighborhood refinement)
+    #   Post:    85-100% (dual-sort, SVG — handled by caller)
+    phase1_budget = 60
+    phase3_budget = 15 if needs_expansion else 0
+    phase4_budget = 10 if needs_expansion else 0
+
+    geom = None  # Lazy-init for Ridge
+
+    # ---------------------------------------------------------------
+    # Phase 1: Explore bc=1 through base_max_bc
+    # ---------------------------------------------------------------
+    phase1_results = {}  # {bc: [results]} — full results for plateau detection
+
+    for bc in range(1, base_max_bc + 1):
+        if batch_kwargs.get('cancel_check') and batch_kwargs['cancel_check']():
+            raise NestingCancelled("Job cancelled by user")
+
+        all_ratios = generate_all_ratios(bc, sizes)
+        n_combos = len(all_ratios)
+        per_bc_span = max(1, phase1_budget // base_max_bc)
+        base_progress = int((bc - 1) / base_max_bc * phase1_budget)
+
+        # bc=1,2: always brute force (hard rule)
+        if bc <= 2:
+            results = _evaluate_ratios_batch(
+                ratios=all_ratios,
+                bundle_count_label=f"Brute force: {bc}-bundle",
+                source_tag='gpu',
+                base_progress=base_progress,
+                progress_span=per_bc_span,
+                **batch_kwargs,
+            )
+            phase1_results[bc] = results
+
+        else:
+            # Adaptive: percentage-based budget with floor/cap
+            budget = max(LHS_SAMPLE_MIN, min(LHS_SAMPLE_MAX, int(n_combos * LHS_SAMPLE_RATE)))
+            budget = min(budget, n_combos)  # Can't sample more than exist
+
+            if budget >= n_combos:
+                # 100% coverage — evaluate all
+                sample_ratios = all_ratios
+            else:
+                # LHS sample
+                sample_ratios = _lhs_sample(all_ratios, sizes, budget)
+
+            gpu_results = _evaluate_ratios_batch(
+                ratios=sample_ratios,
+                bundle_count_label=f"Phase 1: {bc}-bundle ({budget}/{n_combos})",
+                source_tag='gpu',
+                base_progress=base_progress,
+                progress_span=per_bc_span,
+                **batch_kwargs,
+            )
+
+            # Always Ridge-predict remaining ratios (model learns cross-BC patterns)
+            if budget < n_combos:
+                if geom is None:
+                    geom = _extract_geometry(pieces_by_size, sizes, fabric_width_mm, gpu_scale)
+
+                predicted = _lhs_predict_ratios(
+                    all_ratios, gpu_results, sizes, geom,
+                    fabric_width_mm, gpu_scale, strip_width_px, pieces_by_size,
+                )
+                results = gpu_results + predicted
+                logger.info(
+                    "BC %d: %d GPU + %d Ridge = %d total (of %d)",
+                    bc, len(gpu_results), len(predicted), len(results), n_combos,
+                )
+            else:
+                results = gpu_results
+
+            phase1_results[bc] = results
+
+        # Store retained results
+        results = phase1_results[bc]
+        results.sort(key=lambda x: -x['efficiency'])
+        if bc <= 2:
+            all_results[bc] = results
+        else:
+            keep_count = max(25, int(len(results) * 0.25))
+            all_results[bc] = results[:keep_count]
+
+        if result_callback:
+            result_callback(bc, all_results[bc])
+
+    # ---------------------------------------------------------------
+    # Phase 2: Plateau detection + seed selection (if expansion needed)
+    # ---------------------------------------------------------------
+    if not needs_expansion:
+        # All BCs covered in Phase 1, no multiplier needed
+        return all_results
+
+    if progress_callback:
+        progress_callback(phase1_budget, "Phase 2: Detecting plateau and selecting seeds...")
+
+    plateau_bc, productive_bcs = _detect_plateau(phase1_results)
+    if not productive_bcs:
+        # Fallback: use all explored BCs ≥ 3
+        productive_bcs = [bc for bc in range(3, base_max_bc + 1) if bc in phase1_results]
+
+    seeds = _select_seeds(phase1_results, productive_bcs, sizes, n=SEED_COUNT)
+    total_seeds = sum(len(s) for s in seeds.values())
+
+    logger.info(
+        "Plateau at bc=%d, productive BCs: %s, seeds: %d total",
+        plateau_bc, productive_bcs, total_seeds,
+    )
+    if progress_callback:
+        progress_callback(
+            phase1_budget + 1,
+            f"Phase 2: Plateau at bc={plateau_bc}, {total_seeds} seeds from {len(productive_bcs)} productive BCs",
+        )
+
+    # ---------------------------------------------------------------
+    # Phase 3: Multiplier expansion (bc > base_max_bc)
+    # ---------------------------------------------------------------
+    multiplied_ratios = _generate_multiplied(seeds, max_bundle_count, sizes)
+
+    if progress_callback:
+        progress_callback(
+            phase1_budget + 2,
+            f"Phase 3: Evaluating {len(multiplied_ratios)} multiplied candidates...",
+        )
+
+    if multiplied_ratios:
+        multiplied_results = _evaluate_ratios_batch(
+            ratios=multiplied_ratios,
+            bundle_count_label=f"Phase 3: Multiplied candidates",
+            source_tag='multiplied',
+            base_progress=phase1_budget + 2,
+            progress_span=phase3_budget - 2,
+            **batch_kwargs,
+        )
+    else:
+        multiplied_results = []
+
+    # ---------------------------------------------------------------
+    # Phase 4: Neighborhood perturbation of top multiplied candidates
+    # ---------------------------------------------------------------
+    # Collect all evaluated keys so far (Phase 1 + Phase 3)
+    all_evaluated_keys = set()
+    for bc_results_list in phase1_results.values():
+        for r in bc_results_list:
+            if r.get('ratio'):
+                all_evaluated_keys.add(ratio_to_key(r['ratio'], sizes))
+    for r in multiplied_results:
+        if r.get('ratio'):
+            all_evaluated_keys.add(ratio_to_key(r['ratio'], sizes))
+
+    # Select top-N from multiplied results for neighborhood search
+    if multiplied_results:
+        multiplied_sorted = sorted(multiplied_results, key=lambda x: -x['efficiency'])
+        top_multiplied_ratios = [
+            r['ratio'] for r in multiplied_sorted[:NEIGHBORHOOD_TOP_N]
+            if r.get('ratio')
+        ]
+
+        neighbor_ratios = _generate_neighborhoods(top_multiplied_ratios, sizes, all_evaluated_keys)
+
+        if progress_callback:
+            progress_callback(
+                phase1_budget + phase3_budget,
+                f"Phase 4: Evaluating {len(neighbor_ratios)} neighborhood candidates...",
+            )
+
+        if neighbor_ratios:
+            neighbor_results = _evaluate_ratios_batch(
+                ratios=neighbor_ratios,
+                bundle_count_label="Phase 4: Neighborhoods",
+                source_tag='neighborhood',
+                base_progress=phase1_budget + phase3_budget,
+                progress_span=phase4_budget,
+                **batch_kwargs,
+            )
+        else:
+            neighbor_results = []
+    else:
+        neighbor_results = []
+
+    # ---------------------------------------------------------------
+    # Merge Phase 3 + Phase 4 results into all_results by BC
+    # ---------------------------------------------------------------
+    for r in multiplied_results + neighbor_results:
+        bc = r['bundle_count']
+        if bc not in all_results:
+            all_results[bc] = []
+        all_results[bc].append(r)
+
+    # Sort and retain for expanded BCs
+    for bc in sorted(all_results.keys()):
+        if bc <= base_max_bc:
+            continue  # Already retained in Phase 1
+        bc_results = all_results[bc]
+        bc_results.sort(key=lambda x: -x['efficiency'])
+        keep_count = max(25, int(len(bc_results) * 0.25))
+        all_results[bc] = bc_results[:keep_count]
+
+        if result_callback:
+            result_callback(bc, all_results[bc])
 
     return all_results
 
