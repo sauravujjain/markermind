@@ -2,11 +2,15 @@ import os
 import sys
 from typing import Optional, List, Dict, Any
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.attributes import flag_modified
 
-from ..config import settings
-from ..models import Cutplan, CutplanMarker, Order, OrderLine, SizeQuantity, MarkerBank, CostConfig, Pattern, PatternFabricMapping
+from ..config import settings, resolve_path
+from ..models import Cutplan, CutplanMarker, Order, OrderLine, SizeQuantity, MarkerBank, CostConfig, Pattern, PatternFabricMapping, MarkerLayout
 
 from .ilp_solver_runner import optimize_cutplan, calculate_cutplan_costs
+from .spyrrow_nesting_runner import quick_nest_markers
+from .rollplan_simulator import MarkerSpec
+from .endbit_solver import estimate_floor_waste
 
 
 class CutplanService:
@@ -101,13 +105,21 @@ class CutplanService:
         self,
         db: Session,
         pattern_id: str,
-        fabric_id: str
+        fabric_id: str,
+        fabric_width_inches: Optional[float] = None,
     ) -> List[MarkerBank]:
-        """Get all markers from marker bank for a pattern/fabric combo."""
-        return db.query(MarkerBank).filter(
+        """Get all markers from marker bank for a pattern/fabric combo.
+
+        If fabric_width_inches is provided, only returns markers at that width.
+        This prevents mixing markers from different widths in a single cutplan.
+        """
+        q = db.query(MarkerBank).filter(
             MarkerBank.pattern_id == pattern_id,
             MarkerBank.fabric_id == fabric_id
-        ).all()
+        )
+        if fabric_width_inches is not None:
+            q = q.filter(MarkerBank.fabric_width_inches == fabric_width_inches)
+        return q.all()
 
     def get_cost_config(self, db: Session, customer_id: str) -> CostConfig:
         """Get cost configuration for customer."""
@@ -271,6 +283,11 @@ class CutplanService:
         max_ply_height: Optional[int] = None,
         min_plies_by_bundle: Optional[str] = None,
         avg_roll_length_yards: Optional[float] = None,
+        fabric_width_inches: Optional[float] = None,
+        cost_metric: str = "efficiency",
+        generation_batch_id: Optional[str] = None,
+        real_rolls: Optional[List] = None,
+        endbit_pad_pct: float = 0.0,
     ) -> List[Cutplan]:
         """
         Run ILP optimization with multiple strategies and create cutplans for each.
@@ -287,6 +304,7 @@ class CutplanService:
             progress_callback: Optional (progress_pct, message) callback
             cancel_check: Optional callable returning True to cancel
             color_code: Optional color to filter demand (None = all colors)
+            fabric_width_inches: Filter markers to this width (prevents mixing widths)
 
         Returns:
             List of Cutplan objects
@@ -302,8 +320,18 @@ class CutplanService:
 
         sizes = self.get_order_sizes(db, order_id, color_code=color_code)
 
-        # Get markers
-        markers = self.get_available_markers(db, pattern_id, fabric_id)
+        # Auto-detect width from latest completed nesting job if not provided
+        if fabric_width_inches is None:
+            from ..models.nesting import NestingJob
+            latest_job = db.query(NestingJob).filter(
+                NestingJob.order_id == order_id,
+                NestingJob.status == "completed",
+            ).order_by(NestingJob.created_at.desc()).first()
+            if latest_job:
+                fabric_width_inches = latest_job.fabric_width_inches
+
+        # Get markers (filtered by width to prevent mixing multi-width markers)
+        markers = self.get_available_markers(db, pattern_id, fabric_id, fabric_width_inches=fabric_width_inches)
         if not markers:
             raise ValueError("No markers available. Run nesting first.")
 
@@ -395,22 +423,51 @@ class CutplanService:
         cutplans = []
         completed_strategies = 0
 
-        def on_strategy_complete(strategy_name: str, option: Dict):
+        def on_strategy_complete(strategy_name: str, option: Dict, metric_label: str = ""):
             """Called when each strategy finishes — save result immediately."""
             nonlocal completed_strategies
 
+            cutplan_name = option.get("name", "Cutplan") + metric_label
             cutplan = self.create_cutplan(
                 db=db,
                 order_id=order_id,
-                name=option.get("name", "Cutplan"),
+                name=cutplan_name,
                 solver_type="single_color",
             )
+            cutplan.generation_batch_id = generation_batch_id
             # Persist solver params so exports can use them later
-            cutplan.solver_config = {
+            solver_cfg = {
                 "max_ply_height": effective_max_ply_height,
                 "penalty": penalty,
                 "fabric_cost_per_yard": effective_fabric_cost,
             }
+            # Store EndBit-specific fields if present
+            if option.get("mc_waste_pct") is not None:
+                solver_cfg["mc_waste_pct"] = option["mc_waste_pct"]
+                solver_cfg["mc_waste_yards"] = option.get("mc_waste_yards", 0)
+                solver_cfg["endbit_fill_rate"] = option.get("endbit_fill_rate", 0)
+                solver_cfg["main_fabric_yards"] = option.get("main_fabric_yards", 0)
+                solver_cfg["endbit_fabric_yards"] = option.get("endbit_fabric_yards", 0)
+            else:
+                # Compute Est. Floor Waste via iterative-buffer MC (start 2%, +1% until 90% completion)
+                try:
+                    opt_markers = option.get("markers", [])
+                    mc_specs = [
+                        MarkerSpec(
+                            marker_label=f"M{i+1}",
+                            length_yards=om.get("length_yards", 0),
+                            plies=om.get("total_plies", 0),
+                            ratio_str=om.get("ratio_str", "0"),
+                        )
+                        for i, om in enumerate(opt_markers)
+                        if om.get("length_yards", 0) > 0 and om.get("total_plies", 0) > 0
+                    ]
+                    if mc_specs:
+                        waste = estimate_floor_waste(mc_specs, max_ply_height=effective_max_ply_height)
+                        solver_cfg.update(waste)
+                except Exception as mc_err:
+                    print(f"[CutplanService] Floor MC failed for {strategy_name}: {mc_err}")
+            cutplan.solver_config = solver_cfg
 
             # Save markers with stable labels and MarkerBank links
             selected_markers = option.get("markers", [])
@@ -449,29 +506,102 @@ class CutplanService:
 
             solve_time = option.get("solve_time", 0)
             if progress_callback:
-                pct = int(10 + (completed_strategies / len(strategies)) * 85)
-                progress_callback(pct, f"Strategy {completed_strategies}/{len(strategies)} done: "
-                                      f"{option.get('name', strategy_name)} — "
+                pct = int(10 + (completed_strategies / total_runs) * 85)
+                progress_callback(pct, f"Strategy {completed_strategies}/{total_runs} done: "
+                                      f"{cutplan_name} — "
                                       f"{option.get('efficiency', 0)*100:.1f}% eff "
                                       f"({solve_time:.0f}s)")
 
-        if progress_callback:
-            progress_callback(10, f"Running ILP solver: {len(strategies)} strategies, penalty={penalty}...")
+        # Split endbit_optimized from regular ILP strategies
+        regular_strategies = [s for s in strategies if s != "endbit_optimized"]
+        has_endbit = "endbit_optimized" in strategies
 
-        # Run optimization with incremental callback
-        optimize_cutplan(
-            demand=flat_demand,
-            markers=marker_dicts,
-            sizes=sizes,
-            options=strategies,
-            penalty=penalty,
-            strategy_callback=on_strategy_complete,
-            cancel_check=cancel_check,
-            pattern_sizes=pattern_sizes,
-            max_ply_height=effective_max_ply_height,
-            min_plies_by_bundle_str=effective_min_plies_str,
-            avg_roll_length_yards=avg_roll_length_yards,
-        )
+        # Determine which cost metrics to run
+        if cost_metric == "both":
+            metrics_to_run = ["efficiency", "length"]
+        else:
+            metrics_to_run = [cost_metric]
+
+        total_runs = len(regular_strategies) * len(metrics_to_run) + (1 if has_endbit else 0)
+        if progress_callback:
+            progress_callback(10, f"Running ILP solver: {total_runs} strategies, penalty={penalty}...")
+
+        # Run regular ILP strategies
+        if regular_strategies:
+            for metric in metrics_to_run:
+                metric_label = ""  # No suffix — cost_metric is always 'length' now
+                optimize_cutplan(
+                    demand=flat_demand,
+                    markers=marker_dicts,
+                    sizes=sizes,
+                    options=regular_strategies,
+                    penalty=penalty,
+                    strategy_callback=lambda name, opt, _m=metric_label: on_strategy_complete(name, opt, _m),
+                    cancel_check=cancel_check,
+                    pattern_sizes=pattern_sizes,
+                    max_ply_height=effective_max_ply_height,
+                    min_plies_by_bundle_str=effective_min_plies_str,
+                    avg_roll_length_yards=avg_roll_length_yards,
+                    cost_metric=metric,
+                )
+
+        # Run EndBit Optimized strategy (separate solver)
+        if has_endbit and not (cancel_check and cancel_check()):
+            try:
+                from .endbit_solver import solve_endbit_optimized
+
+                # Parse min_plies for endbit solver
+                eb_min_plies = None
+                if effective_min_plies_str:
+                    try:
+                        eb_min_plies = {}
+                        for part in effective_min_plies_str.split(","):
+                            bc, mp = part.strip().split(":")
+                            eb_min_plies[int(bc)] = int(mp)
+                    except Exception:
+                        eb_min_plies = None
+
+                eb_result = solve_endbit_optimized(
+                    demand=flat_demand,
+                    markers=marker_dicts,
+                    sizes=sizes,
+                    avg_roll_length=avg_roll_length_yards or 80.0,
+                    n_simulations=100,
+                    max_ply_height=effective_max_ply_height,
+                    min_plies_by_bundle=eb_min_plies,
+                    pattern_sizes=pattern_sizes,
+                    progress_callback=progress_callback,
+                    cancel_check=cancel_check,
+                    real_rolls=real_rolls,
+                    endbit_pad_pct=endbit_pad_pct,
+                )
+
+                # Convert EndbitSolverResult to optimize_cutplan dict format
+                eb_option = {
+                    "name": "Option D: EndBit Optimized",
+                    "strategy": "endbit_optimized",
+                    "efficiency": eb_result.efficiency,
+                    "total_plies": eb_result.total_plies,
+                    "total_cuts": eb_result.total_cuts,
+                    "bundle_cuts": eb_result.bundle_cuts,
+                    "unique_markers": eb_result.unique_markers,
+                    "total_yards": eb_result.total_fabric_yards,
+                    "solve_time": eb_result.solve_time,
+                    "markers": eb_result.combined_markers,
+                    # Extra endbit-specific fields (stored in cutplan for display)
+                    "mc_waste_pct": eb_result.mc_waste_pct,
+                    "mc_waste_yards": round(eb_result.mc_type1_avg + eb_result.mc_type2_avg, 2),
+                    "endbit_fill_rate": eb_result.endbit_fill_rate,
+                    "main_fabric_yards": eb_result.main_fabric_yards,
+                    "endbit_fabric_yards": eb_result.endbit_fabric_yards,
+                }
+                on_strategy_complete("endbit_optimized", eb_option)
+                print(f"[CutplanService] EndBit Optimized: {eb_result.efficiency*100:.1f}% eff, "
+                      f"waste={eb_result.mc_waste_pct:.1f}%, EB fill={eb_result.endbit_fill_rate*100:.0f}%")
+            except Exception as e:
+                print(f"[CutplanService] EndBit Optimized failed: {e}")
+                import traceback
+                traceback.print_exc()
 
         # Update order status if any strategies completed
         if cutplans:
@@ -479,6 +609,215 @@ class CutplanService:
             if order and order.status in ("pending_cutplan",):
                 order.status = "cutplan_ready"
                 db.commit()
+
+        # --- Phase 2: Preparing Cost Estimates (CPU nesting per cutplan) ---
+        # Nest markers with Spyrrow (20s each) to get accurate lengths/costs.
+        # Process one cutplan at a time so the frontend sees results incrementally.
+        # Cache nested ratios across cutplans to avoid re-nesting shared markers.
+        if cutplans and not (cancel_check and cancel_check()):
+            try:
+                pattern_obj_cpu = db.query(Pattern).filter(Pattern.id == pattern_id).first()
+                if pattern_obj_cpu and pattern_obj_cpu.dxf_file_path:
+                    dxf_path = resolve_path(pattern_obj_cpu.dxf_file_path)
+                    rul_path = resolve_path(pattern_obj_cpu.rul_file_path) if pattern_obj_cpu.rul_file_path else None
+
+                    # Get fabric width from nesting job
+                    from ..models.nesting import NestingJob
+                    nesting_job = db.query(NestingJob).filter(
+                        NestingJob.order_id == order_id,
+                        NestingJob.status == "completed",
+                    ).order_by(NestingJob.created_at.desc()).first()
+                    cpu_fabric_width_mm = (nesting_job.fabric_width_inches * 25.4) if nesting_job and nesting_job.fabric_width_inches else 1524.0
+
+                    # Determine material from order lines
+                    order_for_cpu = db.query(Order).filter(Order.id == order_id).first()
+                    cpu_material = ""
+                    if order_for_cpu and order_for_cpu.order_lines:
+                        cpu_material = order_for_cpu.order_lines[0].fabric_code or ""
+
+                    # Determine rotation mode from nesting job
+                    rotation_mode = "free"
+                    if nesting_job and hasattr(nesting_job, 'rotation_mode') and nesting_job.rotation_mode:
+                        rotation_mode = nesting_job.rotation_mode
+
+                    if progress_callback:
+                        progress_callback(60, f"Preparing cost estimates...")
+
+                    # Cache of already-nested ratios across cutplans
+                    cpu_cache: Dict[str, Dict] = {}
+                    total_cutplans = len(cutplans)
+
+                    for cp_idx, cp in enumerate(cutplans):
+                        if cancel_check and cancel_check():
+                            break
+
+                        db.refresh(cp)
+                        cp_name = cp.name or f"Option {cp_idx + 1}"
+
+                        # Find which ratios need nesting (not yet cached)
+                        needed_ratios = []
+                        for marker in cp.markers:
+                            if marker.ratio_str not in cpu_cache:
+                                needed_ratios.append(marker.ratio_str)
+
+                        if needed_ratios:
+                            if progress_callback:
+                                pct = 60 + int((cp_idx / total_cutplans) * 35)
+                                progress_callback(pct, f"Preparing costs for {cp_name} ({len(needed_ratios)} markers)...")
+
+                            def cpu_progress(done, total_m, ratio_str):
+                                if progress_callback:
+                                    base = 60 + int((cp_idx / total_cutplans) * 35)
+                                    step = int((1 / total_cutplans) * 35 * (done / total_m))
+                                    progress_callback(base + step, f"Preparing costs for {cp_name} — marker {done}/{total_m}")
+
+                            new_results = quick_nest_markers(
+                                dxf_path=dxf_path,
+                                rul_path=rul_path,
+                                material=cpu_material,
+                                sizes=sizes,
+                                ratio_strs=needed_ratios,
+                                fabric_width_mm=cpu_fabric_width_mm,
+                                time_limit=20.0,
+                                rotation_mode=rotation_mode,
+                                file_type=pattern_obj_cpu.file_type,
+                                progress_callback=cpu_progress,
+                            )
+                            cpu_cache.update(new_results)
+
+                        # Update this cutplan's markers with CPU lengths + SVG previews
+                        any_updated = False
+                        for marker in cp.markers:
+                            if marker.ratio_str in cpu_cache:
+                                r = cpu_cache[marker.ratio_str]
+                                marker.efficiency = r['utilization']
+                                marker.length_yards = r['length_yards']
+                                any_updated = True
+
+                                # Create/update MarkerLayout with quick-nest SVG
+                                svg = r.get('svg_preview')
+                                if svg:
+                                    existing_layout = db.query(MarkerLayout).filter(
+                                        MarkerLayout.cutplan_marker_id == marker.id
+                                    ).first()
+                                    if existing_layout:
+                                        existing_layout.utilization = r['utilization']
+                                        existing_layout.strip_length_mm = r.get('length_mm', 0)
+                                        existing_layout.length_yards = r['length_yards']
+                                        existing_layout.computation_time_s = r.get('computation_time_s', 0)
+                                        existing_layout.svg_preview = svg
+                                    else:
+                                        layout = MarkerLayout(
+                                            cutplan_marker_id=marker.id,
+                                            utilization=r['utilization'],
+                                            strip_length_mm=r.get('length_mm', 0),
+                                            length_yards=r['length_yards'],
+                                            computation_time_s=r.get('computation_time_s', 0),
+                                            svg_preview=svg,
+                                            piece_buffer_mm=0.0,
+                                            edge_buffer_mm=0.0,
+                                            time_limit_s=20.0,
+                                            rotation_mode=rotation_mode,
+                                        )
+                                        db.add(layout)
+
+                        if any_updated:
+                            # Recalculate costs using updated marker lengths
+                            marker_list = [
+                                {
+                                    "ratio_str": m.ratio_str,
+                                    "efficiency": m.efficiency,
+                                    "length_yards": m.length_yards,
+                                    "total_plies": m.total_plies,
+                                    "cuts": m.cuts,
+                                }
+                                for m in cp.markers
+                            ]
+                            # Compute summary fields required by calculate_cutplan_costs
+                            cp_total_yards = sum(
+                                (m.length_yards or 0) * (m.total_plies or 0) for m in cp.markers
+                            )
+                            cp_total_plies = sum(m.total_plies or 0 for m in cp.markers)
+                            cp_total_cuts = sum(
+                                ((m.total_plies or 0) + effective_max_ply_height - 1) // effective_max_ply_height
+                                for m in cp.markers if (m.total_plies or 0) > 0
+                            )
+                            cp_unique_markers = len(cp.markers)
+                            # Weighted efficiency: weight by garments cut (bundles × plies)
+                            def _garments(m):
+                                bundles = sum(int(x) for x in (m.ratio_str or "0").split("-")) if m.ratio_str else 1
+                                return bundles * (m.total_plies or 0)
+                            _total_garments = sum(_garments(m) for m in cp.markers)
+                            cp_avg_efficiency = (
+                                sum((m.efficiency or 0) * _garments(m) for m in cp.markers) / _total_garments
+                                if cp.markers and _total_garments > 0 else 0
+                            )
+                            costs = calculate_cutplan_costs(
+                                {
+                                    "markers": marker_list,
+                                    "efficiency": cp_avg_efficiency,
+                                    "total_yards": cp_total_yards,
+                                    "total_plies": cp_total_plies,
+                                    "total_cuts": cp_total_cuts,
+                                    "unique_markers": cp_unique_markers,
+                                },
+                                fabric_cost_per_yard=effective_fabric_cost,
+                                max_ply_height=effective_max_ply_height,
+                                spreading_cost_per_yard=cost_config.spreading_cost_per_yard,
+                                spreading_cost_per_ply=getattr(cost_config, 'spreading_cost_per_ply', 0.013),
+                                cutting_cost_per_cm=cutting_cost_per_cm,
+                                prep_cost_per_meter=prep_cost_per_m,
+                                perimeter_by_size=perimeter_for_material,
+                                sizes=sizes,
+                            )
+
+                            cp.efficiency = costs.get("efficiency", cp.efficiency)
+                            cp.total_yards = costs["total_yards"]
+                            cp.total_cost = costs["total_cost"]
+                            cp.fabric_cost = costs["fabric_cost"]
+                            cp.spreading_cost = costs["spreading_cost"]
+                            cp.cutting_cost = costs["cutting_cost"]
+                            cp.prep_cost = costs["prep_cost"]
+
+                        # Recompute floor MC with updated CPU lengths (all cutplans)
+                        try:
+                            _is_endbit = bool((cp.solver_config or {}).get("endbit_fill_rate"))
+                            mc_specs = [
+                                MarkerSpec(
+                                    marker_label=m.marker_label or f"M{i+1}",
+                                    length_yards=m.length_yards or 0,
+                                    plies=m.total_plies or 0,
+                                    ratio_str=m.ratio_str or "0",
+                                )
+                                for i, m in enumerate(cp.markers)
+                                if (m.length_yards or 0) > 0 and (m.total_plies or 0) > 0
+                            ]
+                            if mc_specs:
+                                waste = estimate_floor_waste(
+                                    mc_specs,
+                                    max_ply_height=effective_max_ply_height,
+                                    buffer_step_pct=0.002,
+                                )
+                                if waste:
+                                    cfg = dict(cp.solver_config or {})
+                                    cfg.update(waste)
+                                    cp.solver_config = cfg
+                                    flag_modified(cp, "solver_config")
+                        except Exception as mc_err:
+                            print(f"[CutplanService] Floor MC failed for {cp_name}: {mc_err}")
+
+                        # Commit this cutplan immediately so frontend sees it
+                        db.commit()
+                        completed_strategies += 1
+                        print(f"[CutplanService] Cost estimates ready for {cp_name} ({cp_idx + 1}/{total_cutplans})")
+
+                    print(f"[CutplanService] Cost estimates complete: {len(cpu_cache)} unique markers nested across {total_cutplans} cutplans")
+
+            except Exception as e:
+                # Cost estimation is best-effort — don't fail the whole job
+                print(f"[CutplanService] Cost estimation failed (non-fatal): {e}")
+                import traceback
+                traceback.print_exc()
 
         if progress_callback:
             progress_callback(100, f"Complete — {len(cutplans)} cutplan options generated")

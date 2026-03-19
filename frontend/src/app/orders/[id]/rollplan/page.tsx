@@ -50,42 +50,56 @@ export default function RollPlanPage() {
 
   // State
   const [selectedCutplanId, setSelectedCutplanId] = useState<string>('')
-  const [rollPlan, setRollPlan] = useState<RollPlan | null>(null)
   const [existingRollPlans, setExistingRollPlans] = useState<RollPlan[]>([])
-  const [isCreating, setIsCreating] = useState(false)
-  const [showConfig, setShowConfig] = useState(true)
 
-  // Config
-  const [mode, setMode] = useState<string>('both')
-  const [numSimulations, setNumSimulations] = useState(100)
-  const [minReuseLength, setMinReuseLength] = useState(0.5)
-  const [rollSource, setRollSource] = useState<'pseudo' | 'upload'>('pseudo')
-  const [pseudoAvg, setPseudoAvg] = useState(100)
-  const [pseudoDelta, setPseudoDelta] = useState(20)
-  const [gaPopSize, setGaPopSize] = useState(30)
-  const [gaGenerations, setGaGenerations] = useState(50)
-  const [showGATuning, setShowGATuning] = useState(false)
+  // Shared config
+  const [rollSource, setRollSource] = useState<'generated' | 'upload'>('generated')
+  const [generatedAvg, setGeneratedAvg] = useState(100)
+  const [generatedDelta, setGeneratedDelta] = useState(20)
   const [uploadFile, setUploadFile] = useState<File | null>(null)
   const [uploadPreview, setUploadPreview] = useState<RollPreviewResponse | null>(null)
   const [isParsingPreview, setIsParsingPreview] = useState(false)
 
-  // Progress
-  const [isRunning, setIsRunning] = useState(false)
-  const [progress, setProgress] = useState(0)
-  const [progressMessage, setProgressMessage] = useState('')
-  const pollingRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  // Evaluate panel state
+  const [wasteThreshold, setWasteThreshold] = useState(2.0)
+  const [evalRollPlan, setEvalRollPlan] = useState<RollPlan | null>(null)
+  const [isEvalRunning, setIsEvalRunning] = useState(false)
+  const [evalProgress, setEvalProgress] = useState(0)
+  const [evalProgressMessage, setEvalProgressMessage] = useState('')
+  const evalPollingRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const [evalDockets, setEvalDockets] = useState<CutDocket[]>([])
+  const [evalExpandedDocket, setEvalExpandedDocket] = useState<number | null>(null)
 
-  // Results
-  const [docketSource, setDocketSource] = useState<'mc' | 'ga'>('ga')
-  const [dockets, setDockets] = useState<CutDocket[]>([])
-  const [expandedDocket, setExpandedDocket] = useState<number | null>(null)
-  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
+  // Optimize panel state
+  const [optRollPlan, setOptRollPlan] = useState<RollPlan | null>(null)
+  const [isOptRunning, setIsOptRunning] = useState(false)
+  const [optProgress, setOptProgress] = useState(0)
+  const [optProgressMessage, setOptProgressMessage] = useState('')
+  const optPollingRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const [optDockets, setOptDockets] = useState<CutDocket[]>([])
+  const [optExpandedDocket, setOptExpandedDocket] = useState<number | null>(null)
+
+  // UI toggles
+  const [showAllReports, setShowAllReports] = useState(false)
+  const [showGeneratedConfig, setShowGeneratedConfig] = useState(false)
+
+  // Downloads / misc
   const [isDownloadingExcel, setIsDownloadingExcel] = useState(false)
+  const [isDownloadingCutplan, setIsDownloadingCutplan] = useState(false)
+  const [isDownloadingEvalExcel, setIsDownloadingEvalExcel] = useState(false)
+
+  // Shortfall confirmation state
+  const [shortfallPlanId, setShortfallPlanId] = useState<string | null>(null)
+  const [shortfallMessage, setShortfallMessage] = useState('')
+  const [shortfallPanel, setShortfallPanel] = useState<'eval' | 'opt'>('eval')
 
   // Tuning state
   const [isTuning, setIsTuning] = useState(false)
   const [tunedCutplanId, setTunedCutplanId] = useState<string | null>(null)
   const tunePollingRef = useRef<ReturnType<typeof setInterval> | null>(null)
+
+  // Backward compat: rollPlan points to opt panel (for shared handlers)
+  const rollPlan = optRollPlan || evalRollPlan
 
   // Auto-select first eligible cutplan
   useEffect(() => {
@@ -99,16 +113,15 @@ export default function RollPlanPage() {
     if (!selectedCutplanId) return
     api.listRollPlans(selectedCutplanId).then(plans => {
       setExistingRollPlans(plans)
-      // If there's a completed one, load it
-      const completed = plans.find(p => p.status === 'completed')
-      const running = plans.find(p => p.status === 'running')
-      if (completed) {
-        setRollPlan(completed)
-        setShowConfig(false)
-      } else if (running) {
-        setRollPlan(running)
-        setShowConfig(false)
-        startPolling(running.id)
+      // Load most recent completed plans into the appropriate panels
+      const completedPlans = plans.filter(p => p.status === 'completed')
+      for (const plan of completedPlans) {
+        if (plan.ga) {
+          setOptRollPlan(prev => prev || plan)
+        }
+        if (plan.monte_carlo && !plan.ga) {
+          setEvalRollPlan(prev => prev || plan)
+        }
       }
     }).catch(() => {})
   }, [selectedCutplanId])
@@ -116,48 +129,63 @@ export default function RollPlanPage() {
   // Cleanup polling on unmount
   useEffect(() => {
     return () => {
-      if (pollingRef.current) clearInterval(pollingRef.current)
+      if (evalPollingRef.current) clearInterval(evalPollingRef.current)
+      if (optPollingRef.current) clearInterval(optPollingRef.current)
       if (tunePollingRef.current) clearInterval(tunePollingRef.current)
     }
   }, [])
 
-  // Load dockets when rollplan completes or source changes
+  // Load eval dockets when eval rollplan completes
   useEffect(() => {
-    if (!rollPlan || rollPlan.status !== 'completed') return
-    const source = docketSource
-    // Check if the requested source is available
-    if (source === 'ga' && !rollPlan.ga) {
-      if (rollPlan.monte_carlo) setDocketSource('mc')
-      return
+    if (!evalRollPlan || evalRollPlan.status !== 'completed') return
+    if (evalRollPlan.monte_carlo) {
+      api.getRollPlanDockets(evalRollPlan.id, 'mc').then(setEvalDockets).catch(() => setEvalDockets([]))
     }
-    if (source === 'mc' && !rollPlan.monte_carlo) {
-      if (rollPlan.ga) setDocketSource('ga')
-      return
-    }
-    api.getRollPlanDockets(rollPlan.id, source).then(setDockets).catch(() => setDockets([]))
-  }, [rollPlan?.id, rollPlan?.status, docketSource])
+  }, [evalRollPlan?.id, evalRollPlan?.status])
 
-  const startPolling = useCallback((planId: string) => {
-    setIsRunning(true)
+  // Load opt dockets when opt rollplan completes
+  useEffect(() => {
+    if (!optRollPlan || optRollPlan.status !== 'completed') return
+    if (optRollPlan.ga) {
+      api.getRollPlanDockets(optRollPlan.id, 'ga').then(setOptDockets).catch(() => setOptDockets([]))
+    }
+  }, [optRollPlan?.id, optRollPlan?.status])
+
+  const startPolling = useCallback((planId: string, panel: 'eval' | 'opt') => {
+    const setRunning = panel === 'eval' ? setIsEvalRunning : setIsOptRunning
+    const setProgressFn = panel === 'eval' ? setEvalProgress : setOptProgress
+    const setMessage = panel === 'eval' ? setEvalProgressMessage : setOptProgressMessage
+    const pollingRef = panel === 'eval' ? evalPollingRef : optPollingRef
+    const setPlan = panel === 'eval' ? setEvalRollPlan : setOptRollPlan
+
+    setRunning(true)
     if (pollingRef.current) clearInterval(pollingRef.current)
     pollingRef.current = setInterval(async () => {
       try {
         const status: RollPlanStatus = await api.getRollPlanStatus(planId)
-        setProgress(status.progress)
-        setProgressMessage(status.message)
+        setProgressFn(status.progress)
+        setMessage(status.message)
 
-        if (status.status === 'completed' || status.status === 'failed' || status.status === 'cancelled') {
+        if (status.status === 'completed' || status.status === 'failed' || status.status === 'cancelled' || status.status === 'needs_confirmation') {
           if (pollingRef.current) clearInterval(pollingRef.current)
           pollingRef.current = null
-          setIsRunning(false)
+          setRunning(false)
 
-          if (status.status === 'completed') {
+          if (status.status === 'needs_confirmation') {
+            // Real rolls shortfall — ask user to confirm
+            setShortfallPlanId(planId)
+            setShortfallMessage(status.message || 'Uploaded rolls do not cover the cutplan requirement.')
+            setShortfallPanel(panel)
+          } else if (status.status === 'completed') {
             const fullPlan = await api.getRollPlan(planId)
-            setRollPlan(fullPlan)
-            setShowConfig(false)
-            toast({ title: 'Simulation complete', description: 'Roll plan results are ready.' })
+            setPlan(fullPlan)
+            // Refresh saved reports list
+            if (selectedCutplanId) {
+              api.listRollPlans(selectedCutplanId).then(setExistingRollPlans).catch(() => {})
+            }
+            toast({ title: `${panel === 'eval' ? 'Evaluation' : 'Optimization'} complete`, description: 'Results are ready.' })
           } else if (status.status === 'failed') {
-            toast({ title: 'Simulation failed', description: status.message, variant: 'destructive' })
+            toast({ title: `${panel === 'eval' ? 'Evaluation' : 'Optimization'} failed`, description: status.message, variant: 'destructive' })
           } else {
             toast({ title: 'Simulation cancelled' })
           }
@@ -165,56 +193,68 @@ export default function RollPlanPage() {
       } catch {
         if (pollingRef.current) clearInterval(pollingRef.current)
         pollingRef.current = null
-        setIsRunning(false)
+        setRunning(false)
       }
     }, 2000)
-  }, [toast])
+  }, [toast, selectedCutplanId])
 
-  const handleRunSimulation = async () => {
+  const handleRunPanel = async (panel: 'eval' | 'opt', confirmShortfall?: boolean, existingPlanId?: string) => {
     if (!selectedCutplanId) return
-    setIsCreating(true)
+    const setRunning = panel === 'eval' ? setIsEvalRunning : setIsOptRunning
+    const setPlan = panel === 'eval' ? setEvalRollPlan : setOptRollPlan
+    const setProgressFn = panel === 'eval' ? setEvalProgress : setOptProgress
+    const setMessage = panel === 'eval' ? setEvalProgressMessage : setOptProgressMessage
+
+    setRunning(true)
     try {
-      // Create the roll plan
-      const result = await api.createRollPlan({
-        cutplan_id: selectedCutplanId,
-        mode,
-        num_simulations: numSimulations,
-        min_reuse_length_yards: minReuseLength,
-        pseudo_roll_avg_yards: rollSource === 'pseudo' ? pseudoAvg : undefined,
-        pseudo_roll_delta_yards: rollSource === 'pseudo' ? pseudoDelta : undefined,
-        ga_pop_size: gaPopSize,
-        ga_generations: gaGenerations,
-      })
+      let planId = existingPlanId
+      if (!planId) {
+        const result = await api.createRollPlan({
+          cutplan_id: selectedCutplanId,
+          mode: panel === 'eval' ? 'monte_carlo' : 'both',
+          num_simulations: 100,
+          pseudo_roll_avg_yards: rollSource === 'generated' ? generatedAvg : undefined,
+          pseudo_roll_delta_yards: rollSource === 'generated' ? generatedDelta : undefined,
+          waste_threshold_pct: wasteThreshold,
+          ga_pop_size: 30,
+          ga_generations: 50,
+        })
+        planId = result.id
 
-      const planId = result.id
-
-      // Upload rolls if needed
-      if (rollSource === 'upload' && uploadFile) {
-        await api.uploadRolls(planId, uploadFile)
+        // Upload rolls if needed
+        if (rollSource === 'upload' && uploadFile) {
+          await api.uploadRolls(planId, uploadFile)
+        }
       }
 
-      // Start simulation
-      await api.startRollSimulation(planId, { ga_pop_size: gaPopSize, ga_generations: gaGenerations })
+      // Start simulation (with confirm_shortfall for real rolls, auto-confirm for generated)
+      const autoConfirm = rollSource === 'generated' ? true : (confirmShortfall || false)
+      await api.startRollSimulation(planId, {
+        ga_pop_size: 30,
+        ga_generations: 50,
+        confirm_shortfall: autoConfirm,
+      })
 
-      setRollPlan({ id: planId, status: 'running' } as RollPlan)
-      setProgress(0)
-      setProgressMessage('Starting simulation...')
-      startPolling(planId)
-      setShowConfig(false)
+      setPlan({ id: planId, status: 'running' } as RollPlan)
+      setProgressFn(0)
+      setMessage('Starting simulation...')
+      startPolling(planId, panel)
     } catch (e) {
       toast({ title: 'Failed to start simulation', description: e instanceof Error ? e.message : 'Please try again', variant: 'destructive' })
-    } finally {
-      setIsCreating(false)
+      setRunning(false)
     }
   }
 
-  const handleCancel = async () => {
-    if (!rollPlan) return
+  const handleCancel = async (panel: 'eval' | 'opt') => {
+    const plan = panel === 'eval' ? evalRollPlan : optRollPlan
+    const pollingRef = panel === 'eval' ? evalPollingRef : optPollingRef
+    const setRunning = panel === 'eval' ? setIsEvalRunning : setIsOptRunning
+    if (!plan) return
     try {
-      await api.cancelRollSimulation(rollPlan.id)
+      await api.cancelRollSimulation(plan.id)
       if (pollingRef.current) clearInterval(pollingRef.current)
       pollingRef.current = null
-      setIsRunning(false)
+      setRunning(false)
       toast({ title: 'Simulation cancelled' })
     } catch (e) {
       toast({ title: 'Cancel failed', description: e instanceof Error ? e.message : '', variant: 'destructive' })
@@ -222,13 +262,12 @@ export default function RollPlanPage() {
   }
 
   const handleDelete = async () => {
-    if (!rollPlan) return
+    const planToDelete = optRollPlan || evalRollPlan
+    if (!planToDelete) return
     try {
-      await api.deleteRollPlan(rollPlan.id)
-      setRollPlan(null)
-      setDockets([])
-      setShowConfig(true)
-      setShowDeleteConfirm(false)
+      await api.deleteRollPlan(planToDelete.id)
+      if (optRollPlan?.id === planToDelete.id) { setOptRollPlan(null); setOptDockets([]) }
+      if (evalRollPlan?.id === planToDelete.id) { setEvalRollPlan(null); setEvalDockets([]) }
       toast({ title: 'Roll plan deleted' })
     } catch (e) {
       toast({ title: 'Delete failed', description: e instanceof Error ? e.message : '', variant: 'destructive' })
@@ -263,12 +302,45 @@ export default function RollPlanPage() {
     if (!rollPlan) return
     setIsDownloadingExcel(true)
     try {
-      await api.downloadRollPlanExcel(rollPlan.id, docketSource)
+      await api.downloadRollPlanExcel(rollPlan.id, 'ga')
       toast({ title: 'Roll plan downloaded' })
     } catch (e: unknown) {
       toast({ title: e instanceof Error ? e.message : 'Download failed', variant: 'destructive' })
     } finally {
       setIsDownloadingExcel(false)
+    }
+  }
+
+  const handleDownloadEvalExcel = async () => {
+    if (!evalRollPlan) return
+    setIsDownloadingEvalExcel(true)
+    try {
+      await api.downloadRollPlanExcel(evalRollPlan.id, 'mc')
+      toast({ title: 'Roll plan report downloaded' })
+    } catch (e: unknown) {
+      toast({ title: e instanceof Error ? e.message : 'Download failed', variant: 'destructive' })
+    } finally {
+      setIsDownloadingEvalExcel(false)
+    }
+  }
+
+  const handleDownloadCutplanExcel = async () => {
+    setIsDownloadingCutplan(true)
+    try {
+      const blob = await api.downloadOrderExcel(orderId)
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `cutplan_report.xlsx`
+      document.body.appendChild(a)
+      a.click()
+      URL.revokeObjectURL(url)
+      document.body.removeChild(a)
+      toast({ title: 'Cutplan report downloaded' })
+    } catch (e: unknown) {
+      toast({ title: e instanceof Error ? e.message : 'Download failed', variant: 'destructive' })
+    } finally {
+      setIsDownloadingCutplan(false)
     }
   }
 
@@ -278,7 +350,7 @@ export default function RollPlanPage() {
     setTunedCutplanId(null)
     try {
       await api.tuneCutplan(rollPlan.id, {
-        avg_roll_length_yards: rollPlan.pseudo_roll_avg_yards || pseudoAvg,
+        avg_roll_length_yards: rollPlan.pseudo_roll_avg_yards || generatedAvg,
         roll_penalty_weight: 2.0,
       })
 
@@ -335,13 +407,13 @@ export default function RollPlanPage() {
       <Card>
         <CardHeader className="pb-3">
           <CardTitle className="text-lg">Roll Plan</CardTitle>
-          <CardDescription>Simulate fabric roll allocation to minimize waste</CardDescription>
+          <CardDescription>Optimize roll-to-marker assignment and estimate waste</CardDescription>
         </CardHeader>
         <CardContent>
           <div className="flex items-center gap-4 flex-wrap">
             <div className="flex items-center gap-2">
               <label className="text-sm font-medium">Cutplan:</label>
-              <Select value={selectedCutplanId} onValueChange={(v) => { setSelectedCutplanId(v); setRollPlan(null); setDockets([]); setShowConfig(true) }}>
+              <Select value={selectedCutplanId} onValueChange={(v) => { setSelectedCutplanId(v); setEvalRollPlan(null); setOptRollPlan(null); setEvalDockets([]); setOptDockets([]) }}>
                 <SelectTrigger className="w-[260px]">
                   <SelectValue placeholder="Select cutplan" />
                 </SelectTrigger>
@@ -366,307 +438,137 @@ export default function RollPlanPage() {
         </CardContent>
       </Card>
 
-      {/* Section B: Simulation Config */}
-      {showConfig && !isRunning && (
-        <Card className="border-primary/30">
-          <CardHeader>
-            <div className="flex items-center justify-between">
-              <div>
-                <CardTitle className="text-base">Roll Plan Settings</CardTitle>
-                <CardDescription>Assign fabric rolls to markers and estimate waste</CardDescription>
+      {/* Roll Configuration */}
+      <Card>
+        <CardHeader className="pb-3">
+          <CardTitle className="text-base">Roll Configuration</CardTitle>
+          <CardDescription>Upload your actual roll inventory or create simulated rolls for cutplan refinement</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <div className="space-y-4">
+            {/* Upload Rolls — primary, always visible */}
+            <div>
+              <div className="flex items-center justify-between mb-1">
+                <label className="text-sm font-medium">Upload Roll Inventory</label>
+                <button
+                  onClick={handleDownloadTemplate}
+                  className="flex items-center gap-1 text-xs text-primary hover:underline"
+                >
+                  <Download className="h-3 w-3" />
+                  Download sample template
+                </button>
               </div>
-            </div>
-          </CardHeader>
-          <CardContent>
-            <div className="space-y-5">
-              {/* Explainer */}
-              <div className="text-sm text-muted-foreground bg-muted/30 rounded-lg p-3 space-y-1">
-                <p><strong>Simulate Cutting Floor</strong> — runs many random roll orderings to measure how much waste this cutplan produces on average. Tells you if the cutplan is good.</p>
-                <p><strong>Optimize Roll Plan</strong> — finds the best order to use your rolls, minimizing wasted end-bits. Produces cut dockets for the cutting room.</p>
-                <p><strong>Simulate + Optimize</strong> — does both: first evaluates the cutplan, then finds the best roll assignment.</p>
-              </div>
-
-              {/* Mode */}
-              <div>
-                <label className="text-sm font-medium mb-2 block">What do you want to do?</label>
-                <div className="flex gap-2">
-                  {[
-                    { value: 'monte_carlo', label: 'Simulate Cutting Floor', desc: 'Run N random scenarios to measure waste' },
-                    { value: 'ga', label: 'Optimize Roll Plan', desc: 'Find the best roll-to-marker assignment' },
-                    { value: 'both', label: 'Simulate + Optimize', desc: 'Evaluate waste, then find best plan' },
-                  ].map(opt => (
-                    <button
-                      key={opt.value}
-                      onClick={() => setMode(opt.value)}
-                      className={`px-3 py-2 rounded-lg border text-sm transition-all flex-1 ${
-                        mode === opt.value
-                          ? 'bg-primary text-primary-foreground border-primary'
-                          : 'bg-muted/30 hover:bg-muted border-border'
-                      }`}
-                    >
-                      <div className="font-medium">{opt.label}</div>
-                      <div className={`text-xs ${mode === opt.value ? 'text-primary-foreground/80' : 'text-muted-foreground'}`}>
-                        {opt.desc}
-                      </div>
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              {/* MC Runs + Min Reuse Length */}
-              <div className="grid grid-cols-2 gap-4">
-                {(mode === 'monte_carlo' || mode === 'both') && (
-                  <div>
-                    <label className="text-sm font-medium mb-1 block">Simulation Runs</label>
-                    <input
-                      type="number"
-                      value={numSimulations}
-                      onChange={e => setNumSimulations(parseInt(e.target.value) || 100)}
-                      min={10}
-                      max={1000}
-                      className="w-full px-3 py-2 border rounded-md text-sm"
-                    />
-                    <p className="text-xs text-muted-foreground mt-1">How many random cutting-floor scenarios to test</p>
-                  </div>
-                )}
-                <div>
-                  <label className="text-sm font-medium mb-1 block">Min Reuse Length (yd)</label>
-                  <input
-                    type="number"
-                    value={minReuseLength}
-                    onChange={e => setMinReuseLength(parseFloat(e.target.value) || 0.5)}
-                    min={0}
-                    step={0.1}
-                    className="w-full px-3 py-2 border rounded-md text-sm"
-                  />
-                  <p className="text-xs text-muted-foreground mt-1">End-bits shorter than this are scrapped</p>
-                </div>
-              </div>
-
-              {/* Roll Source */}
-              <div>
-                <label className="text-sm font-medium mb-2 block">Roll Source</label>
-                <div className="flex gap-2">
-                  <button
-                    onClick={() => setRollSource('pseudo')}
-                    className={`px-3 py-2 rounded-lg border text-sm transition-all ${
-                      rollSource === 'pseudo'
-                        ? 'bg-primary text-primary-foreground border-primary'
-                        : 'bg-muted/30 hover:bg-muted border-border'
-                    }`}
-                  >
-                    Pseudo Rolls (Default)
-                  </button>
-                  <button
-                    onClick={() => setRollSource('upload')}
-                    className={`px-3 py-2 rounded-lg border text-sm transition-all ${
-                      rollSource === 'upload'
-                        ? 'bg-primary text-primary-foreground border-primary'
-                        : 'bg-muted/30 hover:bg-muted border-border'
-                    }`}
-                  >
-                    <Upload className="inline h-3.5 w-3.5 mr-1" />
-                    Upload Excel
-                  </button>
-                </div>
-              </div>
-
-              {/* Pseudo-roll config */}
-              {rollSource === 'pseudo' && (
-                <div className="grid grid-cols-2 gap-4">
-                  <div>
-                    <label className="text-sm font-medium mb-1 block">Avg Roll Length (yd)</label>
-                    <input
-                      type="number"
-                      value={pseudoAvg}
-                      onChange={e => setPseudoAvg(parseFloat(e.target.value) || 100)}
-                      min={10}
-                      className="w-full px-3 py-2 border rounded-md text-sm"
-                    />
-                  </div>
-                  <div>
-                    <label className="text-sm font-medium mb-1 block">Delta +/- (yd)</label>
-                    <input
-                      type="number"
-                      value={pseudoDelta}
-                      onChange={e => setPseudoDelta(parseFloat(e.target.value) || 20)}
-                      min={0}
-                      className="w-full px-3 py-2 border rounded-md text-sm"
-                    />
-                    <p className="text-xs text-muted-foreground mt-1">Range: {pseudoAvg - pseudoDelta}–{pseudoAvg + pseudoDelta} yd</p>
-                  </div>
+              <input
+                type="file"
+                accept=".xlsx,.xls"
+                onChange={(e) => { handleFileUpload(e); setRollSource('upload') }}
+                className="w-full px-3 py-2 border rounded-md text-sm file:mr-3 file:rounded-md file:border-0 file:bg-primary file:px-3 file:py-1 file:text-sm file:text-primary-foreground"
+              />
+              <p className="text-xs text-muted-foreground mt-1">
+                Required columns: <span className="font-mono">Roll Number</span>, <span className="font-mono">Roll Length</span>.
+                Optional: <span className="font-mono">Unit</span> (default yd), <span className="font-mono">Roll Width</span>, <span className="font-mono">Shade Group</span>.
+              </p>
+              {isParsingPreview && (
+                <div className="mt-2 flex items-center gap-2 text-xs text-muted-foreground">
+                  <Loader2 className="h-3 w-3 animate-spin" /> Parsing file...
                 </div>
               )}
-
-              {/* Upload file */}
-              {rollSource === 'upload' && (
-                <div>
-                  <div className="flex items-center justify-between mb-1">
-                    <label className="text-sm font-medium">Roll Inventory Excel</label>
-                    <button
-                      onClick={handleDownloadTemplate}
-                      className="flex items-center gap-1 text-xs text-primary hover:underline"
-                    >
-                      <Download className="h-3 w-3" />
-                      Download sample template
-                    </button>
+              {uploadPreview && (
+                <div className="mt-2 space-y-2">
+                  <div className="p-2 bg-muted/30 rounded text-xs space-y-1">
+                    <div className="font-medium">
+                      {uploadPreview.rolls_count} rolls — {uploadPreview.total_length_yards.toFixed(1)} yd total
+                    </div>
+                    <div className="text-muted-foreground">
+                      Avg {uploadPreview.avg_length_yards.toFixed(1)} yd,
+                      Median {uploadPreview.median_length_yards.toFixed(1)} yd,
+                      Min {uploadPreview.min_length_yards.toFixed(1)} yd,
+                      Max {uploadPreview.max_length_yards.toFixed(1)} yd
+                    </div>
                   </div>
-                  <input
-                    type="file"
-                    accept=".xlsx,.xls"
-                    onChange={handleFileUpload}
-                    className="w-full px-3 py-2 border rounded-md text-sm file:mr-3 file:rounded-md file:border-0 file:bg-primary file:px-3 file:py-1 file:text-sm file:text-primary-foreground"
-                  />
-                  <p className="text-xs text-muted-foreground mt-1">
-                    Required columns: <span className="font-mono">Roll Number</span>, <span className="font-mono">Roll Length</span>.
-                    Optional: <span className="font-mono">Unit</span> (default yd), <span className="font-mono">Roll Width</span>, <span className="font-mono">Shade Group</span>.
-                  </p>
-                  {isParsingPreview && (
-                    <div className="mt-2 flex items-center gap-2 text-xs text-muted-foreground">
-                      <Loader2 className="h-3 w-3 animate-spin" /> Parsing file...
-                    </div>
+                  {uploadPreview.preview_rows.length > 0 && (
+                    <table className="w-full text-xs border-collapse">
+                      <thead>
+                        <tr className="border-b text-left text-muted-foreground">
+                          <th className="py-1 pr-3">Roll #</th>
+                          <th className="py-1 pr-3 text-right">Length (yd)</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {uploadPreview.preview_rows.map((r, i) => (
+                          <tr key={i} className="border-b border-border/30">
+                            <td className="py-1 pr-3 font-mono">{r.roll_number}</td>
+                            <td className="py-1 pr-3 text-right">{r.length_yards.toFixed(1)}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
                   )}
-                  {uploadPreview && (
-                    <div className="mt-2 space-y-2">
-                      {/* Summary */}
-                      <div className="p-2 bg-muted/30 rounded text-xs space-y-1">
-                        <div className="font-medium">
-                          {uploadPreview.rolls_count} rolls — {uploadPreview.total_length_yards.toFixed(1)} yd total
-                        </div>
-                        <div className="text-muted-foreground">
-                          Avg {uploadPreview.avg_length_yards.toFixed(1)} yd,
-                          Median {uploadPreview.median_length_yards.toFixed(1)} yd,
-                          Min {uploadPreview.min_length_yards.toFixed(1)} yd,
-                          Max {uploadPreview.max_length_yards.toFixed(1)} yd
-                        </div>
+                  {uploadPreview.rolls_count > 10 && (
+                    <p className="text-xs text-muted-foreground">...and {uploadPreview.rolls_count - 10} more</p>
+                  )}
+                  {uploadPreview.fabric_required_yards != null && (
+                    uploadPreview.total_length_yards < uploadPreview.fabric_required_yards ? (
+                      <div className="p-2 rounded text-xs bg-amber-50 border border-amber-200 text-amber-800">
+                        Uploaded: {uploadPreview.total_length_yards.toFixed(1)} yd — Required: {uploadPreview.fabric_required_yards.toFixed(1)} yd.
+                        Generated rolls will be added to cover the shortfall.
                       </div>
-                      {/* Preview table */}
-                      {uploadPreview.preview_rows.length > 0 && (
-                        <table className="w-full text-xs border-collapse">
-                          <thead>
-                            <tr className="border-b text-left text-muted-foreground">
-                              <th className="py-1 pr-3">Roll #</th>
-                              <th className="py-1 pr-3 text-right">Length (yd)</th>
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {uploadPreview.preview_rows.map((r, i) => (
-                              <tr key={i} className="border-b border-border/30">
-                                <td className="py-1 pr-3 font-mono">{r.roll_number}</td>
-                                <td className="py-1 pr-3 text-right">{r.length_yards.toFixed(1)}</td>
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
-                      )}
-                      {uploadPreview.rolls_count > 10 && (
-                        <p className="text-xs text-muted-foreground">...and {uploadPreview.rolls_count - 10} more</p>
-                      )}
-                      {/* Shortfall banner */}
-                      {uploadPreview.fabric_required_yards != null && uploadPreview.shortfall_yards != null && (
-                        uploadPreview.shortfall_yards > 0 ? (
-                          <div className="p-2 rounded text-xs bg-amber-50 border border-amber-200 text-amber-800">
-                            Uploaded: {uploadPreview.total_length_yards.toFixed(1)} yd — Required: {uploadPreview.fabric_required_yards.toFixed(1)} yd (+ 5% buffer)
-                            {' → '}{uploadPreview.synthetic_rolls_needed} synthetic roll{uploadPreview.synthetic_rolls_needed !== 1 ? 's' : ''} will be added
-                            (median {uploadPreview.synthetic_roll_length_yards?.toFixed(1)} yd, marked with <span className="font-mono">_S</span> suffix)
-                          </div>
-                        ) : (
-                          <div className="p-2 rounded text-xs bg-green-50 border border-green-200 text-green-700">
-                            <CheckCircle2 className="inline h-3 w-3 mr-1" />
-                            Uploaded rolls cover cutplan requirement ({uploadPreview.fabric_required_yards.toFixed(1)} yd)
-                          </div>
-                        )
-                      )}
-                    </div>
+                    ) : (
+                      <div className="p-2 rounded text-xs bg-green-50 border border-green-200 text-green-700">
+                        <CheckCircle2 className="inline h-3 w-3 mr-1" />
+                        Uploaded rolls cover cutplan requirement ({uploadPreview.fabric_required_yards.toFixed(1)} yd)
+                      </div>
+                    )
                   )}
                 </div>
               )}
+            </div>
 
-              {/* GA Tuning (collapsible) */}
-              {(mode === 'ga' || mode === 'both') && (
-                <div>
-                  <button
-                    onClick={() => setShowGATuning(!showGATuning)}
-                    className="flex items-center gap-1 text-sm font-medium text-muted-foreground hover:text-foreground transition-colors"
-                  >
-                    {showGATuning ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
-                    Optimizer Tuning
-                  </button>
-                  {showGATuning && (
-                    <div className="grid grid-cols-2 gap-4 mt-2 pl-5">
-                      <div>
-                        <label className="text-sm font-medium mb-1 block">Population Size</label>
-                        <input
-                          type="number"
-                          value={gaPopSize}
-                          onChange={e => setGaPopSize(parseInt(e.target.value) || 30)}
-                          min={10}
-                          max={200}
-                          className="w-full px-3 py-2 border rounded-md text-sm"
-                        />
-                      </div>
-                      <div>
-                        <label className="text-sm font-medium mb-1 block">Generations</label>
-                        <input
-                          type="number"
-                          value={gaGenerations}
-                          onChange={e => setGaGenerations(parseInt(e.target.value) || 50)}
-                          min={10}
-                          max={500}
-                          className="w-full px-3 py-2 border rounded-md text-sm"
-                        />
-                      </div>
+            {/* Simulate with Generated Rolls — collapsible */}
+            <div className="border rounded-lg">
+              <button
+                onClick={() => { setShowGeneratedConfig(!showGeneratedConfig); if (!showGeneratedConfig) setRollSource('generated') }}
+                className="w-full flex items-center gap-2 p-3 text-sm font-medium hover:bg-muted/30 transition-colors rounded-lg"
+              >
+                {showGeneratedConfig ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
+                Simulate with Generated Rolls
+                {rollSource === 'generated' && <span className="text-xs text-primary font-normal ml-auto">Active</span>}
+              </button>
+              {showGeneratedConfig && (
+                <div className="px-3 pb-3 space-y-3">
+                  <div className="p-2.5 bg-blue-50 border border-blue-100 rounded text-xs text-blue-700">
+                    Use generated rolls to simulate floor waste scenarios when you don&apos;t have real roll inventory. This helps evaluate how different roll length distributions affect end-bit waste.
+                  </div>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="text-xs font-medium mb-1 block">Avg Length (yd)</label>
+                      <input
+                        type="number"
+                        value={generatedAvg}
+                        onChange={e => setGeneratedAvg(parseFloat(e.target.value) || 100)}
+                        min={10}
+                        className="w-full px-2 py-1.5 border rounded-md text-sm"
+                      />
+                      <p className="text-xs text-muted-foreground mt-0.5">Average length of generated rolls. Typical factory rolls: 80-120 yards.</p>
                     </div>
-                  )}
+                    <div>
+                      <label className="text-xs font-medium mb-1 block">Delta +/- (yd)</label>
+                      <input
+                        type="number"
+                        value={generatedDelta}
+                        onChange={e => setGeneratedDelta(parseFloat(e.target.value) || 20)}
+                        min={0}
+                        className="w-full px-2 py-1.5 border rounded-md text-sm"
+                      />
+                      <p className="text-xs text-muted-foreground mt-0.5">Variation range. Rolls will range from ({generatedAvg} - {generatedDelta}) to ({generatedAvg} + {generatedDelta}) = {generatedAvg - generatedDelta}–{generatedAvg + generatedDelta} yd</p>
+                    </div>
+                  </div>
                 </div>
               )}
-
-              {/* Run button */}
-              <Button onClick={handleRunSimulation} disabled={isCreating || (rollSource === 'upload' && !uploadFile)} className="w-full">
-                {isCreating ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Play className="mr-2 h-4 w-4" />}
-                {isCreating ? 'Creating...' : 'Run Simulation'}
-              </Button>
             </div>
-          </CardContent>
-        </Card>
-      )}
-
-      {/* Section C: Progress Card */}
-      {isRunning && rollPlan && (
-        <Card className="border-purple-200 bg-purple-50/30">
-          <CardHeader>
-            <div className="flex items-center gap-3">
-              <div className="h-10 w-10 rounded-xl bg-gradient-to-br from-purple-500 to-purple-600 flex items-center justify-center">
-                <Loader2 className="h-5 w-5 text-white animate-spin" />
-              </div>
-              <div className="flex-1">
-                <CardTitle className="text-base">Roll Simulation Running</CardTitle>
-                <CardDescription>{progressMessage || 'Initializing...'}</CardDescription>
-              </div>
-              <div className="text-right text-sm font-medium tabular-nums">
-                {progress}%
-              </div>
-            </div>
-          </CardHeader>
-          <CardContent>
-            <div className="space-y-3">
-              {/* Progress bar */}
-              <div className="h-2 bg-purple-200 rounded-full overflow-hidden">
-                <div
-                  className="h-full bg-gradient-to-r from-purple-500 to-purple-600 rounded-full transition-all duration-500"
-                  style={{ width: `${progress}%` }}
-                />
-              </div>
-              <div className="flex justify-end">
-                <Button variant="outline" size="sm" onClick={handleCancel}>
-                  <XCircle className="mr-2 h-4 w-4" />
-                  Cancel
-                </Button>
-              </div>
-            </div>
-          </CardContent>
-        </Card>
-      )}
+          </div>
+        </CardContent>
+      </Card>
 
       {/* Pre-flight Warnings */}
       {rollPlan && rollPlan.preflight_warnings && rollPlan.preflight_warnings.length > 0 && (
@@ -676,7 +578,7 @@ export default function RollPlanPage() {
               <AlertCircle className="h-5 w-5 text-amber-500 mt-0.5 flex-shrink-0" />
               <div className="space-y-1">
                 <div className="font-medium text-sm text-amber-700">Pre-flight Warnings</div>
-                {rollPlan.preflight_warnings.map((w, i) => (
+                {rollPlan.preflight_warnings.map((w: { message: string }, i: number) => (
                   <p key={i} className="text-sm text-amber-600">{w.message}</p>
                 ))}
               </div>
@@ -685,311 +587,637 @@ export default function RollPlanPage() {
         </Card>
       )}
 
-      {/* Section D: Results */}
-      {rollPlan && rollPlan.status === 'completed' && (
-        <div className="space-y-6">
-          {/* Results header with plan info + new simulation button */}
-          <Card className="border-green-200 bg-green-50/30">
-            <CardContent className="py-4">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-3">
-                  <CheckCircle2 className="h-5 w-5 text-green-600" />
-                  <div>
-                    <div className="font-medium text-sm">Simulation Complete</div>
-                    <div className="text-xs text-muted-foreground">
-                      Mode: {rollPlan.mode === 'both' ? 'Simulate + Optimize' : rollPlan.mode === 'monte_carlo' ? 'Simulate' : 'Optimize'}
-                      {rollPlan.monte_carlo && ` | ${rollPlan.monte_carlo.num_simulations} simulation runs`}
-                      {rollPlan.ga?.generations_run && ` | ${rollPlan.ga.generations_run} optimizer iterations`}
-                      {' | '}Rolls: {rollPlan.rolls_count} ({rollPlan.real_rolls_count} real, {rollPlan.pseudo_rolls_count} pseudo)
-                    </div>
-                  </div>
+      {/* Shortfall Confirmation Dialog */}
+      {shortfallPlanId && (
+        <Card className="border-amber-300 bg-amber-50/50">
+          <CardContent className="py-4">
+            <div className="flex items-start gap-3">
+              <AlertCircle className="h-5 w-5 text-amber-500 mt-0.5 flex-shrink-0" />
+              <div className="space-y-3 flex-1">
+                <div>
+                  <div className="font-medium text-sm text-amber-800">Roll Shortfall Detected</div>
+                  <p className="text-sm text-amber-700 mt-1">{shortfallMessage}</p>
                 </div>
-                <Button variant="outline" size="sm" onClick={() => { setShowConfig(true); setRollPlan(null); setDockets([]) }}>
-                  <RotateCcw className="mr-2 h-4 w-4" />
-                  New Simulation
-                </Button>
+                <div className="flex gap-2">
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="border-amber-300 text-amber-700 hover:bg-amber-100"
+                    onClick={() => {
+                      // Re-run with confirm_shortfall=true using existing plan
+                      handleRunPanel(shortfallPanel, true, shortfallPlanId)
+                      setShortfallPlanId(null)
+                      setShortfallMessage('')
+                    }}
+                  >
+                    Confirm — Add Generated Rolls
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    className="text-muted-foreground"
+                    onClick={() => {
+                      setShortfallPlanId(null)
+                      setShortfallMessage('')
+                    }}
+                  >
+                    Cancel
+                  </Button>
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  Generated rolls will be added to cover the shortfall. Consider uploading more rolls or tuning the cutplan to reduce fabric requirement.
+                </p>
               </div>
-            </CardContent>
-          </Card>
-
-          {/* D1: Waste Summary Cards */}
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-            {rollPlan.monte_carlo ? (
-              <>
-                <WasteCard
-                  label="Type 1: Unusable"
-                  description="Remnants too short for any piece"
-                  stats={rollPlan.monte_carlo.unusable_waste}
-                  color="gray"
-                />
-                <WasteCard
-                  label="Type 2: End-bits"
-                  description="Could have been used (optimization target)"
-                  stats={rollPlan.monte_carlo.endbit_waste}
-                  color="amber"
-                  highlight
-                />
-                <WasteCard
-                  label="Type 3: Returnable"
-                  description="Long enough to return to warehouse"
-                  stats={rollPlan.monte_carlo.returnable_waste}
-                  color="green"
-                />
-                <WasteCard
-                  label="Real Waste (T1+T2)"
-                  description="Total unavoidable waste"
-                  stats={rollPlan.monte_carlo.real_waste}
-                  color="red"
-                />
-              </>
-            ) : rollPlan.ga ? (
-              <>
-                <SimpleWasteCard label="Type 1: Unusable" value={rollPlan.ga.waste.unusable_yards} color="gray" />
-                <SimpleWasteCard label="Type 2: End-bits" value={rollPlan.ga.waste.endbit_yards} color="amber" highlight />
-                <SimpleWasteCard label="Type 3: Returnable" value={rollPlan.ga.waste.returnable_yards} color="green" />
-                <SimpleWasteCard label="Real Waste" value={rollPlan.ga.waste.real_waste_yards} color="red" />
-              </>
-            ) : null}
-          </div>
-
-          {/* Waste Assessment + Tune Button */}
-          {rollPlan.waste_assessment && (
-            <Card className={rollPlan.waste_assessment.exceeds_threshold
-              ? 'border-amber-200 bg-amber-50/30'
-              : 'border-green-200 bg-green-50/30'
-            }>
-              <CardContent className="py-4">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-3">
-                    {rollPlan.waste_assessment.exceeds_threshold ? (
-                      <AlertCircle className="h-5 w-5 text-amber-500" />
-                    ) : (
-                      <CheckCircle2 className="h-5 w-5 text-green-600" />
-                    )}
-                    <div>
-                      <div className="font-medium text-sm">
-                        Waste Assessment: {rollPlan.waste_assessment.waste_pct.toFixed(1)}%
-                      </div>
-                      <div className="text-xs text-muted-foreground">
-                        {rollPlan.waste_assessment.recommendation}
-                      </div>
-                    </div>
-                  </div>
-                  {rollPlan.waste_assessment.exceeds_threshold && (
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={handleTuneCutplan}
-                      disabled={isTuning}
-                      className="border-amber-300 text-amber-700 hover:bg-amber-100"
-                    >
-                      {isTuning ? (
-                        <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                      ) : (
-                        <Wrench className="mr-2 h-4 w-4" />
-                      )}
-                      {isTuning ? 'Tuning...' : 'Tune Cutplan'}
-                    </Button>
-                  )}
-                </div>
-                {tunedCutplanId && (
-                  <div className="mt-3 p-2 bg-green-100 rounded text-sm text-green-700">
-                    Roll-tuned cutplan created. Select it from the cutplan dropdown above and run a new simulation to compare.
-                  </div>
-                )}
-              </CardContent>
-            </Card>
-          )}
-
-          {/* D2: MC vs GA Comparison */}
-          {rollPlan.monte_carlo && rollPlan.ga && (
-            <Card>
-              <CardHeader className="pb-3">
-                <CardTitle className="text-base">Simulation vs Optimized</CardTitle>
-              </CardHeader>
-              <CardContent>
-                <table className="w-full text-sm">
-                  <thead className="bg-muted/30">
-                    <tr className="border-b">
-                      <th className="text-left py-2 px-3 font-medium">Waste Type</th>
-                      <th className="text-right py-2 px-3 font-medium">Avg Simulation (yd)</th>
-                      <th className="text-right py-2 px-3 font-medium">Optimized Plan (yd)</th>
-                      <th className="text-right py-2 px-3 font-medium">Improvement</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    <ComparisonRow
-                      label="Unusable"
-                      mcAvg={rollPlan.monte_carlo.unusable_waste.avg}
-                      gaValue={rollPlan.ga.waste.unusable_yards}
-                    />
-                    <ComparisonRow
-                      label="End-bits"
-                      mcAvg={rollPlan.monte_carlo.endbit_waste.avg}
-                      gaValue={rollPlan.ga.waste.endbit_yards}
-                      highlight
-                    />
-                    <ComparisonRow
-                      label="Returnable"
-                      mcAvg={rollPlan.monte_carlo.returnable_waste.avg}
-                      gaValue={rollPlan.ga.waste.returnable_yards}
-                    />
-                    <ComparisonRow
-                      label="Real Waste"
-                      mcAvg={rollPlan.monte_carlo.real_waste.avg}
-                      gaValue={rollPlan.ga.waste.real_waste_yards}
-                    />
-                  </tbody>
-                </table>
-              </CardContent>
-            </Card>
-          )}
-
-          {/* D3: Cut Dockets Table */}
-          <Card>
-            <CardHeader className="pb-3">
-              <div className="flex items-center justify-between">
-                <CardTitle className="text-base">Cut Dockets</CardTitle>
-                <div className="flex gap-1 items-center">
-                  {rollPlan.monte_carlo && (
-                    <button
-                      onClick={() => setDocketSource('mc')}
-                      className={`px-3 py-1.5 rounded-md text-xs font-medium transition-all ${
-                        docketSource === 'mc'
-                          ? 'bg-primary text-primary-foreground'
-                          : 'bg-muted/30 hover:bg-muted text-muted-foreground'
-                      }`}
-                    >
-                      Simulation Best
-                    </button>
-                  )}
-                  {rollPlan.ga && (
-                    <button
-                      onClick={() => setDocketSource('ga')}
-                      className={`px-3 py-1.5 rounded-md text-xs font-medium transition-all ${
-                        docketSource === 'ga'
-                          ? 'bg-primary text-primary-foreground'
-                          : 'bg-muted/30 hover:bg-muted text-muted-foreground'
-                      }`}
-                    >
-                      Optimized Plan
-                    </button>
-                  )}
-                  {dockets.length > 0 && (
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={handleDownloadRollPlanExcel}
-                      disabled={isDownloadingExcel}
-                      className="ml-2 h-7 text-xs"
-                    >
-                      {isDownloadingExcel ? (
-                        <Loader2 className="h-3 w-3 animate-spin mr-1" />
-                      ) : (
-                        <Download className="h-3 w-3 mr-1" />
-                      )}
-                      Download Excel
-                    </Button>
-                  )}
-                </div>
-              </div>
-            </CardHeader>
-            <CardContent>
-              {dockets.length === 0 ? (
-                <p className="text-sm text-muted-foreground text-center py-4">No dockets available</p>
-              ) : (
-                <div className="overflow-x-auto">
-                  <table className="w-full text-sm">
-                    <thead className="bg-muted/30">
-                      <tr className="border-b">
-                        <th className="text-left py-2 px-3 font-medium w-8"></th>
-                        <th className="text-left py-2 px-3 font-medium">Cut #</th>
-                        <th className="text-left py-2 px-3 font-medium">Marker</th>
-                        <th className="text-left py-2 px-3 font-medium">Ratio</th>
-                        <th className="text-right py-2 px-3 font-medium">Length (yd)</th>
-                        <th className="text-right py-2 px-3 font-medium">Plies</th>
-                        <th className="text-right py-2 px-3 font-medium">Rolls</th>
-                        <th className="text-right py-2 px-3 font-medium">Fabric Used (yd)</th>
-                        <th className="text-right py-2 px-3 font-medium">End Bits (yd)</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {dockets.map((d) => (
-                        <DocketRow
-                          key={d.cut_number}
-                          docket={d}
-                          isExpanded={expandedDocket === d.cut_number}
-                          onToggle={() => setExpandedDocket(expandedDocket === d.cut_number ? null : d.cut_number)}
-                        />
-                      ))}
-                    </tbody>
-                    <tfoot className="bg-muted/50 font-medium">
-                      <tr>
-                        <td className="py-2 px-3" colSpan={4}>Total</td>
-                        <td className="py-2 px-3 text-right tabular-nums">
-                          {dockets.reduce((s, d) => s + d.total_fabric_yards, 0).toFixed(1)}
-                        </td>
-                        <td className="py-2 px-3 text-right tabular-nums">
-                          {(() => {
-                            const planned = dockets.reduce((s, d) => s + (d.plies_planned ?? d.plies), 0)
-                            const required = dockets.reduce((s, d) => s + d.plies, 0)
-                            return planned < required ? (
-                              <span className="text-amber-600">{planned}/{required}</span>
-                            ) : required
-                          })()}
-                        </td>
-                        <td className="py-2 px-3 text-right tabular-nums">
-                          {dockets.reduce((s, d) => s + d.assigned_rolls.length, 0)}
-                        </td>
-                        <td className="py-2 px-3 text-right tabular-nums">
-                          {dockets.reduce((s, d) => s + d.assigned_rolls.reduce((rs, r) => rs + r.fabric_used_yards, 0), 0).toFixed(1)}
-                        </td>
-                        <td className="py-2 px-3 text-right tabular-nums">
-                          {dockets.reduce((s, d) => s + d.total_end_bit_yards, 0).toFixed(2)}
-                        </td>
-                      </tr>
-                    </tfoot>
-                  </table>
-                </div>
-              )}
-            </CardContent>
-          </Card>
-
-          {/* D4: Actions */}
-          <div className="flex items-center gap-3 justify-end">
-            <Button variant="outline" size="sm" className="text-destructive hover:bg-destructive/10" onClick={() => setShowDeleteConfirm(true)}>
-              <Trash2 className="mr-2 h-4 w-4" />
-              Delete Roll Plan
-            </Button>
-          </div>
-
-          {/* Delete confirmation */}
-          {showDeleteConfirm && (
-            <Card className="border-destructive/50">
-              <CardContent className="py-4">
-                <div className="flex items-center justify-between">
-                  <p className="text-sm">Are you sure you want to delete this roll plan?</p>
-                  <div className="flex gap-2">
-                    <Button variant="outline" size="sm" onClick={() => setShowDeleteConfirm(false)}>Cancel</Button>
-                    <Button variant="destructive" size="sm" onClick={handleDelete}>Delete</Button>
-                  </div>
-                </div>
-              </CardContent>
-            </Card>
-          )}
-        </div>
+            </div>
+          </CardContent>
+        </Card>
       )}
 
-      {/* Error state */}
-      {rollPlan && rollPlan.status === 'failed' && (
+      {/* Two-Column Split: Evaluate (left) | Optimize (right) */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        {/* Left Panel: Evaluate Cutplan */}
+        <Card className="border-l-4 border-l-teal-400 border-teal-200/60 bg-gradient-to-br from-teal-50/60 to-cyan-50/20 shadow-sm">
+          <CardHeader className="pb-3">
+            <div className="flex items-start gap-3">
+              {/* Shield + pulse — cutplan health check */}
+              <svg viewBox="0 0 40 40" className="w-10 h-10 flex-shrink-0 mt-0.5" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <path d="M20 4 L33 10 L33 22 C33 30 26 36 20 38 C14 36 7 30 7 22 L7 10 Z" fill="#ccfbf1" stroke="#14b8a6" strokeWidth="1.5" />
+                <polyline points="11,22 16,22 18,16 22,28 24,22 29,22" stroke="#0d9488" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" fill="none" />
+              </svg>
+              <div>
+                <CardTitle className="text-base">Evaluate Cutplan</CardTitle>
+                <CardDescription>How robust is your cutplan against end-bit waste with your actual rolls?</CardDescription>
+              </div>
+            </div>
+          </CardHeader>
+          <CardContent>
+            <div className="space-y-4">
+              {/* Eval-specific settings */}
+              <div>
+                <label className="text-xs font-medium mb-1 block">Waste Threshold (%)</label>
+                <input
+                  type="number"
+                  value={wasteThreshold}
+                  onChange={e => setWasteThreshold(Math.max(0.1, parseFloat(e.target.value) || 1.0))}
+                  min={0.1}
+                  step={0.1}
+                  className="w-full px-2 py-1.5 border rounded-md text-sm"
+                />
+                <p className="text-xs text-muted-foreground mt-0.5">Flag if waste exceeds this % of total fabric.</p>
+              </div>
+
+              <Button
+                onClick={() => handleRunPanel('eval')}
+                disabled={isEvalRunning || (rollSource === 'upload' && !uploadFile)}
+                className="w-full"
+                variant="outline"
+              >
+                {isEvalRunning ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Play className="mr-2 h-4 w-4" />}
+                {isEvalRunning ? 'Evaluating...' : 'Evaluate Cutplan'}
+              </Button>
+
+              {/* Eval Progress */}
+              {isEvalRunning && (
+                <div className="space-y-2">
+                  <div className="h-2 bg-blue-200 rounded-full overflow-hidden">
+                    <div
+                      className="h-full bg-blue-500 rounded-full transition-all duration-500"
+                      style={{ width: `${evalProgress}%` }}
+                    />
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs text-muted-foreground">{evalProgressMessage || 'Initializing...'}</span>
+                    <Button variant="ghost" size="sm" className="h-6 text-xs" onClick={() => handleCancel('eval')}>
+                      <XCircle className="h-3 w-3 mr-1" />
+                      Cancel
+                    </Button>
+                  </div>
+                </div>
+              )}
+
+              {/* Eval Results */}
+              {evalRollPlan && evalRollPlan.status === 'completed' && evalRollPlan.monte_carlo && (
+                <div className="space-y-3 pt-2 border-t">
+                  <div className="flex items-center gap-2 text-sm font-medium text-green-700">
+                    <CheckCircle2 className="h-4 w-4" />
+                    Evaluation Complete
+                  </div>
+                  {evalRollPlan.roll_adjustment_message && (
+                    <div className="p-2 bg-blue-50 border border-blue-200 rounded text-xs text-blue-700">
+                      {evalRollPlan.roll_adjustment_message}
+                    </div>
+                  )}
+                  {(() => {
+                    const tf = evalRollPlan.monte_carlo!.total_fabric_required || 1
+                    const t1Yd = evalRollPlan.monte_carlo!.unusable_waste.avg
+                    const t2Yd = evalRollPlan.monte_carlo!.endbit_waste.avg
+                    const overallYd = t1Yd + t2Yd
+                    const totalFabric = tf + overallYd
+                    const t1Pct = (t1Yd / tf) * 100
+                    const t2Pct = (t2Yd / tf) * 100
+                    const overallPct = t1Pct + t2Pct
+                    return (
+                      <div className="space-y-2">
+                        <div className="flex gap-2 items-center">
+                          <div className="flex-1 rounded-lg border p-2 bg-blue-50 border-blue-200">
+                            <div className="text-[10px] font-medium text-blue-600">Total Fabric Needed</div>
+                            <div className="text-lg font-bold text-blue-700 tabular-nums">{totalFabric.toFixed(1)} yd</div>
+                            <div className="text-[10px] text-blue-500">{tf.toFixed(1)} cutplan + {overallYd.toFixed(1)} waste</div>
+                          </div>
+                        </div>
+                        <div className="flex gap-2">
+                          <div className="flex-1 rounded-lg border p-3 bg-red-50 border-red-200">
+                            <div className="text-[10px] font-medium text-red-600">Est. Floor Waste</div>
+                            <div className="text-2xl font-bold text-red-700 tabular-nums">{overallPct.toFixed(1)}%</div>
+                            <div className="text-xs text-red-600/70">{overallYd.toFixed(1)} yd</div>
+                          </div>
+                          <div className="w-24 rounded-lg border p-2 bg-gray-50 border-gray-200">
+                            <div className="text-[10px] font-medium text-gray-600">Unusable</div>
+                            <div className="text-sm font-bold text-gray-700 tabular-nums">{t1Pct.toFixed(1)}%</div>
+                            <div className="text-[10px] text-gray-500">{t1Yd.toFixed(1)} yd</div>
+                          </div>
+                          <div className="w-24 rounded-lg border p-2 bg-amber-50 border-amber-200">
+                            <div className="text-[10px] font-medium text-amber-600">End-bits</div>
+                            <div className="text-sm font-bold text-amber-700 tabular-nums">{t2Pct.toFixed(1)}%</div>
+                            <div className="text-[10px] text-amber-500">{t2Yd.toFixed(1)} yd</div>
+                          </div>
+                        </div>
+                      </div>
+                    )
+                  })()}
+
+                  {/* Waste assessment */}
+                  {evalRollPlan.waste_assessment && (
+                    <div className={`p-2.5 rounded text-xs ${evalRollPlan.waste_assessment.exceeds_threshold ? 'bg-amber-50 border border-amber-200 text-amber-700' : 'bg-green-50 border border-green-200 text-green-700'}`}>
+                      <div className="flex items-center justify-between mb-1">
+                        <span className="font-semibold">
+                          {evalRollPlan.waste_assessment.exceeds_threshold ? 'Waste exceeds limit' : 'Waste within limit'}
+                        </span>
+                        <span className="font-mono font-bold">
+                          {evalRollPlan.waste_assessment.waste_pct.toFixed(2)}%
+                          <span className="text-[10px] font-normal ml-1">/ {evalRollPlan.waste_assessment.threshold_pct}% limit</span>
+                        </span>
+                      </div>
+                      <div className="flex items-center justify-between">
+                        <div className="text-[11px] opacity-80">
+                          {evalRollPlan.waste_assessment.recommendation}
+                        </div>
+                        {evalRollPlan.waste_assessment.exceeds_threshold && (
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={handleTuneCutplan}
+                            disabled={isTuning}
+                            className="h-6 text-xs border-amber-300 text-amber-700 hover:bg-amber-100 ml-2 shrink-0"
+                          >
+                            {isTuning ? <Loader2 className="h-3 w-3 animate-spin mr-1" /> : <Wrench className="h-3 w-3 mr-1" />}
+                            {isTuning ? 'Tuning...' : 'Tune'}
+                          </Button>
+                        )}
+                      </div>
+                      {tunedCutplanId && (
+                        <div className="mt-2 p-2 bg-green-50 border border-green-200 rounded space-y-1">
+                          <div className="flex items-center gap-1.5 text-green-700 font-medium">
+                            <CheckCircle2 className="h-3.5 w-3.5" />
+                            Roll-tuned cutplan created
+                          </div>
+                          <a href={`/orders/${orderId}/cutplan`}
+                             className="text-xs text-primary hover:underline font-medium">
+                            View tuned cutplan →
+                          </a>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Eval Dockets */}
+                  {evalDockets.length > 0 && (
+                    <div>
+                      <div className="text-xs font-medium mb-1 flex items-center justify-between">
+                        <span>Cut Dockets ({evalDockets.length})</span>
+                        <div className="flex items-center gap-2">
+                          <span className="text-muted-foreground">{evalRollPlan.monte_carlo.num_simulations} sims</span>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="h-6 text-xs"
+                            onClick={handleDownloadEvalExcel}
+                            disabled={isDownloadingEvalExcel}
+                          >
+                            {isDownloadingEvalExcel ? <Loader2 className="h-3 w-3 animate-spin mr-1" /> : <Download className="h-3 w-3 mr-1" />}
+                            Roll Plan
+                          </Button>
+                        </div>
+                      </div>
+                      <div className="overflow-x-auto max-h-64 overflow-y-auto">
+                        <table className="w-full text-xs">
+                          <thead className="bg-muted/30 sticky top-0">
+                            <tr className="border-b">
+                              <th className="text-left py-1 px-2 font-medium w-6"></th>
+                              <th className="text-left py-1 px-2 font-medium">Cut</th>
+                              <th className="text-left py-1 px-2 font-medium">Marker</th>
+                              <th className="text-right py-1 px-2 font-medium">Plies</th>
+                              <th className="text-right py-1 px-2 font-medium">End Bits</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {evalDockets.map(d => (
+                              <tr key={d.cut_number} className="border-b border-border/30 hover:bg-muted/20 cursor-pointer" onClick={() => setEvalExpandedDocket(evalExpandedDocket === d.cut_number ? null : d.cut_number)}>
+                                <td className="py-1 px-2">{evalExpandedDocket === d.cut_number ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}</td>
+                                <td className="py-1 px-2">{d.cut_number}</td>
+                                <td className="py-1 px-2">{d.marker_label}</td>
+                                <td className="py-1 px-2 text-right tabular-nums">{d.plies}</td>
+                                <td className="py-1 px-2 text-right tabular-nums">{d.total_end_bit_yards.toFixed(2)}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  )}
+
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="w-full text-xs"
+                    onClick={() => { setEvalRollPlan(null); setEvalDockets([]) }}
+                  >
+                    <RotateCcw className="h-3 w-3 mr-1" />
+                    Re-evaluate
+                  </Button>
+                </div>
+              )}
+            </div>
+          </CardContent>
+        </Card>
+
+        {/* Right Panel: Optimize Roll Plan */}
+        <Card className="border-l-4 border-l-amber-400 border-amber-200/60 bg-gradient-to-br from-amber-50/50 to-orange-50/20 shadow-sm">
+          <CardHeader className="pb-3">
+            <div className="flex items-start gap-3">
+              {/* Target/crosshair — precision optimization */}
+              <svg viewBox="0 0 40 40" className="w-10 h-10 flex-shrink-0 mt-0.5" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <circle cx="20" cy="20" r="15" stroke="#d97706" strokeWidth="1.5" fill="#fef3c7" />
+                <circle cx="20" cy="20" r="9" stroke="#b45309" strokeWidth="1.3" fill="#fde68a" />
+                <circle cx="20" cy="20" r="3.5" fill="#d97706" />
+                <line x1="20" y1="2" x2="20" y2="10" stroke="#92400e" strokeWidth="1.3" strokeLinecap="round" />
+                <line x1="20" y1="30" x2="20" y2="38" stroke="#92400e" strokeWidth="1.3" strokeLinecap="round" />
+                <line x1="2" y1="20" x2="10" y2="20" stroke="#92400e" strokeWidth="1.3" strokeLinecap="round" />
+                <line x1="30" y1="20" x2="38" y2="20" stroke="#92400e" strokeWidth="1.3" strokeLinecap="round" />
+              </svg>
+              <div>
+                <CardTitle className="text-base">Optimize Roll Plan</CardTitle>
+                <CardDescription>Intelligently assign rolls to markers for minimum waste. Produces cutting dockets — requires floor discipline for best results.</CardDescription>
+              </div>
+            </div>
+          </CardHeader>
+          <CardContent>
+            <div className="space-y-4">
+
+              <Button
+                onClick={() => handleRunPanel('opt')}
+                disabled={isOptRunning || (rollSource === 'upload' && !uploadFile)}
+                className="w-full"
+              >
+                {isOptRunning ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Play className="mr-2 h-4 w-4" />}
+                {isOptRunning ? 'Optimizing...' : 'Optimize Roll Plan'}
+              </Button>
+
+              {/* Opt Progress */}
+              {isOptRunning && (
+                <div className="space-y-2">
+                  <div className="h-2 bg-amber-200 rounded-full overflow-hidden">
+                    <div
+                      className="h-full bg-amber-500 rounded-full transition-all duration-500"
+                      style={{ width: `${optProgress}%` }}
+                    />
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs text-muted-foreground">{optProgressMessage || 'Initializing...'}</span>
+                    <Button variant="ghost" size="sm" className="h-6 text-xs" onClick={() => handleCancel('opt')}>
+                      <XCircle className="h-3 w-3 mr-1" />
+                      Cancel
+                    </Button>
+                  </div>
+                </div>
+              )}
+
+              {/* Opt Results */}
+              {optRollPlan && optRollPlan.status === 'completed' && optRollPlan.ga && (
+                <div className="space-y-3 pt-2 border-t">
+                  <div className="flex items-center gap-2 text-sm font-medium text-green-700">
+                    <CheckCircle2 className="h-4 w-4" />
+                    Optimization Complete
+                  </div>
+                  {optRollPlan.roll_adjustment_message && (
+                    <div className="p-2 bg-blue-50 border border-blue-200 rounded text-xs text-blue-700">
+                      {optRollPlan.roll_adjustment_message}
+                    </div>
+                  )}
+                  {(() => {
+                    const tf = optRollPlan.monte_carlo?.total_fabric_required
+                      || optRollPlan.waste_assessment?.total_fabric_yards || 1
+                    const t1Yd = optRollPlan.ga!.waste.unusable_yards
+                    const t2Yd = optRollPlan.ga!.waste.endbit_yards
+                    const overallYd = t1Yd + t2Yd
+                    const t1Pct = (t1Yd / tf) * 100
+                    const t2Pct = (t2Yd / tf) * 100
+                    const overallPct = t1Pct + t2Pct
+                    return (
+                      <div className="flex gap-2">
+                        <div className="flex-1 rounded-lg border p-3 bg-red-50 border-red-200">
+                          <div className="text-[10px] font-medium text-red-600">Est. Floor Waste</div>
+                          <div className="text-2xl font-bold text-red-700 tabular-nums">{overallPct.toFixed(1)}%</div>
+                          <div className="text-xs text-red-600/70">{overallYd.toFixed(1)} yd</div>
+                        </div>
+                        <div className="w-24 rounded-lg border p-2 bg-gray-50 border-gray-200">
+                          <div className="text-[10px] font-medium text-gray-600">Unusable</div>
+                          <div className="text-sm font-bold text-gray-700 tabular-nums">{t1Pct.toFixed(1)}%</div>
+                          <div className="text-[10px] text-gray-500">{t1Yd.toFixed(1)} yd</div>
+                        </div>
+                        <div className="w-24 rounded-lg border p-2 bg-amber-50 border-amber-200">
+                          <div className="text-[10px] font-medium text-amber-600">End-bits</div>
+                          <div className="text-sm font-bold text-amber-700 tabular-nums">{t2Pct.toFixed(1)}%</div>
+                          <div className="text-[10px] text-amber-500">{t2Yd.toFixed(1)} yd</div>
+                        </div>
+                      </div>
+                    )
+                  })()}
+
+                  {/* Waste assessment */}
+                  {optRollPlan.waste_assessment && (
+                    <div className={`p-2 rounded text-xs flex items-center justify-between ${optRollPlan.waste_assessment.exceeds_threshold ? 'bg-amber-50 text-amber-700' : 'bg-green-50 text-green-700'}`}>
+                      <div>
+                        <span className="font-medium">Waste: {optRollPlan.waste_assessment.waste_pct.toFixed(1)}%</span>
+                        {' — '}{optRollPlan.waste_assessment.recommendation}
+                      </div>
+                      {optRollPlan.waste_assessment.exceeds_threshold && (
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={handleTuneCutplan}
+                          disabled={isTuning}
+                          className="h-6 text-xs border-amber-300 text-amber-700 hover:bg-amber-100"
+                        >
+                          {isTuning ? <Loader2 className="h-3 w-3 animate-spin mr-1" /> : <Wrench className="h-3 w-3 mr-1" />}
+                          {isTuning ? 'Tuning...' : 'Tune'}
+                        </Button>
+                      )}
+                    </div>
+                  )}
+                  {tunedCutplanId && (
+                    <div className="p-3 bg-green-50 border border-green-200 rounded space-y-2">
+                      <div className="flex items-center gap-2 text-sm font-medium text-green-700">
+                        <CheckCircle2 className="h-4 w-4" />
+                        Roll-tuned cutplan created
+                      </div>
+                      <div className="flex flex-col gap-1.5">
+                        <a href={`/orders/${orderId}/cutplan`}
+                           className="text-xs text-primary hover:underline font-medium">
+                          View tuned cutplan →
+                        </a>
+                        <p className="text-xs text-muted-foreground">
+                          Or use <span className="font-medium">Optimize Roll Plan</span> for intelligent
+                          roll-marker matching — requires floor execution discipline.
+                        </p>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* MC vs GA Comparison (if both available) */}
+                  {optRollPlan.monte_carlo && optRollPlan.ga && (
+                    <div>
+                      <div className="text-xs font-medium mb-1">Simulation vs Optimized</div>
+                      <table className="w-full text-xs">
+                        <thead className="bg-muted/30">
+                          <tr className="border-b">
+                            <th className="text-left py-1 px-2 font-medium">Type</th>
+                            <th className="text-right py-1 px-2 font-medium">Avg Sim</th>
+                            <th className="text-right py-1 px-2 font-medium">Optimized</th>
+                            <th className="text-right py-1 px-2 font-medium">Diff</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          <ComparisonRow label="Unusable" mcAvg={optRollPlan.monte_carlo.unusable_waste.avg} gaValue={optRollPlan.ga.waste.unusable_yards} />
+                          <ComparisonRow label="End-bits" mcAvg={optRollPlan.monte_carlo.endbit_waste.avg} gaValue={optRollPlan.ga.waste.endbit_yards} highlight />
+                          <ComparisonRow label="Returnable" mcAvg={optRollPlan.monte_carlo.returnable_waste.avg} gaValue={optRollPlan.ga.waste.returnable_yards} />
+                          <ComparisonRow label="Real Waste" mcAvg={optRollPlan.monte_carlo.real_waste.avg} gaValue={optRollPlan.ga.waste.real_waste_yards} />
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+
+                  {/* Opt Dockets */}
+                  {optDockets.length > 0 && (
+                    <div>
+                      <div className="text-xs font-medium mb-1 flex items-center justify-between">
+                        <span>Cut Dockets ({optDockets.length})</span>
+                        <div className="flex gap-1">
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="h-6 text-xs"
+                            onClick={handleDownloadCutplanExcel}
+                            disabled={isDownloadingCutplan}
+                          >
+                            {isDownloadingCutplan ? <Loader2 className="h-3 w-3 animate-spin mr-1" /> : <Download className="h-3 w-3 mr-1" />}
+                            Cutplan
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="h-6 text-xs"
+                            onClick={handleDownloadRollPlanExcel}
+                            disabled={isDownloadingExcel}
+                          >
+                            {isDownloadingExcel ? <Loader2 className="h-3 w-3 animate-spin mr-1" /> : <Download className="h-3 w-3 mr-1" />}
+                            Roll Plan
+                          </Button>
+                        </div>
+                      </div>
+                      <div className="overflow-x-auto max-h-64 overflow-y-auto">
+                        <table className="w-full text-xs">
+                          <thead className="bg-muted/30 sticky top-0">
+                            <tr className="border-b">
+                              <th className="text-left py-1 px-2 font-medium w-6"></th>
+                              <th className="text-left py-1 px-2 font-medium">Cut</th>
+                              <th className="text-left py-1 px-2 font-medium">Marker</th>
+                              <th className="text-right py-1 px-2 font-medium">Plies</th>
+                              <th className="text-right py-1 px-2 font-medium">Rolls</th>
+                              <th className="text-right py-1 px-2 font-medium">End Bits</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {optDockets.map(d => (
+                              <DocketRow
+                                key={d.cut_number}
+                                docket={d}
+                                isExpanded={optExpandedDocket === d.cut_number}
+                                onToggle={() => setOptExpandedDocket(optExpandedDocket === d.cut_number ? null : d.cut_number)}
+                              />
+                            ))}
+                          </tbody>
+                          <tfoot className="bg-muted/50 font-medium">
+                            <tr>
+                              <td className="py-1 px-2" colSpan={3}>Total</td>
+                              <td className="py-1 px-2 text-right tabular-nums">{optDockets.reduce((s, d) => s + d.plies, 0)}</td>
+                              <td className="py-1 px-2 text-right tabular-nums">{optDockets.reduce((s, d) => s + d.assigned_rolls.length, 0)}</td>
+                              <td className="py-1 px-2 text-right tabular-nums">{optDockets.reduce((s, d) => s + d.total_end_bit_yards, 0).toFixed(2)}</td>
+                            </tr>
+                          </tfoot>
+                        </table>
+                      </div>
+                    </div>
+                  )}
+
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="w-full text-xs"
+                    onClick={() => { setOptRollPlan(null); setOptDockets([]) }}
+                  >
+                    <RotateCcw className="h-3 w-3 mr-1" />
+                    Re-optimize
+                  </Button>
+                </div>
+              )}
+            </div>
+          </CardContent>
+        </Card>
+      </div>
+
+      {/* Saved Reports — at the bottom, collapsible */}
+      {existingRollPlans.filter(p => p.status === 'completed').length > 0 && (() => {
+        const completedPlans = existingRollPlans.filter(p => p.status === 'completed')
+        const visiblePlans = showAllReports ? completedPlans : completedPlans.slice(0, 3)
+        return (
+          <Card>
+            <CardHeader className="pb-3">
+              <CardTitle className="text-base">Saved Reports</CardTitle>
+              <CardDescription>Completed roll plans for this cutplan</CardDescription>
+            </CardHeader>
+            <CardContent>
+              <div className="space-y-2">
+                {visiblePlans.map(plan => {
+                  const wasteYards = (plan as Record<string, unknown>).ga_real_waste_yards as number | undefined
+                    ?? (plan as Record<string, unknown>).mc_real_waste_avg as number | undefined
+                  const totalFabric = (plan as Record<string, unknown>).total_fabric_required as number | undefined
+                  const wastePct = totalFabric && wasteYards != null
+                    ? ((wasteYards / totalFabric) * 100).toFixed(1)
+                    : null
+                  const isActive = rollPlan?.id === plan.id
+                  return (
+                    <div
+                      key={plan.id}
+                      className={`flex items-center justify-between p-3 rounded-lg border transition-all cursor-pointer ${
+                        isActive
+                          ? 'border-primary bg-primary/5'
+                          : 'border-border hover:border-primary/40 hover:bg-muted/30'
+                      }`}
+                      onClick={() => {
+                        if (plan.ga) setOptRollPlan(plan)
+                        else setEvalRollPlan(plan)
+                      }}
+                    >
+                      <div className="flex items-center gap-3 min-w-0">
+                        <div className={`h-2 w-2 rounded-full flex-shrink-0 ${isActive ? 'bg-primary' : 'bg-green-500'}`} />
+                        <div className="min-w-0">
+                          <div className="text-sm font-medium truncate">
+                            {plan.color_code || 'All Colors'}
+                            {plan.input_type && <span className="ml-2 text-xs text-muted-foreground">({plan.input_type})</span>}
+                          </div>
+                          <div className="text-xs text-muted-foreground">
+                            {new Date(plan.created_at).toLocaleDateString()} {new Date(plan.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                            {wastePct && <span className="ml-2">Waste: {wastePct}%</span>}
+                            {wasteYards != null && <span className="ml-1">({wasteYards.toFixed(1)} yd)</span>}
+                          </div>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-1 flex-shrink-0">
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="h-7 text-xs"
+                          onClick={async (e) => {
+                            e.stopPropagation()
+                            try {
+                              await api.downloadRollPlanExcel(plan.id, 'ga')
+                              toast({ title: 'Roll plan downloaded' })
+                            } catch { toast({ title: 'Download failed', variant: 'destructive' }) }
+                          }}
+                        >
+                          <Download className="h-3 w-3 mr-1" />
+                          Roll Plan
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="h-7 text-xs"
+                          onClick={async (e) => {
+                            e.stopPropagation()
+                            try {
+                              const blob = await api.downloadOrderExcel(orderId)
+                              const url = URL.createObjectURL(blob)
+                              const a = document.createElement('a')
+                              a.href = url
+                              a.download = `cutplan_report.xlsx`
+                              document.body.appendChild(a)
+                              a.click()
+                              URL.revokeObjectURL(url)
+                              document.body.removeChild(a)
+                            } catch { toast({ title: 'Download failed', variant: 'destructive' }) }
+                          }}
+                        >
+                          <Download className="h-3 w-3 mr-1" />
+                          Cutplan
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="h-7 w-7 p-0 text-destructive hover:text-destructive"
+                          onClick={async (e) => {
+                            e.stopPropagation()
+                            try {
+                              await api.deleteRollPlan(plan.id)
+                              setExistingRollPlans(prev => prev.filter(p => p.id !== plan.id))
+                              if (evalRollPlan?.id === plan.id) { setEvalRollPlan(null); setEvalDockets([]) }
+                              if (optRollPlan?.id === plan.id) { setOptRollPlan(null); setOptDockets([]) }
+                              toast({ title: 'Roll plan deleted' })
+                            } catch { toast({ title: 'Delete failed', variant: 'destructive' }) }
+                          }}
+                        >
+                          <Trash2 className="h-3 w-3" />
+                        </Button>
+                      </div>
+                    </div>
+                  )
+                })}
+                {completedPlans.length > 3 && (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="w-full text-xs"
+                    onClick={() => setShowAllReports(!showAllReports)}
+                  >
+                    {showAllReports ? 'Show less' : `Show all (${completedPlans.length})`}
+                  </Button>
+                )}
+              </div>
+            </CardContent>
+          </Card>
+        )
+      })()}
+
+      {/* Error state (either panel) */}
+      {((evalRollPlan && evalRollPlan.status === 'failed') || (optRollPlan && optRollPlan.status === 'failed')) && (
         <Card className="border-destructive/50 bg-destructive/5">
           <CardContent className="py-6 text-center">
             <XCircle className="h-10 w-10 text-destructive mx-auto mb-3" />
             <h3 className="text-lg font-semibold mb-1">Simulation Failed</h3>
             <p className="text-sm text-muted-foreground mb-4">
-              {rollPlan.error_message || 'An unknown error occurred'}
+              {(evalRollPlan?.status === 'failed' ? evalRollPlan.error_message : optRollPlan?.error_message) || 'An unknown error occurred'}
             </p>
-            <Button variant="outline" onClick={() => { setShowConfig(true); setRollPlan(null) }}>
+            <Button variant="outline" onClick={() => { setEvalRollPlan(null); setOptRollPlan(null) }}>
               <RotateCcw className="mr-2 h-4 w-4" />
               Try Again
             </Button>
@@ -1002,79 +1230,6 @@ export default function RollPlanPage() {
 
 // --- Sub-components ---
 
-function WasteCard({
-  label,
-  description,
-  stats,
-  color,
-  highlight,
-}: {
-  label: string
-  description: string
-  stats: { avg: number; std: number; p95: number }
-  color: string
-  highlight?: boolean
-}) {
-  const colorMap: Record<string, string> = {
-    gray: 'bg-gray-50 border-gray-200',
-    amber: 'bg-amber-50 border-amber-200',
-    green: 'bg-green-50 border-green-200',
-    red: 'bg-red-50 border-red-200',
-  }
-  const textColorMap: Record<string, string> = {
-    gray: 'text-gray-700',
-    amber: 'text-amber-700',
-    green: 'text-green-700',
-    red: 'text-red-700',
-  }
-
-  return (
-    <div className={`rounded-lg border p-3 ${colorMap[color] || ''} ${highlight ? 'ring-2 ring-amber-400' : ''}`}>
-      <div className={`text-xs font-medium ${textColorMap[color] || ''}`}>{label}</div>
-      <div className={`text-xl font-bold tabular-nums mt-1 ${textColorMap[color] || ''}`}>
-        {stats.avg.toFixed(1)} yd
-      </div>
-      <div className="text-xs text-muted-foreground mt-1">
-        p95: {stats.p95.toFixed(1)} yd
-      </div>
-      <div className="text-xs text-muted-foreground">{description}</div>
-    </div>
-  )
-}
-
-function SimpleWasteCard({
-  label,
-  value,
-  color,
-  highlight,
-}: {
-  label: string
-  value: number
-  color: string
-  highlight?: boolean
-}) {
-  const colorMap: Record<string, string> = {
-    gray: 'bg-gray-50 border-gray-200',
-    amber: 'bg-amber-50 border-amber-200',
-    green: 'bg-green-50 border-green-200',
-    red: 'bg-red-50 border-red-200',
-  }
-  const textColorMap: Record<string, string> = {
-    gray: 'text-gray-700',
-    amber: 'text-amber-700',
-    green: 'text-green-700',
-    red: 'text-red-700',
-  }
-
-  return (
-    <div className={`rounded-lg border p-3 ${colorMap[color] || ''} ${highlight ? 'ring-2 ring-amber-400' : ''}`}>
-      <div className={`text-xs font-medium ${textColorMap[color] || ''}`}>{label}</div>
-      <div className={`text-xl font-bold tabular-nums mt-1 ${textColorMap[color] || ''}`}>
-        {value.toFixed(1)} yd
-      </div>
-    </div>
-  )
-}
 
 function ComparisonRow({
   label,
@@ -1161,9 +1316,9 @@ function DocketRow({
                       <td className="py-1 px-2 text-right tabular-nums">{roll.end_bit_yards.toFixed(2)}</td>
                       <td className="py-1 px-2 text-center">
                         {roll.is_pseudo ? (
-                          <span className="text-xs bg-gray-100 text-gray-600 px-1.5 py-0.5 rounded">Pseudo</span>
+                          <span className="text-xs bg-gray-100 text-gray-600 px-1.5 py-0.5 rounded">Generated</span>
                         ) : (
-                          <span className="text-xs bg-blue-100 text-blue-600 px-1.5 py-0.5 rounded">Real</span>
+                          <span className="text-xs bg-blue-100 text-blue-600 px-1.5 py-0.5 rounded">Actual</span>
                         )}
                       </td>
                     </tr>

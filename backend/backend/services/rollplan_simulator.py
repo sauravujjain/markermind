@@ -484,10 +484,13 @@ def validate_rollplan_inputs(
 # Core simulation logic (shared by MC and GA)
 # ---------------------------------------------------------------------------
 
-MAX_PLY_HEIGHT = 100  # Max plies per physical cut/spread
+DEFAULT_MAX_PLY_HEIGHT = 100  # Default max plies per physical cut/spread
 
 
-def _build_cut_list(markers: List[MarkerSpec]) -> List[Tuple[MarkerSpec, int]]:
+def _build_cut_list(
+    markers: List[MarkerSpec],
+    max_ply_height: int = DEFAULT_MAX_PLY_HEIGHT,
+) -> List[Tuple[MarkerSpec, int]]:
     """
     Expand markers into (marker, plies_in_cut) tuples.
     A marker with 150 plies at max_ply=100 → 2 cuts: (marker, 100), (marker, 50).
@@ -497,7 +500,7 @@ def _build_cut_list(markers: List[MarkerSpec]) -> List[Tuple[MarkerSpec, int]]:
     for m in sorted(markers, key=lambda x: x.length_yards, reverse=True):
         remaining = m.plies
         while remaining > 0:
-            batch = min(remaining, MAX_PLY_HEIGHT)
+            batch = min(remaining, max_ply_height)
             cuts.append((m, batch))
             remaining -= batch
     return cuts
@@ -806,6 +809,7 @@ def run_single_simulation(
     min_reuse_length: float,
     piece_consumption: float,
     run_id: int = 0,
+    max_ply_height: int = DEFAULT_MAX_PLY_HEIGHT,
 ) -> SimulationRun:
     """Run a single MC simulation with shuffled roll order.
 
@@ -823,7 +827,7 @@ def run_single_simulation(
 
     shuffled = list(rolls)
     random.shuffle(shuffled)
-    cuts = _build_cut_list(markers)
+    cuts = _build_cut_list(markers, max_ply_height)
     wb, end_bits, reused, consumed, dockets = _run_allocation(
         cuts, shuffled, min_reuse_length, piece_consumption, max_ml
     )
@@ -861,6 +865,7 @@ def simulate_roll_usage(
     min_reuse_length: float = 0.5,
     progress_callback: Optional[Callable[[int, str], None]] = None,
     cancel_check: Optional[Callable[[], bool]] = None,
+    max_ply_height: int = DEFAULT_MAX_PLY_HEIGHT,
 ) -> MonteCarloResult:
     """
     Monte Carlo cutplan evaluation.
@@ -891,7 +896,7 @@ def simulate_roll_usage(
         else:
             run_rolls = generate_pseudo_rolls(total_fabric, pseudo_config or PseudoRollConfig())
 
-        sim = run_single_simulation(markers, run_rolls, min_reuse_length, piece_consumption, run_id=i)
+        sim = run_single_simulation(markers, run_rolls, min_reuse_length, piece_consumption, run_id=i, max_ply_height=max_ply_height)
         runs.append(sim)
 
         if progress_callback and (i + 1) % max(1, num_simulations // 20) == 0:
@@ -943,6 +948,7 @@ def _optimal_allocation_ilp(
     piece_consumption: float,
     max_marker_length: float,
     progress_callback: Optional[Callable[[int, str], None]] = None,
+    max_ply_height: int = DEFAULT_MAX_PLY_HEIGHT,
 ) -> Optional[Tuple[WasteBreakdown, List[EndBit], int, int, List[CutDocket]]]:
     """
     Globally optimal roll-to-marker allocation via cutting-stock ILP.
@@ -983,23 +989,32 @@ def _optimal_allocation_ilp(
         progress_callback(5, "Solving ILP roll assignment...")
 
     # --- Formulate ILP ---
-    # Variables: x[i * n_markers + j] = plies of marker j from roll i
-    n_vars = n_rolls * n_markers
+    # Variables:
+    #   x[i * n_markers + j] = plies of marker j from roll i (integer)
+    #   full[i] = 1 if roll i's remainder < piece_consumption (binary)
+    # The full[i] variables incentivize the ILP to push remainders into
+    # T1 range (< pc) rather than leaving them in T2 range [pc, max_ml).
+    n_x = n_rolls * n_markers
+    n_full = n_rolls
+    n_vars = n_x + n_full
 
-    # Objective: maximize Σ x[i][j] * (ml[j] + ply_bonus)
-    # ply_bonus ensures demand fulfillment is always preferred over waste reduction.
-    # One extra ply always beats any waste saving from a single roll.
+    # Objective: maximize Σ x[i][j] * (ml[j] + ply_bonus) + Σ full[i] * full_bonus
+    # ply_bonus: demand fulfillment always preferred over waste reduction.
+    # full_bonus: incentivize T1 remainders over T2.
     ply_bonus = max_L + 1.0
+    full_bonus = max_marker_length  # worth about one max-marker-length of waste savings
     c = np.zeros(n_vars)
     for i in range(n_rolls):
         for j in range(n_markers):
             c[i * n_markers + j] = -(ml[j] + ply_bonus)
+        c[n_x + i] = -full_bonus
 
-    # Bounds: 0 <= x[i][j] <= floor(L[i] / ml[j])
+    # Bounds: x[i][j] in [0, floor(L[i]/ml[j])], full[i] in [0, 1]
     ub = np.zeros(n_vars)
     for i in range(n_rolls):
         for j in range(n_markers):
             ub[i * n_markers + j] = float(int(L[i] / ml[j]))
+        ub[n_x + i] = 1.0
 
     # Constraint 1: roll capacity — Σ_j x[i][j] * ml[j] <= L[i]
     rows1, cols1, data1 = [], [], []
@@ -1021,9 +1036,29 @@ def _optimal_allocation_ilp(
                 data2.append(1.0)
     A2 = csc_matrix((data2, (rows2, cols2)), shape=(n_markers, n_vars))
 
+    # Constraint 3: full-consumption linkage (big-M)
+    # full[i]=1 → Σ_j x[i][j]*ml[j] >= L[i] - pc + ε   (remainder < pc)
+    # Formulated as: Σ_j x[i][j]*ml[j] - M*full[i] >= L[i] - pc + ε - M
+    M_big = max_L + 1.0
+    eps = 0.001
+    rows3, cols3, data3 = [], [], []
+    lb3_vals = []
+    for i in range(n_rolls):
+        for j in range(n_markers):
+            if ub[i * n_markers + j] > 0:
+                rows3.append(i)
+                cols3.append(i * n_markers + j)
+                data3.append(ml[j])
+        rows3.append(i)
+        cols3.append(n_x + i)
+        data3.append(-M_big)
+        lb3_vals.append(L[i] - piece_consumption + eps - M_big)
+    A3 = csc_matrix((data3, (rows3, cols3)), shape=(n_rolls, n_vars))
+
     constraints = [
         LinearConstraint(A1, ub=np.array(L, dtype=float)),
         LinearConstraint(A2, ub=np.array(demand, dtype=float)),
+        LinearConstraint(A3, lb=np.array(lb3_vals)),
     ]
 
     bounds = Bounds(lb=np.zeros(n_vars), ub=ub)
@@ -1041,146 +1076,297 @@ def _optimal_allocation_ilp(
     if progress_callback:
         progress_callback(50, "ILP solved — building dockets...")
 
-    # Parse solution into 2D matrix
+    # Parse solution into 2D matrix (first n_x variables are plies, rest are full[i])
     x = [[int(round(result.x[i * n_markers + j])) for j in range(n_markers)]
          for i in range(n_rolls)]
+    full_vals = [int(round(result.x[n_x + i])) for i in range(n_rolls)]
 
-    # --- Build dockets from ILP solution ---
-
-    # Step 1: Build per-roll segment chains (process markers longest-first)
-    # Each segment: (marker_idx, plies, avail_length, fabric_used, end_bit, is_reuse)
-    roll_chains = []
+    # --- T2 elimination: redistribute short-marker plies to T2 rolls ---
+    # The ILP maximises fabric usage but doesn't distinguish T1 vs T2
+    # remainders.  Scan for rolls whose remainder falls in the T2 range
+    # [piece_consumption, max_marker_length) and try to squeeze in extra
+    # plies of short markers to push the remainder below piece_consumption.
+    _allocated = [sum(x[k][j] for k in range(n_rolls)) for j in range(n_markers)]
+    # Markers sorted shortest first — short markers are best at filling gaps
+    _short_first = sorted(range(n_markers), key=lambda j: ml[j])
     for i in range(n_rolls):
-        remaining = L[i]
-        chain = []
-        for j in marker_order:
-            p = x[i][j]
-            if p <= 0:
+        rem = L[i] - sum(x[i][j] * ml[j] for j in range(n_markers))
+        if rem < piece_consumption or rem >= max_marker_length:
+            continue  # T1 or T3 — no fix needed
+        # T2 remainder — try adding plies of short markers
+        for j in _short_first:
+            if ml[j] > rem:
+                break  # remaining markers are even longer
+            spare = demand[j] - _allocated[j]
+            if spare <= 0:
                 continue
-            used = p * ml[j]
-            eb = remaining - used
-            chain.append((j, p, remaining, used, eb, len(chain) > 0))
-            remaining = eb
-        # Final remainder (waste)
-        chain.append((-1, 0, remaining, 0, remaining, True))
-        roll_chains.append(chain)
+            # How many plies push remainder below piece_consumption?
+            for p in range(1, min(int(rem // ml[j]), spare) + 1):
+                if rem - p * ml[j] < piece_consumption:
+                    x[i][j] += p
+                    _allocated[j] += p
+                    rem -= p * ml[j]
+                    break
+            if rem < piece_consumption:
+                break
+        # If short markers couldn't fix it, try stealing plies from a roll
+        # where removing them does NOT push that donor into T2 range.
+        # T1 (< pc) and T3 (>= max_ml) donors are both acceptable.
+        if rem >= piece_consumption and rem < max_marker_length:
+            for j in _short_first:
+                if ml[j] > rem:
+                    break
+                for k in range(n_rolls):
+                    if k == i or x[k][j] <= 0:
+                        continue
+                    donor_rem = L[k] - sum(x[k][jj] * ml[jj] for jj in range(n_markers))
+                    # Compute how many plies we can steal without making donor T2
+                    max_steal = min(x[k][j], int(rem // ml[j]))
+                    best_p = 0
+                    for p in range(1, max_steal + 1):
+                        new_donor = donor_rem + p * ml[j]
+                        # Donor must stay T1 or T3, not become T2
+                        if piece_consumption <= new_donor < max_marker_length:
+                            break  # this p creates T2 on donor
+                        best_p = p
+                        if rem - p * ml[j] < piece_consumption:
+                            break  # target fixed
+                    if best_p > 0 and rem - best_p * ml[j] < piece_consumption:
+                        x[k][j] -= best_p
+                        x[i][j] += best_p
+                        _allocated[j] += 0  # net zero change
+                        rem -= best_p * ml[j]
+                        break
+                if rem < piece_consumption:
+                    break
 
-    # Step 2: Collect per-marker roll assignments
-    marker_assigns: dict = {j: [] for j in range(n_markers)}
-    for i, chain in enumerate(roll_chains):
-        for (mj, p, avail, used, eb, is_reuse) in chain:
-            if mj < 0:
-                continue
-            marker_assigns[mj].append({
-                'roll_idx': i,
-                'plies': p,
-                'avail_length': avail,
-                'fabric_used': used,
-                'end_bit': eb,
-                'is_reuse': is_reuse,
-            })
+    # --- Build dockets using sequential spreading (same as greedy) ---
+    #
+    # The ILP decides WHICH rolls serve WHICH markers (budget).
+    # Sequential spreading decides the physical CUT ORDER and ensures
+    # the continuation roll (still on the spreading table) flows into
+    # the next immediate cut — no roll disconnect needed.
+    #
+    # budget[i][j] = plies of marker j that roll i should provide (from ILP)
+    # remaining_length[i] = fabric left on roll i (decreases as rolls spread)
 
-    # Step 3: Build CutDockets
+    budget = [[x[i][j] for j in range(n_markers)] for i in range(n_rolls)]
+    remaining_length = [L[i] for i in range(n_rolls)]
+    rolls_used: set = set()
+
+    # Build sequential cut list (longest markers first, split at max_ply_height)
+    cuts = _build_cut_list(markers, max_ply_height)
+    # Map marker objects back to marker indices
+    marker_to_idx = {id(markers[j]): j for j in range(n_markers)}
+
     waste = WasteBreakdown()
     all_end_bits: List[EndBit] = []
     reused_count = 0
-    rolls_used: set = set()
     dockets: List[CutDocket] = []
-    cut_number = 0
 
-    for j in marker_order:
-        m = markers[j]
-        assigns = marker_assigns[j]
-        total_plies_ilp = sum(a['plies'] for a in assigns)
+    # Track the roll still on the spreading table from the previous cut
+    continuation_roll_idx: Optional[int] = None
 
-        # Build target cut list from demand (same as _build_cut_list)
-        targets = []
-        rem_d = m.plies
-        while rem_d > 0:
-            targets.append(min(rem_d, MAX_PLY_HEIGHT))
-            rem_d -= targets[-1]
+    for cut_number_0, (marker_spec, plies_needed) in enumerate(cuts):
+        j = marker_to_idx[id(marker_spec)]
+        marker_len = ml[j]
+        plies_remaining = plies_needed
+        assignments: List[RollAssignment] = []
 
-        if not assigns:
-            # Complete shortfall — build empty dockets
-            for t in targets:
-                cut_number += 1
-                dockets.append(CutDocket(
-                    cut_number=cut_number,
-                    marker_label=m.marker_label,
-                    ratio_str=m.ratio_str,
-                    marker_length_yards=ml[j],
-                    plies=t,
-                    plies_planned=0,
-                    assigned_rolls=[],
-                    total_fabric_yards=0,
-                    total_end_bit_yards=0,
-                ))
-            continue
+        # --- Phase 1: Continuation roll (still on the table) ---
+        # The roll is already on the spreader — spread as many plies as
+        # physically possible (up to cut demand), regardless of ILP budget.
+        if continuation_roll_idx is not None:
+            ci = continuation_roll_idx
+            avail = remaining_length[ci]
+            max_from_roll = int(avail // marker_len) if avail >= marker_len else 0
+            take = min(max_from_roll, plies_remaining)
+            if take > 0:
+                used = take * marker_len
+                remaining_length[ci] -= used
+                # Deduct from budget (may go negative — that's fine, it just
+                # means this roll gave more to this marker than ILP planned)
+                budget[ci][j] -= take
+                rolls_used.add(ci)
 
-        # Sort by avail_length descending (spread longest rolls first)
-        assigns.sort(key=lambda a: a['avail_length'], reverse=True)
-
-        # Bin-pack rolls into cuts (first-fit, max MAX_PLY_HEIGHT per cut)
-        cut_bins = [0] * len(targets)
-        cut_roll_lists: List[list] = [[] for _ in targets]
-
-        for a in assigns:
-            rolls_used.add(a['roll_idx'])
-            if a['is_reuse']:
                 reused_count += 1
-            placed = False
-            for ci in range(len(targets)):
-                if cut_bins[ci] + a['plies'] <= MAX_PLY_HEIGHT:
-                    cut_roll_lists[ci].append(a)
-                    cut_bins[ci] += a['plies']
-                    placed = True
-                    break
-            if not placed:
-                # Overflow: add to last cut (shouldn't happen with valid ILP)
-                cut_roll_lists[-1].append(a)
-                cut_bins[-1] += a['plies']
-
-        # Build CutDocket for each cut
-        for ci, target in enumerate(targets):
-            cut_number += 1
-            ca = cut_roll_lists[ci]
-            achieved = sum(a['plies'] for a in ca)
-
-            roll_assignments = []
-            for a in ca:
-                ri = a['roll_idx']
-                roll_id = rolls[ri].roll_id
-                if a['is_reuse'] and "-bit" not in roll_id:
+                roll_id = rolls[ci].roll_id
+                if "-bit" not in roll_id:
                     roll_id = f"{roll_id}-bit"
 
-                roll_assignments.append(RollAssignment(
+                assignments.append(RollAssignment(
                     roll_id=roll_id,
-                    roll_length_yards=round(a['avail_length'], 4),
-                    plies_from_roll=a['plies'],
-                    end_bit_yards=round(a['end_bit'], 4),
-                    is_pseudo=rolls[ri].is_pseudo,
-                    fabric_used_yards=round(a['fabric_used'], 4),
+                    roll_length_yards=round(avail, 4),
+                    plies_from_roll=take,
+                    end_bit_yards=round(remaining_length[ci], 4),
+                    is_pseudo=rolls[ci].is_pseudo,
+                    fabric_used_yards=round(used, 4),
                 ))
+                plies_remaining -= take
 
-            total_fab = sum(ra.roll_length_yards for ra in roll_assignments)
-            total_eb = sum(ra.end_bit_yards for ra in roll_assignments)
+        # --- Phase 2: Reuse end-bits from previously-used rolls ---
+        # Budget-aware: only reuse an end-bit if the ILP planned it
+        # (budget[i][j] > 0) OR the resulting waste is < piece_consumption
+        # (negligible T1 scrap).  This prevents diverting end-bits from
+        # their ILP-planned markers, which cascades budget violations.
+        if plies_remaining > 0:
+            endbit_candidates = []
+            for i in range(n_rolls):
+                if remaining_length[i] < marker_len:
+                    continue
+                # Only partially-used rolls (end-bits), not fresh ones
+                if remaining_length[i] >= L[i] - 0.001:
+                    continue
+                # Skip continuation roll (already handled in Phase 1)
+                if i == continuation_roll_idx and assignments:
+                    continue
 
-            dockets.append(CutDocket(
-                cut_number=cut_number,
-                marker_label=m.marker_label,
-                ratio_str=m.ratio_str,
-                marker_length_yards=ml[j],
-                plies=target,
-                plies_planned=achieved,
-                assigned_rolls=roll_assignments,
-                total_fabric_yards=round(total_fab, 4),
-                total_end_bit_yards=round(total_eb, 4),
+                # Budget-aware gate: allow if ILP budgeted this roll for
+                # this marker, or if using it creates only T1 waste.
+                avail = remaining_length[i]
+                max_from_roll = int(avail // marker_len)
+                take = min(max_from_roll, plies_remaining)
+                waste_after = avail - take * marker_len
+                is_budgeted = budget[i][j] > 0
+                creates_only_t1 = waste_after < piece_consumption
+
+                if not is_budgeted and not creates_only_t1:
+                    # This end-bit is reserved for another marker's budget
+                    # and using it would create T2 waste — skip it.
+                    continue
+
+                endbit_candidates.append(i)
+            # Sort: ILP-budgeted first, then by smallest remainder (best fit)
+            endbit_candidates.sort(key=lambda i: (
+                0 if budget[i][j] > 0 else 1,
+                remaining_length[i] % marker_len,
+                remaining_length[i],
             ))
 
-    # Step 4: Account for waste from final remainders
-    for i, chain in enumerate(roll_chains):
-        final = chain[-1]  # (-1, 0, remaining, 0, remaining, True)
-        rem = final[2]
+            for i in endbit_candidates:
+                if plies_remaining <= 0:
+                    break
+                avail = remaining_length[i]
+                max_from_roll = int(avail // marker_len)
+                take = min(max_from_roll, plies_remaining)
+                if take <= 0:
+                    continue
+
+                used = take * marker_len
+                remaining_length[i] -= used
+                budget[i][j] -= take
+                rolls_used.add(i)
+                reused_count += 1
+
+                roll_id = rolls[i].roll_id
+                if "-bit" not in roll_id:
+                    roll_id = f"{roll_id}-bit"
+
+                assignments.append(RollAssignment(
+                    roll_id=roll_id,
+                    roll_length_yards=round(avail, 4),
+                    plies_from_roll=take,
+                    end_bit_yards=round(remaining_length[i], 4),
+                    is_pseudo=rolls[i].is_pseudo,
+                    fabric_used_yards=round(used, 4),
+                ))
+                plies_remaining -= take
+
+        # --- Phase 3: Any roll with enough fabric ---
+        # Phase 2 may have consumed end-bits that the ILP had budgeted for
+        # other markers, so we can't restrict to ILP-budgeted rolls only.
+        # Instead, accept ANY roll with enough fabric.  ILP budget is used
+        # as a sorting hint: budgeted rolls first, then others.
+        if plies_remaining > 0:
+            candidates = []
+            for i in range(n_rolls):
+                if remaining_length[i] < marker_len:
+                    continue
+                if i == continuation_roll_idx and assignments:
+                    continue
+                # Skip rolls already assigned in Phase 2 for THIS cut
+                # (they may still have fabric but we avoid duplicate entries)
+                already_used = any(
+                    rolls[i].roll_id in a.roll_id.replace("-bit", "")
+                    for a in assignments
+                )
+                if already_used:
+                    continue
+                has_budget = budget[i][j] > 0
+                candidates.append((0 if has_budget else 1, i))
+            # ILP-budgeted first, then any.  Within each group: prefer
+            # rolls whose remainder after filling is T1 (< pc) over T2.
+            def _phase3_key(t):
+                _, ri = t
+                avail = remaining_length[ri]
+                take = min(int(avail // marker_len), plies_remaining)
+                waste_after = avail - take * marker_len
+                waste_class = 0 if waste_after < piece_consumption else 1
+                return (t[0], waste_class, -remaining_length[ri])
+            candidates.sort(key=_phase3_key)
+
+            for _, i in candidates:
+                if plies_remaining <= 0:
+                    break
+                avail = remaining_length[i]
+                max_from_roll = int(avail // marker_len)
+                # Spread to full capacity or cut demand — whichever is less
+                take = min(max_from_roll, plies_remaining)
+                if take <= 0:
+                    continue
+
+                used = take * marker_len
+                remaining_length[i] -= used
+                budget[i][j] -= take  # may go negative
+                rolls_used.add(i)
+
+                # Tag as "-bit" if this roll was already partially used
+                roll_id = rolls[i].roll_id
+                is_reuse = avail < L[i] - 0.001
+                if is_reuse:
+                    reused_count += 1
+                    if "-bit" not in roll_id:
+                        roll_id = f"{roll_id}-bit"
+
+                assignments.append(RollAssignment(
+                    roll_id=roll_id,
+                    roll_length_yards=round(avail, 4),
+                    plies_from_roll=take,
+                    end_bit_yards=round(remaining_length[i], 4),
+                    is_pseudo=rolls[i].is_pseudo,
+                    fabric_used_yards=round(used, 4),
+                ))
+                plies_remaining -= take
+
+        # --- Track continuation: last roll with remaining fabric ---
+        continuation_roll_idx = None
+        if assignments and assignments[-1].end_bit_yards > 0.001:
+            # Find the roll index for the last assignment
+            last_rid = assignments[-1].roll_id.replace("-bit", "")
+            for i in range(n_rolls):
+                if rolls[i].roll_id == last_rid:
+                    continuation_roll_idx = i
+                    break
+
+        achieved = plies_needed - plies_remaining
+        total_fab = sum(a.roll_length_yards for a in assignments)
+        total_eb = sum(a.end_bit_yards for a in assignments)
+
+        dockets.append(CutDocket(
+            cut_number=cut_number_0 + 1,
+            marker_label=marker_spec.marker_label,
+            ratio_str=marker_spec.ratio_str,
+            marker_length_yards=marker_len,
+            plies=plies_needed,
+            plies_planned=achieved,
+            assigned_rolls=assignments,
+            total_fabric_yards=round(total_fab, 4),
+            total_end_bit_yards=round(total_eb, 4),
+        ))
+
+    # Account for waste: unused fabric remaining on all consumed rolls
+    for i in rolls_used:
+        rem = remaining_length[i]
         if rem < 0.001:
             continue
         wtype = _classify_remnant(rem, piece_consumption, max_marker_length)
@@ -1298,6 +1484,7 @@ def optimize_rolls_ga(
     elitism: int = 2,
     progress_callback: Optional[Callable[[int, str], None]] = None,
     cancel_check: Optional[Callable[[], bool]] = None,
+    max_ply_height: int = DEFAULT_MAX_PLY_HEIGHT,
 ) -> GAResult:
     """
     Roll-to-marker optimization.
@@ -1321,7 +1508,7 @@ def optimize_rolls_ga(
 
     # --- Try ILP first (globally optimal) ---
     ilp_result = _optimal_allocation_ilp(
-        markers, rolls, pc, max_ml, progress_callback
+        markers, rolls, pc, max_ml, progress_callback, max_ply_height
     )
     if ilp_result is not None:
         ilp_wb, ilp_end_bits, ilp_reused, ilp_consumed, ilp_dockets = ilp_result
@@ -1346,7 +1533,7 @@ def optimize_rolls_ga(
     if progress_callback:
         progress_callback(5, "ILP unavailable, falling back to GA...")
 
-    cuts = _build_cut_list(markers)
+    cuts = _build_cut_list(markers, max_ply_height)
 
     # --- Seed population ---
     population: List[List[int]] = []

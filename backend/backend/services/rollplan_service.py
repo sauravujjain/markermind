@@ -11,7 +11,8 @@ Handles:
 """
 from __future__ import annotations
 
-from typing import Callable, Dict, List, Optional
+import statistics
+from typing import Callable, Dict, List, Optional, Tuple
 
 from sqlalchemy.orm import Session
 
@@ -31,12 +32,14 @@ from .rollplan_simulator import (
     PreflightResult,
     PseudoRollConfig,
     RollSpec,
+    WasteStats,
     generate_pseudo_rolls,
     optimize_rolls_ga,
     parse_roll_excel,
     simulate_roll_usage,
     validate_rollplan_inputs,
 )
+from .endbit_solver import estimate_floor_waste, floor_mc_with_rolls
 
 
 class RollPlanService:
@@ -133,11 +136,17 @@ class RollPlanService:
         db: Session,
         roll_plan: RollPlan,
         total_fabric_needed: float,
-    ) -> List[RollSpec]:
+        confirm_shortfall: bool = False,
+    ) -> Tuple[Optional[List[RollSpec]], Optional[str]]:
         """
-        Load real rolls from DB and auto-generate pseudo-rolls if shortfall.
+        Load real rolls from DB, trim excess, or detect shortfall.
 
-        Returns combined list of RollSpec for the simulator.
+        Returns (rolls, adjustment_message).
+          - rolls=None with no real rolls → pseudo-only mode
+          - rolls=None with real rolls + shortfall not confirmed → "needs_confirmation"
+
+        Trimming (excess): automatic, no confirmation needed.
+        Padding (shortfall): requires confirm_shortfall=True from user.
         """
         real_rolls_db = (
             db.query(FabricRoll)
@@ -157,25 +166,56 @@ class RollPlanService:
             for r in real_rolls_db
         ]
 
-        config = PseudoRollConfig(
-            avg_length_yards=roll_plan.pseudo_roll_avg_yards or 100.0,
-            delta_yards=roll_plan.pseudo_roll_delta_yards or 20.0,
-        )
-
         if not real_rolls:
             roll_plan.input_type = RollInputType.pseudo
-            return None  # Signal to use pseudo-rolls only (regenerated per MC run)
+            return None, None  # Signal to use generated rolls (regenerated per MC run)
 
+        threshold = roll_plan.waste_threshold_pct if roll_plan.waste_threshold_pct is not None else 2.0
+        target = total_fabric_needed * (1.0 + threshold / 100.0)
         real_total = sum(r.length_yards for r in real_rolls)
-        target = total_fabric_needed * 1.05
 
         if real_total >= target:
+            # Excess: trim shortest rolls until just above target (auto, no confirmation)
+            adjusted = sorted(real_rolls, key=lambda r: r.length_yards, reverse=True)
+            removed = 0
+            running = real_total
+            while len(adjusted) > 1:
+                if running - adjusted[-1].length_yards >= target:
+                    running -= adjusted[-1].length_yards
+                    adjusted.pop()
+                    removed += 1
+                else:
+                    break
             roll_plan.input_type = RollInputType.real
-            return real_rolls
+            msg = f"{removed} excess rolls removed to match cutplan+{threshold:.0f}% requirement" if removed else None
+            return adjusted, msg
+
         else:
-            roll_plan.input_type = RollInputType.mixed
+            # Shortfall: need user confirmation before adding generated rolls
+            shortfall = target - real_total
+            config = PseudoRollConfig(
+                avg_length_yards=roll_plan.pseudo_roll_avg_yards or 100.0,
+                delta_yards=roll_plan.pseudo_roll_delta_yards or 20.0,
+            )
+            median_len = statistics.median([r.length_yards for r in real_rolls])
+            rolls_needed = max(1, int(shortfall / median_len) + 1)
+
+            if not confirm_shortfall:
+                # Block simulation — return shortfall info for frontend
+                roll_plan.roll_adjustment_message = (
+                    f"Shortfall: uploaded {real_total:.1f} yd, need {target:.1f} yd "
+                    f"(cutplan {total_fabric_needed:.1f} yd + {threshold:.0f}% buffer). "
+                    f"Approve adding ~{rolls_needed} generated roll(s) "
+                    f"(~{median_len:.0f} yd each) to proceed."
+                )
+                roll_plan.input_type = RollInputType.real
+                return real_rolls, "needs_confirmation"
+
+            # User confirmed: pad with generated rolls
             pseudo = generate_pseudo_rolls(total_fabric_needed, config, real_rolls)
-            return real_rolls + pseudo
+            roll_plan.input_type = RollInputType.mixed
+            msg = f"{len(pseudo)} generated rolls added to cover {shortfall:.1f} yd shortfall"
+            return real_rolls + pseudo, msg
 
     # ------------------------------------------------------------------
     # Run simulation
@@ -189,11 +229,17 @@ class RollPlanService:
         cancel_check: Optional[Callable[[], bool]] = None,
         ga_pop_size: int = 30,
         ga_generations: int = 50,
-    ) -> None:
+        confirm_shortfall: bool = False,
+    ) -> Optional[str]:
         """
         Orchestrate MC + GA simulation, save results to roll_plan.
 
         Updates roll_plan in place. Caller should commit after.
+
+        Returns:
+            None on success (or cancel/fail).
+            "needs_confirmation" if real rolls have a shortfall and user
+            hasn't confirmed adding generated rolls yet.
         """
         markers = self.get_markers_for_simulation(
             db, roll_plan.cutplan_id, roll_plan.color_code
@@ -201,13 +247,37 @@ class RollPlanService:
         if not markers:
             roll_plan.status = RollPlanStatus.failed
             roll_plan.error_message = "No markers found for simulation"
-            return
+            return None
 
         total_fabric = sum(m.total_fabric_yards for m in markers)
         roll_plan.total_fabric_required = total_fabric
 
-        # Prepare rolls
-        rolls = self.prepare_rolls(db, roll_plan, total_fabric)
+        # Auto-derive min_reuse_length from cutplan markers
+        total_garments = sum(
+            sum(int(x) for x in m.ratio_str.split("-")) * m.plies
+            for m in markers
+        )
+        if total_garments > 0:
+            roll_plan.min_reuse_length_yards = round(total_fabric / total_garments, 4)
+
+        # Read max_ply_height from cutplan solver_config (default 100)
+        from ..models.cutplan import Cutplan
+        cutplan = db.query(Cutplan).filter(Cutplan.id == roll_plan.cutplan_id).first()
+        max_ply_height = 100
+        if cutplan and cutplan.solver_config and isinstance(cutplan.solver_config, dict):
+            max_ply_height = cutplan.solver_config.get("max_ply_height", 100)
+
+        # Prepare rolls (may block on shortfall confirmation)
+        rolls, adjustment_message = self.prepare_rolls(
+            db, roll_plan, total_fabric, confirm_shortfall=confirm_shortfall
+        )
+
+        if adjustment_message == "needs_confirmation":
+            # Shortfall detected, user hasn't confirmed yet — halt simulation
+            roll_plan.status = RollPlanStatus.pending
+            return "needs_confirmation"
+
+        roll_plan.roll_adjustment_message = adjustment_message
 
         # Pre-flight validation
         pseudo_config = PseudoRollConfig(
@@ -227,56 +297,120 @@ class RollPlanService:
         mc_result: Optional[MonteCarloResult] = None
         ga_result: Optional[GAResult] = None
 
-        # --- Monte Carlo ---
+        # --- Monte Carlo (floor MC v2: endbit_priority=True for evaluation) ---
         if mode in (RollPlanMode.monte_carlo, RollPlanMode.both):
             if progress_callback:
                 progress_callback(5, "Simulating cutting floor scenarios...")
 
-            mc_result = simulate_roll_usage(
-                markers=markers,
-                rolls=rolls,  # None for pseudo-only
-                pseudo_config=pseudo_config,
-                num_simulations=roll_plan.num_simulations or 100,
-                min_reuse_length=roll_plan.min_reuse_length_yards or 0.5,
-                progress_callback=lambda pct, msg: (
-                    progress_callback(5 + int(pct * 0.45), msg) if progress_callback else None
-                ),
-                cancel_check=cancel_check,
-            )
+            n_sims = roll_plan.num_simulations or 100
+            threshold_raw = roll_plan.waste_threshold_pct if roll_plan.waste_threshold_pct is not None else 2.0
+            buffer_frac = max(threshold_raw / 100.0, 0.01)  # minimum 1%
+
+            if rolls is not None:
+                # Real/mixed rolls — run MC directly on prepared rolls (no double-padding)
+                floor_result = floor_mc_with_rolls(
+                    mc_specs=markers,
+                    rolls=rolls,
+                    n_sims=n_sims,
+                    max_ply_height=max_ply_height,
+                    endbit_priority=True,
+                )
+
+                # If completion < 100% with real rolls, try adding more
+                completion = floor_result.get("completion_rate", 0)
+                if completion < 1.0 and rolls:
+                    # Add generated rolls to cover the gap and re-run
+                    config = PseudoRollConfig(
+                        avg_length_yards=roll_plan.pseudo_roll_avg_yards or 100.0,
+                        delta_yards=roll_plan.pseudo_roll_delta_yards or 20.0,
+                    )
+                    extra = generate_pseudo_rolls(total_fabric * 0.05, config)  # add ~5% more
+                    augmented = list(rolls) + extra
+                    floor_result = floor_mc_with_rolls(
+                        mc_specs=markers,
+                        rolls=augmented,
+                        n_sims=n_sims,
+                        max_ply_height=max_ply_height,
+                        endbit_priority=True,
+                    )
+                    if not roll_plan.roll_adjustment_message:
+                        roll_plan.roll_adjustment_message = (
+                            f"{len(extra)} additional generated rolls added during simulation "
+                            f"to achieve full order completion"
+                        )
+            else:
+                # Generated-only — use estimate_floor_waste with auto-escalation
+                avg_roll = roll_plan.pseudo_roll_avg_yards or 100.0
+                waste_est = estimate_floor_waste(
+                    mc_specs=markers,
+                    max_ply_height=max_ply_height,
+                    avg_roll_length=avg_roll,
+                    n_sims=n_sims,
+                    start_buffer_pct=buffer_frac,
+                    max_buffer_pct=0.15,
+                    buffer_step_pct=0.01,
+                    endbit_priority=True,
+                )
+                floor_result = waste_est.get("_mc_result", {})
 
             if cancel_check and cancel_check():
                 return
 
-            # Persist MC results — per-category waste stats
-            roll_plan.mc_unusable_avg = mc_result.unusable_waste.avg
-            roll_plan.mc_unusable_std = mc_result.unusable_waste.std
-            roll_plan.mc_unusable_p95 = mc_result.unusable_waste.p95
-            roll_plan.mc_endbit_avg = mc_result.endbit_waste.avg
-            roll_plan.mc_endbit_std = mc_result.endbit_waste.std
-            roll_plan.mc_endbit_p95 = mc_result.endbit_waste.p95
-            roll_plan.mc_returnable_avg = mc_result.returnable_waste.avg
-            roll_plan.mc_returnable_std = mc_result.returnable_waste.std
-            roll_plan.mc_returnable_p95 = mc_result.returnable_waste.p95
-            roll_plan.mc_real_waste_avg = mc_result.real_waste.avg
-            roll_plan.mc_real_waste_std = mc_result.real_waste.std
-            roll_plan.mc_real_waste_p95 = mc_result.real_waste.p95
+            # Map _floor_mc result dict → rollplan model fields
+            runs_data = floor_result.get("runs", [])
+            if runs_data:
+                import math as _math
 
-            # Summary per run (skip full end_bits for storage)
-            roll_plan.mc_simulation_runs = [
-                {
-                    "run_id": r.run_id,
-                    "unusable_yards": r.waste.unusable_yards,
-                    "endbit_yards": r.waste.endbit_yards,
-                    "returnable_yards": r.waste.returnable_yards,
-                    "real_waste_yards": r.waste.real_waste_yards,
-                    "reused_count": r.reused_count,
-                    "rolls_consumed": r.rolls_consumed,
-                }
-                for r in mc_result.runs
-            ]
+                t1_vals = [r["type1"] for r in runs_data]
+                t2_vals = [r["type2"] for r in runs_data]
+                t3_vals = [r["type3"] for r in runs_data]
+                real_vals = [r["type1"] + r["type2"] for r in runs_data]
 
-            # Best run dockets
-            roll_plan.mc_best_run_dockets = _serialize_dockets(mc_result.best_run.cut_dockets)
+                def _stats(vals):
+                    """Build WasteStats-compatible values from a list."""
+                    sv = sorted(vals)
+                    n = len(sv)
+                    p95_idx = max(0, int(_math.ceil(0.95 * n)) - 1)
+                    return {
+                        "avg": round(statistics.mean(vals), 4),
+                        "std": round(statistics.stdev(vals) if n > 1 else 0, 4),
+                        "p95": round(sv[p95_idx], 4),
+                    }
+
+                s1 = _stats(t1_vals)
+                s2 = _stats(t2_vals)
+                s3 = _stats(t3_vals)
+                sr = _stats(real_vals)
+
+                roll_plan.mc_unusable_avg = s1["avg"]
+                roll_plan.mc_unusable_std = s1["std"]
+                roll_plan.mc_unusable_p95 = s1["p95"]
+                roll_plan.mc_endbit_avg = s2["avg"]
+                roll_plan.mc_endbit_std = s2["std"]
+                roll_plan.mc_endbit_p95 = s2["p95"]
+                roll_plan.mc_returnable_avg = s3["avg"]
+                roll_plan.mc_returnable_std = s3["std"]
+                roll_plan.mc_returnable_p95 = s3["p95"]
+                roll_plan.mc_real_waste_avg = sr["avg"]
+                roll_plan.mc_real_waste_std = sr["std"]
+                roll_plan.mc_real_waste_p95 = sr["p95"]
+
+                # Per-run summary (floor MC has no dockets/reuse tracking)
+                roll_plan.mc_simulation_runs = [
+                    {
+                        "run_id": i,
+                        "unusable_yards": r["type1"],
+                        "endbit_yards": r["type2"],
+                        "returnable_yards": r["type3"],
+                        "real_waste_yards": r["type1"] + r["type2"],
+                        "reused_count": 0,
+                        "rolls_consumed": 0,
+                    }
+                    for i, r in enumerate(runs_data)
+                ]
+
+                # No dockets from floor MC
+                roll_plan.mc_best_run_dockets = []
 
         # --- GA Optimizer ---
         if mode in (RollPlanMode.ga, RollPlanMode.both):
@@ -299,6 +433,7 @@ class RollPlanService:
                     progress_callback(55 + int(pct * 0.40), msg) if progress_callback else None
                 ),
                 cancel_check=cancel_check,
+                max_ply_height=max_ply_height,
             )
 
             if cancel_check and cancel_check():
@@ -330,7 +465,8 @@ class RollPlanService:
         cancel_check: Optional[Callable[[], bool]] = None,
     ) -> str:
         """
-        Re-run ILP with roll_optimized strategy. Creates a NEW cutplan.
+        Re-run the same strategy as the original cutplan but with roll-length
+        awareness.  Creates a NEW cutplan.
 
         Returns the new cutplan ID.
         """
@@ -363,6 +499,70 @@ class RollPlanService:
 
         fabric_id = marker_bank.fabric_id
 
+        # Recover user-specified params from original cutplan's solver_config
+        orig_cfg = cutplan.solver_config or {}
+        fabric_cost = orig_cfg.get("fabric_cost_per_yard")
+        max_ply = orig_cfg.get("max_ply_height")
+        min_plies = orig_cfg.get("min_plies_by_bundle")
+
+        # Tune always runs EndBit optimized — the user clicks Tune to minimize
+        # end-bit waste, regardless of the original cutplan strategy (A/B/C/D).
+        strategy = ["endbit_optimized"]
+
+        # Reconstruct the rolls used in evaluation so the endbit solver
+        # sees the actual fabric inventory (real, pseudo, or mixed).
+        eval_markers = self.get_markers_for_simulation(
+            db, roll_plan.cutplan_id, roll_plan.color_code
+        )
+        eval_fabric = sum(m.total_fabric_yards for m in eval_markers) if eval_markers else 0
+        threshold = roll_plan.waste_threshold_pct if roll_plan.waste_threshold_pct is not None else 2.0
+
+        # Load real rolls from DB
+        real_rolls_db = (
+            db.query(FabricRoll)
+            .filter(
+                FabricRoll.roll_plan_id == roll_plan.id,
+                FabricRoll.is_pseudo == False,
+            )
+            .all()
+        )
+        real_rolls_list = [
+            RollSpec(
+                roll_id=r.roll_number,
+                length_yards=r.length_yards,
+                is_pseudo=False,
+                width_inches=r.width_inches,
+            )
+            for r in real_rolls_db
+        ]
+
+        if real_rolls_list:
+            # Real rolls exist — pad with pseudo if the evaluation did so
+            real_total = sum(r.length_yards for r in real_rolls_list)
+            target = eval_fabric * (1.0 + threshold / 100.0)
+            if real_total >= target:
+                rolls_for_tune = real_rolls_list
+            else:
+                pseudo_cfg = PseudoRollConfig(
+                    avg_length_yards=roll_plan.pseudo_roll_avg_yards or 100.0,
+                    delta_yards=roll_plan.pseudo_roll_delta_yards or 20.0,
+                )
+                pseudo_pad = generate_pseudo_rolls(eval_fabric, pseudo_cfg, real_rolls_list)
+                rolls_for_tune = real_rolls_list + pseudo_pad
+                print(f"[RollPlanService] Tune: {len(real_rolls_list)} real + "
+                      f"{len(pseudo_pad)} pseudo rolls")
+        else:
+            # Pseudo-only plan — generate rolls matching evaluation config
+            pseudo_cfg = PseudoRollConfig(
+                avg_length_yards=roll_plan.pseudo_roll_avg_yards or avg_roll_length_yards,
+                delta_yards=roll_plan.pseudo_roll_delta_yards or 20.0,
+            )
+            rolls_for_tune = generate_pseudo_rolls(eval_fabric, pseudo_cfg)
+            print(f"[RollPlanService] Tune: generated {len(rolls_for_tune)} pseudo rolls "
+                  f"(avg {pseudo_cfg.avg_length_yards:.0f}yd)")
+
+        print(f"[RollPlanService] Tune: endbit_optimized with {len(rolls_for_tune)} rolls")
+
         svc = CutplanService()
         results = svc.run_multi_strategy_optimization(
             db=db,
@@ -370,18 +570,25 @@ class RollPlanService:
             pattern_id=order.pattern_id,
             fabric_id=fabric_id,
             customer_id=order.customer_id,
-            strategies=["roll_optimized"],
+            strategies=strategy,
             penalty=roll_penalty_weight,
             progress_callback=progress_callback,
             cancel_check=cancel_check,
             avg_roll_length_yards=avg_roll_length_yards,
+            fabric_width_inches=marker_bank.fabric_width_inches,
+            fabric_cost_per_yard=fabric_cost,
+            max_ply_height=max_ply,
+            min_plies_by_bundle=min_plies if isinstance(min_plies, str) else None,
+            cost_metric="length",
+            real_rolls=rolls_for_tune,
+            endbit_pad_pct=0.05 if rolls_for_tune else 0.0,
         )
 
         if not results:
             raise ValueError("ILP solver produced no results")
 
         new_cutplan = results[0]
-        new_cutplan.name = f"Roll-Tuned: {cutplan.name or 'Cutplan'}"
+        new_cutplan.name = "Roll-Tuned (EndBit)"
         db.commit()
 
         return new_cutplan.id
@@ -393,12 +600,13 @@ class RollPlanService:
     @staticmethod
     def compute_waste_assessment(
         roll_plan: RollPlan,
-        threshold_pct: float = 5.0,
+        threshold_pct: float = 1.0,
     ) -> Optional[Dict]:
         """
         Compute waste assessment from MC results.
 
-        Returns dict with waste_pct, exceeds_threshold, threshold_pct, recommendation.
+        Returns dict with waste_pct, exceeds_threshold, threshold_pct,
+        waste_yards, total_fabric_yards, and recommendation.
         """
         if roll_plan.mc_unusable_avg is None or roll_plan.mc_endbit_avg is None:
             return None
@@ -409,21 +617,26 @@ class RollPlanService:
 
         avg_unusable = roll_plan.mc_unusable_avg or 0
         avg_endbit = roll_plan.mc_endbit_avg or 0
-        waste_pct = (avg_unusable + avg_endbit) / total_fabric * 100
+        waste_yards = avg_unusable + avg_endbit
+        waste_pct = waste_yards / total_fabric * 100
 
         exceeds = waste_pct > threshold_pct
         if exceeds:
             recommendation = (
-                f"Waste is {waste_pct:.1f}% of fabric needed (threshold: {threshold_pct}%). "
-                f"Consider re-optimizing the cutplan with roll-aware ILP to reduce roll remainders."
+                f"{waste_yards:.1f} yards wasted of {total_fabric:.0f} yards needed ({waste_pct:.2f}%, threshold: {threshold_pct}%). "
+                f"Consider optimizing the roll plan to reduce end-bit waste."
             )
         else:
-            recommendation = f"Waste is {waste_pct:.1f}% — within acceptable levels."
+            recommendation = (
+                f"{waste_yards:.1f} yards wasted of {total_fabric:.0f} yards needed ({waste_pct:.2f}%) — within acceptable levels."
+            )
 
         return {
             "waste_pct": round(waste_pct, 2),
             "exceeds_threshold": exceeds,
             "threshold_pct": threshold_pct,
+            "waste_yards": round(waste_yards, 2),
+            "total_fabric_yards": round(total_fabric, 1),
             "recommendation": recommendation,
         }
 
@@ -457,12 +670,14 @@ class RollPlanService:
             "real_rolls_count": real_count,
             "pseudo_rolls_count": pseudo_count,
             "preflight_warnings": roll_plan.preflight_warnings,
+            "roll_adjustment_message": roll_plan.roll_adjustment_message,
             "created_at": roll_plan.created_at,
             "updated_at": roll_plan.updated_at,
         }
 
         # Waste assessment
-        waste_assessment = RollPlanService.compute_waste_assessment(roll_plan)
+        threshold = roll_plan.waste_threshold_pct if roll_plan.waste_threshold_pct is not None else 2.0
+        waste_assessment = RollPlanService.compute_waste_assessment(roll_plan, threshold_pct=threshold)
         if waste_assessment:
             data["waste_assessment"] = waste_assessment
 
