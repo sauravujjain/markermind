@@ -11,6 +11,7 @@ import time
 import io
 import base64
 import logging
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Tuple, Callable, Optional
 from itertools import combinations_with_replacement
@@ -1754,17 +1755,29 @@ def _build_features_with_width(
     sizes: List[str],
     geom: Dict,
     fabric_width_mm: float,
+    shrinkage_x: float = 0.0,
+    shrinkage_y: float = 0.0,
 ) -> List[float]:
     """
-    Build Ridge feature vector with fabric_width_mm prepended.
+    Build Ridge feature vector for cross-width and cross-lot prediction.
 
-    Same as _build_features in _lhs_predict_ratios but with absolute width
-    as the first feature for cross-width generalization.
+    Extends the single-width feature vector with:
+    - fabric_width_mm: absolute fabric width (captures width effect)
+    - shrinkage_x, shrinkage_y: shrinkage percentages (captures lot effect)
+
+    The geometry features (bundle_area, max_piece_width) should be computed
+    from the lot-specific pattern, so they naturally reflect shrinkage-scaled
+    piece sizes. The explicit shrinkage features let Ridge learn any residual
+    non-linear effects beyond what geometry captures.
+
+    Backwards compatible: defaults shrinkage to (0,0) for single-shrinkage mode.
     """
     feats = []
 
-    # Feature 0: absolute fabric width in mm
+    # Feature 0-2: fabric width + shrinkage
     feats.append(fabric_width_mm)
+    feats.append(shrinkage_x)
+    feats.append(shrinkage_y)
 
     bc = sum(ratio.get(s, 0) for s in sizes)
     if bc == 0:
@@ -1775,7 +1788,7 @@ def _build_features_with_width(
     feats.extend(props)
     feats.append(bc)
 
-    # Total bundle area
+    # Total bundle area (from lot-specific geometry)
     total_area = sum(
         ratio.get(s, 0) * geom['bundle_area'].get(s, 0)
         for s in sizes
@@ -1790,7 +1803,7 @@ def _build_features_with_width(
     )
     feats.append(max_wr)
 
-    # Ratio × geometry cross features
+    # Ratio × geometry cross features (lot-specific)
     for s in sizes:
         s_count = ratio.get(s, 0)
         if s_count > 0:
@@ -1817,6 +1830,9 @@ def _cross_width_predict(
     geom: Dict,
     pieces_by_size: Dict[str, List[Dict]],
     gpu_scale: float,
+    base_shrinkage: Tuple[float, float] = (0.0, 0.0),
+    target_shrinkage: Tuple[float, float] = (0.0, 0.0),
+    target_geom: Optional[Dict] = None,
 ) -> Dict[int, List[Dict]]:
     """
     Predict nesting results at target_width using Ridge trained on
@@ -1830,6 +1846,9 @@ def _cross_width_predict(
     target_width_mm = target_width_inches * 25.4
     target_strip_px = int(target_width_mm * gpu_scale)
 
+    # Use target-specific geometry if provided (for cross-lot with different pieces)
+    tgt_geom = target_geom if target_geom is not None else geom
+
     # Build training data from base results (all GPU-evaluated)
     X_train = []
     y_train = []
@@ -1842,18 +1861,24 @@ def _cross_width_predict(
             ratio = r.get('ratio')
             if not ratio:
                 continue
-            feats = _build_features_with_width(ratio, sizes, geom, base_width_mm)
+            feats = _build_features_with_width(
+                ratio, sizes, geom, base_width_mm,
+                shrinkage_x=base_shrinkage[0], shrinkage_y=base_shrinkage[1],
+            )
             X_train.append(feats)
             y_train.append(r['length_yards'])
             train_ratio_strs.add(r['ratio_str'])
 
-    # Add anchor results at target width
+    # Add anchor results at target width (using target-lot geometry)
     anchor_ratio_strs = set()
     for r in anchor_results:
         ratio = r.get('ratio')
         if not ratio:
             continue
-        feats = _build_features_with_width(ratio, sizes, geom, target_width_mm)
+        feats = _build_features_with_width(
+            ratio, sizes, tgt_geom, target_width_mm,
+            shrinkage_x=target_shrinkage[0], shrinkage_y=target_shrinkage[1],
+        )
         X_train.append(feats)
         y_train.append(r['length_yards'])
         anchor_ratio_strs.add(r['ratio_str'])
@@ -1898,8 +1923,11 @@ def _cross_width_predict(
                         break
                 continue
 
-            # Predict at target width
-            feats = _build_features_with_width(ratio, sizes, geom, target_width_mm)
+            # Predict at target width/lot
+            feats = _build_features_with_width(
+                ratio, sizes, tgt_geom, target_width_mm,
+                shrinkage_x=target_shrinkage[0], shrinkage_y=target_shrinkage[1],
+            )
             pred_length = float(model.predict([feats])[0])
             if pred_length <= 0:
                 pred_length = 0.001
@@ -1931,6 +1959,28 @@ def _cross_width_predict(
     return predicted_by_bc
 
 
+@dataclass
+class FabricLot:
+    """A fabric lot defined by shrinkage group + width + available yardage."""
+    shrinkage: str          # e.g., "3.5X3.5"
+    shrinkage_x: float      # X shrinkage % (e.g., 3.5)
+    shrinkage_y: float      # Y shrinkage % (e.g., 3.5)
+    width_inches: float     # Cuttable width in inches (e.g., 71.0)
+    available_yards: float  # Fabric available in this lot (after waste deduction)
+    dxf_path: str           # Path to shrinkage-specific DXF pattern
+    rul_path: Optional[str] # Path to shrinkage-specific RUL grading file
+
+    @property
+    def key(self) -> str:
+        return f"{self.shrinkage}_{self.width_inches}"
+
+    @staticmethod
+    def parse_shrinkage(shrinkage_str: str) -> Tuple[float, float]:
+        """Parse '3.5X3.5' into (3.5, 3.5)."""
+        parts = shrinkage_str.upper().split('X')
+        return float(parts[0]), float(parts[1]) if len(parts) > 1 else float(parts[0])
+
+
 def run_nesting_for_material(
     dxf_path: str,
     rul_path: str,
@@ -1950,6 +2000,7 @@ def run_nesting_for_material(
     nesting_strategy: str = "auto",
     fabric_widths: Optional[List[float]] = None,
     material_sources: Optional[List[str]] = None,
+    fabric_lots: Optional[List[FabricLot]] = None,
 ) -> Dict[float, Dict[int, List[Dict]]]:
     """
     Run GPU nesting for a specific material at one or more fabric widths.
@@ -2287,11 +2338,102 @@ def run_nesting_for_material(
             len(v) for w in extra_widths for v in all_width_results.get(w, {}).values()
         )
 
+    # -------------------------------------------------------------------
+    # Multi-lot: cross-lot Ridge prediction for fabric lots with
+    # different shrinkage variants (different DXF patterns per lot)
+    # -------------------------------------------------------------------
+    if fabric_lots and len(fabric_lots) > 1:
+        from sklearn.linear_model import Ridge as _Ridge
+
+        base_lot = max(fabric_lots, key=lambda l: l.available_yards)
+        extra_lots = [l for l in fabric_lots if l.key != base_lot.key]
+
+        # Use base lot results from the sweep above (already in all_width_results)
+        base_geom = _extract_geometry(pieces_by_size, sizes, fabric_width_mm, gpu_scale)
+        anchor_per_bc = 3
+        benchmark_ratio_strs = set()
+
+        # Select diverse anchors from base results
+        anchor_set = []
+        for bc_key in sorted(base_results.keys()):
+            bc_list = sorted(base_results[bc_key], key=lambda r: -r['efficiency'])
+            anchor_set.extend(bc_list[:anchor_per_bc])
+
+        if progress_callback:
+            progress_callback(92, f"Multi-lot: {len(anchor_set)} anchors × {len(extra_lots)} lots (dual sort)")
+
+        lot_results: Dict[str, Dict[int, List[Dict]]] = {base_lot.key: base_results}
+
+        for lot in extra_lots:
+            if cancel_check and cancel_check():
+                raise NestingCancelled("Job cancelled by user")
+
+            # Load lot-specific pieces
+            lot_pieces = load_pieces_for_material(
+                lot.dxf_path, lot.rul_path, material, sizes, gpu_scale,
+                file_type=file_type, material_sources=material_sources,
+            )
+            lot_strip_px = int(lot.width_inches * 25.4 * gpu_scale)
+            lot_max_length = int((max_bundle_count * max_area * 2) / lot_strip_px) + 500
+            lot_packer = GPUPacker(lot_strip_px, lot_max_length)
+            lot_geom = _extract_geometry(lot_pieces, sizes, lot.width_inches * 25.4, gpu_scale)
+
+            # GPU-evaluate anchors at this lot (dual sort)
+            anchor_results = []
+            for a in anchor_set:
+                ratio = a.get('ratio')
+                if not ratio:
+                    continue
+                eff, length, _, perim = evaluate_ratio(
+                    lot_pieces, ratio, lot_packer, lot_strip_px, gpu_scale,
+                    dual_sort=True,
+                )
+                bc = sum(ratio.get(s, 0) for s in sizes)
+                anchor_results.append({
+                    'ratio': ratio,
+                    'ratio_str': a['ratio_str'],
+                    'efficiency': eff,
+                    'length_yards': length,
+                    'bundle_count': bc,
+                    'perimeter_cm': perim,
+                    'source': 'gpu',
+                })
+            evaluated_count_ref[0] += len(anchor_results)
+
+            # Ridge predict remaining ratios
+            lot_predicted = _cross_width_predict(
+                base_results, anchor_results,
+                base_lot.width_inches, lot.width_inches,
+                sizes, base_geom, pieces_by_size, gpu_scale,
+                base_shrinkage=(base_lot.shrinkage_x, base_lot.shrinkage_y),
+                target_shrinkage=(lot.shrinkage_x, lot.shrinkage_y),
+                target_geom=lot_geom,
+            )
+            lot_results[lot.key] = lot_predicted
+
+            if progress_callback:
+                progress_callback(
+                    92 + int(6 * (extra_lots.index(lot) + 1) / len(extra_lots)),
+                    f"Multi-lot {lot.key}: {len(anchor_results)} anchors GPU-evaluated, "
+                    f"Ridge predicted {sum(len(v) for v in lot_predicted.values())} ratios",
+                )
+
+            logger.info(
+                "Multi-lot %s: %d anchors, %d predicted ratios",
+                lot.key, len(anchor_results),
+                sum(len(v) for v in lot_predicted.values()),
+            )
+
+        # Return lot-keyed results (extend the width-keyed results)
+        # Store lot results under a special key for the caller to distinguish
+        all_width_results['_lot_results'] = lot_results
+
     if progress_callback:
         width_str = f" across {len(widths)} widths" if multi_width else ""
+        lot_str = f", {len(fabric_lots)} lots" if fabric_lots and len(fabric_lots) > 1 else ""
         progress_callback(
             100,
-            f"Complete — {evaluated_count_ref[0]} ratios evaluated, {total_saved} markers saved{width_str}",
+            f"Complete — {evaluated_count_ref[0]} ratios evaluated, {total_saved} markers saved{width_str}{lot_str}",
         )
 
     return all_width_results
