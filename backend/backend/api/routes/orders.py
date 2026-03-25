@@ -57,6 +57,7 @@ async def create_order(
         style_number=order_data.style_number,
         style_id=order_data.style_id,
         pattern_id=order_data.pattern_id,
+        notes=order_data.notes,
         piece_buffer_mm=order_data.piece_buffer_mm,
         edge_buffer_mm=order_data.edge_buffer_mm,
         rotation_mode=order_data.rotation_mode,

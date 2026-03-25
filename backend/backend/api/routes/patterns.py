@@ -205,6 +205,39 @@ async def get_pattern_pieces(
     }
 
 
+@router.post("/{pattern_id}/merge-materials")
+async def merge_materials(
+    pattern_id: str,
+    request: dict,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Merge multiple pattern materials into one for combined nesting."""
+    pattern = db.query(Pattern).filter(
+        Pattern.id == pattern_id,
+        Pattern.customer_id == current_user.customer_id,
+    ).first()
+    if not pattern:
+        raise HTTPException(status_code=404, detail="Pattern not found")
+    if not pattern.is_parsed:
+        raise HTTPException(status_code=400, detail="Pattern not parsed yet")
+
+    source_materials = request.get("source_materials", [])
+    target_name = request.get("target_name", "")
+
+    if len(source_materials) < 2:
+        raise HTTPException(status_code=400, detail="Need at least 2 materials to merge")
+    if not target_name:
+        raise HTTPException(status_code=400, detail="Target name is required")
+
+    result = pattern_service.merge_materials(db, pattern, source_materials, target_name)
+
+    if not result.get("success"):
+        raise HTTPException(status_code=400, detail=result.get("error", "Merge failed"))
+
+    return result
+
+
 @router.get("/{pattern_id}/preview")
 async def get_pattern_preview(
     pattern_id: str,

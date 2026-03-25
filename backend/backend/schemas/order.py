@@ -64,6 +64,7 @@ class OrderCreate(BaseModel):
     style_number: Optional[str] = None
     style_id: Optional[str] = None
     pattern_id: Optional[str] = None
+    notes: Optional[str] = None
     piece_buffer_mm: float = 0.0
     edge_buffer_mm: float = 0.0
     rotation_mode: str = "free"
@@ -75,6 +76,7 @@ class OrderUpdate(BaseModel):
     style_number: Optional[str] = None
     style_id: Optional[str] = None
     pattern_id: Optional[str] = None
+    notes: Optional[str] = None
     piece_buffer_mm: Optional[float] = None
     edge_buffer_mm: Optional[float] = None
     rotation_mode: Optional[str] = None
@@ -88,6 +90,7 @@ class OrderResponse(BaseModel):
     style_number: Optional[str]
     style_id: Optional[str]
     pattern_id: Optional[str]
+    notes: Optional[str]
     status: str
     piece_buffer_mm: float
     edge_buffer_mm: float

@@ -209,7 +209,7 @@ export function TestMarkerPanel({ pattern, fabricWidthInches, orderId }: TestMar
 
   const setBundleCount = (size: string, count: number) => {
     if (count < 0) count = 0
-    if (count > 4) count = 4
+    if (count > 12) count = 12
     setSizeBundles(prev => {
       const next = { ...prev }
       if (count === 0) {
@@ -223,7 +223,7 @@ export function TestMarkerPanel({ pattern, fabricWidthInches, orderId }: TestMar
 
   const totalBundles = Object.values(sizeBundles).reduce((sum, v) => sum + v, 0)
   const selectedSizeCount = Object.keys(sizeBundles).length
-  const canAdd = selectedSizeCount > 0 && totalBundles >= 1 && totalBundles <= 8
+  const canAdd = selectedSizeCount > 0 && totalBundles >= 1 && totalBundles <= 20
 
   const buildRatioStr = (bundles: Record<string, number>) =>
     availableSizes.map(s => bundles[s] || 0).join('-')
@@ -684,7 +684,7 @@ export function TestMarkerPanel({ pattern, fabricWidthInches, orderId }: TestMar
                           <span className="w-4 text-center text-xs font-bold text-blue-700">{count}</span>
                           <button
                             onClick={() => setBundleCount(size, count + 1)}
-                            disabled={totalBundles >= 8}
+                            disabled={totalBundles >= 20}
                             className="h-5 w-5 rounded text-xs font-medium hover:bg-blue-200 flex items-center justify-center disabled:opacity-30"
                           >+</button>
                         </div>
@@ -698,7 +698,7 @@ export function TestMarkerPanel({ pattern, fabricWidthInches, orderId }: TestMar
               <p className="text-xs text-muted-foreground mt-1.5">
                 Ratio: <span className="font-mono font-medium">{buildRatioStr(sizeBundles)}</span>
                 {' '}({totalBundles} bundle{totalBundles !== 1 ? 's' : ''})
-                {totalBundles > 8 && <span className="text-red-600 ml-1">(max 8)</span>}
+                {totalBundles > 20 && <span className="text-red-600 ml-1">(max 20)</span>}
               </p>
             )}
           </div>

@@ -115,6 +115,12 @@ from nesting_engine.io.dxf_block_parser import (
 from nesting_engine.io.vt_dxf_parser import (
     clean_vertices_for_spyrrow as clean_vt_dxf_vertices,
 )
+from nesting_engine.io.gerber_accumark_parser import (
+    clean_vertices_for_spyrrow as clean_accumark_vertices,
+)
+from nesting_engine.io.gerber_aama_parser import (
+    clean_vertices_for_spyrrow as clean_gerber_aama_vertices,
+)
 from nesting_engine.engine.spyrrow_engine import SpyrrowEngine, SpyrrowConfig
 from nesting_engine.core.instance import Container, NestingItem, NestingInstance, FlipMode
 from nesting_engine.core.piece import Piece, PieceIdentifier, OrientationConstraint
@@ -210,6 +216,7 @@ def load_pieces_for_spyrrow(
     sizes: List[str],
     allowed_rotations: List[int] = [0, 180],
     file_type: Optional[str] = None,
+    material_sources: Optional[List[str]] = None,
 ) -> Tuple[List[Piece], Dict[str, dict]]:
     """
     Load graded pieces via grade_material_to_nesting_pieces().
@@ -226,6 +233,22 @@ def load_pieces_for_spyrrow(
     # VT DXF path: Optitex Graded Nest format
     if file_type == "vt_dxf":
         return _load_pieces_vt_dxf_for_spyrrow(dxf_path, sizes, allowed_rotations)
+
+    # Gerber AccuMark path: pre-graded DXF with rich metadata
+    if file_type == "gerber_accumark":
+        return _load_pieces_gerber_accumark_for_spyrrow(
+            dxf_path, material, sizes, allowed_rotations)
+
+    # OptiTex AAMA path: DXF+RUL with packed multi-pair delta lines
+    if file_type == "optitex_aama":
+        return _load_pieces_optitex_aama_for_spyrrow(
+            dxf_path, rul_path, material, sizes, allowed_rotations)
+
+    # Gerber AAMA path: DXF+RUL with Gerber AccuMark grading
+    if file_type == "gerber_aama":
+        return _load_pieces_gerber_aama_for_spyrrow(
+            dxf_path, rul_path, material, sizes, allowed_rotations,
+            material_sources=material_sources)
 
     # DXF-only path: no RUL grading, pieces already sized in DXF
     if rul_path is None or not Path(rul_path).exists():
@@ -249,14 +272,19 @@ def load_pieces_for_spyrrow(
         return nesting_pieces, piece_config
 
     # AAMA path (existing logic)
-    nesting_pieces = grade_material_to_nesting_pieces(
-        dxf_path, rul_path,
-        material=material,
-        target_sizes=sizes,
-        rotations=allowed_rotations,
-        allow_flip=True,
-    )
-    logger.info(f"Loaded {len(nesting_pieces)} graded pieces for material={material}, sizes={sizes}")
+    # For merged materials, load pieces for each source material and combine
+    source_mats = material_sources if material_sources else [material]
+    nesting_pieces = []
+    for src_mat in source_mats:
+        mat_pieces = grade_material_to_nesting_pieces(
+            dxf_path, rul_path,
+            material=src_mat,
+            target_sizes=sizes,
+            rotations=allowed_rotations,
+            allow_flip=True,
+        )
+        nesting_pieces.extend(mat_pieces)
+    logger.info(f"Loaded {len(nesting_pieces)} graded pieces for material={material} (sources={source_mats}), sizes={sizes}")
 
     # AAMA vertex cleaning (dedup only — no simplification)
     # Uses parser-owned cleaning function per CLAUDE.md architecture rules
@@ -270,9 +298,13 @@ def load_pieces_for_spyrrow(
         logger.info(f"Cleaned duplicate vertices from {cleaned_count}/{len(nesting_pieces)} AAMA pieces")
 
     # Build piece_config from AAMA annotation (L/R detection)
-    # Same logic as Streamlit app lines 1036-1055
     aama_pieces, rules = load_aama_pattern(dxf_path, rul_path)
-    aama_lookup = {ap.name: ap for ap in aama_pieces}
+    # Filter to source materials for accurate L/R lookup
+    accept_materials = set(m.upper() for m in source_mats)
+    aama_lookup = {
+        ap.name: ap for ap in aama_pieces
+        if (ap.material or "").upper() in accept_materials
+    }
 
     piece_config: Dict[str, dict] = {}
     for p in nesting_pieces:
@@ -332,6 +364,183 @@ def _load_pieces_vt_dxf_for_spyrrow(
             piece_config[piece_name] = {'demand': qty // 2, 'flipped': True}
         else:
             piece_config[piece_name] = {'demand': qty, 'flipped': False}
+
+    return nesting_pieces, piece_config
+
+
+def _load_pieces_optitex_aama_for_spyrrow(
+    dxf_path: str,
+    rul_path: Optional[str],
+    material: str,
+    sizes: List[str],
+    allowed_rotations: List[int] = [0, 180],
+) -> Tuple[List[Piece], Dict[str, dict]]:
+    """Load pieces from OptiTex AAMA DXF+RUL for Spyrrow nesting.
+
+    Uses the optitex_aama_parser which handles OptiTex's packed multi-pair
+    delta lines in the RUL file.
+    """
+    from nesting_engine.io.optitex_aama_parser import (
+        grade_material_to_nesting_pieces as optitex_grade,
+        load_aama_pattern as optitex_load,
+        clean_vertices_for_spyrrow as clean_optitex_vertices,
+    )
+
+    nesting_pieces = optitex_grade(
+        dxf_path, rul_path,
+        material=material,
+        target_sizes=sizes,
+        rotations=allowed_rotations,
+        allow_flip=True,
+    )
+    logger.info(f"Loaded {len(nesting_pieces)} OptiTex AAMA pieces for material={material}, sizes={sizes}")
+
+    # OptiTex AAMA vertex cleaning (parser-owned per CLAUDE.md)
+    cleaned_count = 0
+    for p in nesting_pieces:
+        original_len = len(p.vertices)
+        p.vertices = clean_optitex_vertices(list(p.vertices))
+        if len(p.vertices) != original_len:
+            cleaned_count += 1
+    if cleaned_count:
+        logger.info(f"Cleaned duplicate vertices from {cleaned_count}/{len(nesting_pieces)} OptiTex AAMA pieces")
+
+    # Build piece_config from AAMA annotation (L/R detection)
+    aama_pieces, rules = optitex_load(dxf_path, rul_path)
+    aama_lookup = {ap.name: ap for ap in aama_pieces}
+
+    piece_config: Dict[str, dict] = {}
+    for p in nesting_pieces:
+        piece_name = p.identifier.piece_name
+        if piece_name in piece_config:
+            continue
+        aama_piece = aama_lookup.get(piece_name)
+        if aama_piece and aama_piece.quantity.has_left_right:
+            demand = aama_piece.quantity.left_qty
+            flipped = True
+        else:
+            demand = aama_piece.quantity.total if aama_piece else 1
+            flipped = False
+        piece_config[piece_name] = {'demand': demand, 'flipped': flipped}
+
+    return nesting_pieces, piece_config
+
+
+def _load_pieces_gerber_accumark_for_spyrrow(
+    dxf_path: str,
+    material: str,
+    sizes: List[str],
+    allowed_rotations: List[int] = [0, 180],
+) -> Tuple[List[Piece], Dict[str, dict]]:
+    """Load pieces from a Gerber AccuMark DXF for Spyrrow nesting.
+
+    Filters pieces by material code (derived from ANNOTATION).
+    """
+    from nesting_engine.io.gerber_accumark_parser import parse_gerber_accumark_dxf
+
+    all_pieces, all_sizes, mat_map, piece_cfg = parse_gerber_accumark_dxf(
+        dxf_path, size_names=sizes,
+    )
+
+    # Filter to requested sizes and material
+    target_set = set(sizes)
+    nesting_pieces = [
+        p for p in all_pieces
+        if p.identifier.size in target_set
+        and mat_map.get(p.identifier.piece_name) == material
+    ]
+
+    logger.info(
+        f"Loaded {len(nesting_pieces)} AccuMark pieces for "
+        f"material={material}, sizes={sizes}"
+    )
+
+    # AccuMark vertex cleaning (dedup only — no simplification)
+    cleaned_count = 0
+    for p in nesting_pieces:
+        original_len = len(p.vertices)
+        p.vertices = clean_accumark_vertices(list(p.vertices))
+        if len(p.vertices) != original_len:
+            cleaned_count += 1
+    if cleaned_count:
+        logger.info(
+            f"Cleaned duplicate vertices from "
+            f"{cleaned_count}/{len(nesting_pieces)} AccuMark pieces"
+        )
+
+    # Build piece_config from parser's piece_cfg (already has demand + flipped)
+    piece_config: Dict[str, dict] = {}
+    for p in nesting_pieces:
+        pname = p.identifier.piece_name
+        if pname in piece_config:
+            continue
+        cfg = piece_cfg.get(pname, {'demand': 1, 'flipped': False})
+        piece_config[pname] = cfg
+
+    return nesting_pieces, piece_config
+
+
+def _load_pieces_gerber_aama_for_spyrrow(
+    dxf_path: str,
+    rul_path: Optional[str],
+    material: str,
+    sizes: List[str],
+    allowed_rotations: List[int] = [0, 180],
+    material_sources: Optional[List[str]] = None,
+) -> Tuple[List[Piece], Dict[str, dict]]:
+    """Load pieces from Gerber AAMA DXF+RUL for Spyrrow nesting.
+
+    Uses the gerber_aama_parser which handles Gerber AccuMark-specific
+    AAMA format differences (chained L1 polylines, etc.).
+    """
+    from nesting_engine.io.gerber_aama_parser import (
+        grade_material_to_nesting_pieces as gerber_aama_grade,
+        parse_gerber_aama,
+    )
+
+    # For merged materials, load pieces for each source material and combine
+    source_mats = material_sources if material_sources else [material]
+    nesting_pieces = []
+    for src_mat in source_mats:
+        mat_pieces = gerber_aama_grade(
+            dxf_path, rul_path,
+            material=src_mat,
+            target_sizes=sizes,
+            rotations=allowed_rotations,
+            allow_flip=True,
+        )
+        nesting_pieces.extend(mat_pieces)
+    logger.info(f"Loaded {len(nesting_pieces)} Gerber AAMA pieces for material={material} (sources={source_mats}), sizes={sizes}")
+
+    # Gerber AAMA vertex cleaning (parser-owned per CLAUDE.md)
+    cleaned_count = 0
+    for p in nesting_pieces:
+        original_len = len(p.vertices)
+        p.vertices = clean_gerber_aama_vertices(list(p.vertices))
+        if len(p.vertices) != original_len:
+            cleaned_count += 1
+    if cleaned_count:
+        logger.info(f"Cleaned duplicate vertices from {cleaned_count}/{len(nesting_pieces)} Gerber AAMA pieces")
+
+    # Build piece_config from parsed pieces (L/R detection)
+    # GerberAAMAPiece has quantity as plain int, no L/R info at parser level
+    pieces_raw, rules = parse_gerber_aama(dxf_path, rul_path)
+    # Filter to source materials for accurate lookup
+    accept_materials = set(m.upper() for m in source_mats)
+    aama_lookup = {
+        ap.name: ap for ap in pieces_raw
+        if (ap.material or "").upper() in accept_materials
+    }
+
+    piece_config: Dict[str, dict] = {}
+    for p in nesting_pieces:
+        piece_name = p.identifier.piece_name
+        if piece_name in piece_config:
+            continue  # Already configured (same name across sizes)
+        aama_piece = aama_lookup.get(piece_name)
+        # Gerber AAMA quantity is a plain int, no L/R distinction
+        demand = aama_piece.quantity if aama_piece else 1
+        piece_config[piece_name] = {'demand': demand, 'flipped': False}
 
     return nesting_pieces, piece_config
 
@@ -622,9 +831,10 @@ def export_marker_svg(
     svg_height = int(fabric_width_mm * scale)
 
     parts = [
-        f'<svg xmlns="http://www.w3.org/2000/svg" width="{svg_width}" height="{svg_height + 2}" '
+        f'<svg xmlns="http://www.w3.org/2000/svg" '
         f'viewBox="0 0 {strip_length:.1f} {fabric_width_mm:.1f}" '
-        f'style="background:#f5f5f5;border:1px solid #ddd;border-radius:4px">',
+        f'preserveAspectRatio="xMinYMin meet" '
+        f'style="background:#f5f5f5;border:1px solid #ddd;border-radius:4px;width:100%;height:auto;max-height:200px">',
     ]
 
     # Container outline
@@ -674,6 +884,16 @@ def export_marker_svg(
         parts.append(
             f'<polygon points="{points_str}" fill="{color}" fill-opacity="{opacity}" '
             f'stroke="{stroke_color}" stroke-width="{stroke_w:.2f}"/>'
+        )
+
+        # Size label at centroid
+        cx = sum(x for x, y in verts) / len(verts)
+        cy = sum(y for x, y in verts) / len(verts)
+        font_size = max(strip_length, fabric_width_mm) * 0.022
+        parts.append(
+            f'<text x="{cx:.1f}" y="{cy:.1f}" font-size="{font_size:.1f}" '
+            f'fill="#333" text-anchor="middle" dominant-baseline="middle" '
+            f'font-family="sans-serif" font-weight="600" opacity="0.8">{size}</text>'
         )
 
     logger.info(f"SVG export: {rendered} pieces rendered, {skipped} skipped")
@@ -856,7 +1076,11 @@ def nest_single_marker_surface(
     })
 
     ssh_cmd = [
-        "ssh", "-o", "ConnectTimeout=5", "surface",
+        "ssh",
+        "-o", "ConnectTimeout=5",
+        "-o", "ServerAliveInterval=30",
+        "-o", "ServerAliveCountMax=240",
+        "surface",
         "source ~/nester/bin/activate && python3 ~/surface_nesting_worker.py --stdin",
     ]
     logger.info(f"Surface nest: {len(remote_pieces)} pieces, width={effective_width:.0f}mm")
@@ -865,7 +1089,7 @@ def nest_single_marker_surface(
         input=job_payload,
         capture_output=True,
         text=True,
-        timeout=int(time_limit) + 30,
+        timeout=int(time_limit * 2) + 600,  # generous: Spyrrow on slow CPUs overruns heavily
     )
     if proc.returncode != 0:
         raise RuntimeError(f"Surface nesting failed: {proc.stderr.strip()[-500:]}")
@@ -933,6 +1157,7 @@ def refine_cutplan_markers(
     compression_time: Optional[int] = None,
     seed_screening: bool = False,
     use_surface: bool = False,
+    material_sources: Optional[List[str]] = None,
 ) -> List[Dict]:
     """
     Refine all markers in a cutplan sequentially with Spyrrow.
@@ -941,6 +1166,7 @@ def refine_cutplan_markers(
         markers: List of dicts, each with at least 'ratio_str' key
         progress_callback: Called as (marker_idx, total, result_dict) after each marker
         cancel_check: Returns True if job should be cancelled
+        material_sources: For merged materials, original DXF material names
 
     Returns:
         List of result dicts, one per marker, with:
@@ -953,6 +1179,7 @@ def refine_cutplan_markers(
     nesting_pieces, piece_config = load_pieces_for_spyrrow(
         dxf_path, rul_path, material, sizes, allowed_rotations,
         file_type=file_type,
+        material_sources=material_sources,
     )
 
     total = len(markers)
@@ -975,23 +1202,68 @@ def refine_cutplan_markers(
 
         marker_label = f"M{idx + 1}"
 
-        # Run Spyrrow (local or Surface)
-        nest_fn = nest_single_marker_surface if use_surface else nest_single_marker
-        solution_data = nest_fn(
-            ratio=ratio,
-            nesting_pieces=nesting_pieces,
-            piece_config=piece_config,
-            fabric_width_mm=fabric_width_mm,
-            piece_buffer_mm=piece_buffer_mm,
-            edge_buffer_mm=edge_buffer_mm,
-            time_limit=time_limit,
-            rotation_mode=rotation_mode,
-            quadtree_depth=quadtree_depth,
-            early_termination=early_termination,
-            exploration_time=exploration_time,
-            compression_time=compression_time,
-            seed_screening=seed_screening,
-        )
+        # Run Spyrrow (local or Surface via global queue)
+        if use_surface:
+            from backend.services.surface_queue import SurfaceNestingQueue
+
+            # Pre-build the data the queue worker needs
+            grouped = _group_pieces_by_name(nesting_pieces)
+            bundle_pieces = build_bundle_pieces(grouped, piece_config, ratio)
+            effective_width = fabric_width_mm - 2 * edge_buffer_mm
+            orientation = "free" if rotation_mode == "free" else "nap_one_way"
+
+            remote_pieces = []
+            for bp in bundle_pieces:
+                verts = [list(v) for v in bp.piece.vertices]
+                if verts and verts[0] != verts[-1]:
+                    verts.append(verts[0])
+                remote_pieces.append({
+                    "vertices": verts,
+                    "demand": 1,
+                    "allowed_orientations": [0.0, 180.0] if orientation == "free" else [0.0],
+                })
+
+            remote_config = {
+                "quadtree_depth": quadtree_depth,
+                "early_termination": early_termination,
+                "seed": 42,
+                "num_workers": 0,
+                "min_items_separation": piece_buffer_mm if piece_buffer_mm > 0 else None,
+            }
+            if exploration_time is not None and compression_time is not None:
+                remote_config["exploration_time"] = exploration_time
+                remote_config["compression_time"] = compression_time
+            else:
+                remote_config["time_limit_s"] = int(time_limit)
+
+            cutplan_id = marker_info.get('cutplan_id', 'unknown')
+            solution_data = SurfaceNestingQueue.get().submit(
+                params={
+                    "bundle_pieces": bundle_pieces,
+                    "effective_width": effective_width,
+                    "remote_pieces": remote_pieces,
+                    "remote_config": remote_config,
+                    "label": ratio_str,
+                },
+                marker_label=marker_label,
+                cutplan_id=cutplan_id,
+            )
+        else:
+            solution_data = nest_single_marker(
+                ratio=ratio,
+                nesting_pieces=nesting_pieces,
+                piece_config=piece_config,
+                fabric_width_mm=fabric_width_mm,
+                piece_buffer_mm=piece_buffer_mm,
+                edge_buffer_mm=edge_buffer_mm,
+                time_limit=time_limit,
+                rotation_mode=rotation_mode,
+                quadtree_depth=quadtree_depth,
+                early_termination=early_termination,
+                exploration_time=exploration_time,
+                compression_time=compression_time,
+                seed_screening=seed_screening,
+            )
 
         # Generate exports
         svg_preview = export_marker_svg(solution_data, fabric_width_mm)
@@ -1014,4 +1286,116 @@ def refine_cutplan_markers(
         if progress_callback:
             progress_callback(idx, total, result)
 
+    return results
+
+
+# --------------------------------------------------------------------------
+# Quick CPU Preview Nesting (parallel, short time limit)
+# --------------------------------------------------------------------------
+
+def quick_nest_markers(
+    dxf_path: str,
+    rul_path: Optional[str],
+    material: str,
+    sizes: List[str],
+    ratio_strs: List[str],
+    fabric_width_mm: float,
+    time_limit: float = 20.0,
+    rotation_mode: str = "free",
+    file_type: Optional[str] = None,
+    progress_callback: Optional[Callable] = None,
+    material_sources: Optional[List[str]] = None,
+) -> Dict[str, Dict]:
+    """
+    Nest multiple markers in parallel using ThreadPoolExecutor for quick CPU preview.
+
+    Loads pieces ONCE, then dispatches each ratio to a separate thread.
+    Spyrrow is Rust and releases the GIL, so ThreadPoolExecutor works well.
+
+    Args:
+        ratio_strs: List of ratio strings (e.g. ["0-3-1-1-1-0-0", "1-0-0-1-0-0-0"])
+        progress_callback: Optional (done_count, total, ratio_str) callback
+        time_limit: CPU time per marker (default 20s)
+
+    Returns:
+        {ratio_str: {utilization, length_yards, length_mm, computation_time_s}}
+    """
+    import concurrent.futures
+    import os
+
+    allowed_rotations = [0, 180] if rotation_mode == "free" else [0]
+
+    # Load pieces once for all markers
+    nesting_pieces, piece_config = load_pieces_for_spyrrow(
+        dxf_path, rul_path, material, sizes, allowed_rotations,
+        file_type=file_type, material_sources=material_sources,
+    )
+
+    # Limit parallelism: concurrent threads contend for CPU and degrade Spyrrow
+    # quality by ~0.7pp per worker. Cap at half cores (max 3) for balance.
+    max_workers = min(len(ratio_strs), max(1, (os.cpu_count() or 2) // 4), 3)
+    total = len(ratio_strs)
+    results: Dict[str, Dict] = {}
+    done_count = 0
+
+    def _nest_one(ratio_str: str) -> tuple:
+        """Nest a single ratio and return (ratio_str, result_dict)."""
+        parts = ratio_str.split('-')
+        ratio = {}
+        for i, size in enumerate(sizes):
+            ratio[size] = int(parts[i]) if i < len(parts) else 0
+
+        solution_data = nest_single_marker(
+            ratio=ratio,
+            nesting_pieces=nesting_pieces,
+            piece_config=piece_config,
+            fabric_width_mm=fabric_width_mm,
+            piece_buffer_mm=0.0,
+            edge_buffer_mm=0.0,
+            time_limit=time_limit,
+            rotation_mode=rotation_mode,
+            quadtree_depth=4,
+            early_termination=True,
+        )
+
+        # Generate SVG preview from the solution
+        svg_preview = None
+        if solution_data.get('solution') and solution_data.get('bundle_pieces'):
+            try:
+                svg_preview = export_marker_svg(solution_data, fabric_width_mm)
+            except Exception:
+                pass  # SVG generation is best-effort
+
+        return (ratio_str, {
+            'utilization': solution_data['utilization'],
+            'length_yards': solution_data['length_yards'],
+            'length_mm': solution_data['strip_length_mm'],
+            'computation_time_s': solution_data['computation_time_s'],
+            'svg_preview': svg_preview,
+        })
+
+    logger.info(f"[CPU Preview] Nesting {total} markers with {max_workers} workers, {time_limit}s each")
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {executor.submit(_nest_one, rs): rs for rs in ratio_strs}
+        for future in concurrent.futures.as_completed(futures):
+            ratio_str = futures[future]
+            try:
+                rs, result = future.result()
+                results[rs] = result
+                done_count += 1
+                logger.info(
+                    f"[CPU Preview] {done_count}/{total} — {rs}: "
+                    f"{result['utilization']*100:.1f}% / {result['length_yards']:.2f}yd "
+                    f"({result['computation_time_s']:.1f}s)"
+                )
+                if progress_callback:
+                    progress_callback(done_count, total, rs)
+            except Exception as e:
+                logger.error(f"[CPU Preview] Failed to nest {ratio_str}: {e}")
+                done_count += 1
+                if progress_callback:
+                    progress_callback(done_count, total, ratio_str)
+
+    logger.info(f"[CPU Preview] Complete: {len(results)}/{total} markers nested")
     return results

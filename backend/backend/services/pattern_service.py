@@ -61,6 +61,10 @@ class PatternService:
             from ..config import resolve_path
             dxf_path = resolve_path(pattern.dxf_file_path)
 
+            # Gerber AccuMark branch: pre-graded DXF with rich metadata
+            if pattern.file_type == "gerber_accumark":
+                return self._parse_gerber_accumark(db, pattern, dxf_path)
+
             # DXF-only branch: no RUL grading, pieces already sized
             if pattern.file_type == "dxf_only":
                 return self._parse_dxf_only(db, pattern, dxf_path, size_names=size_names)
@@ -69,8 +73,13 @@ class PatternService:
             if pattern.file_type == "vt_dxf":
                 return self._parse_vt_dxf(db, pattern, dxf_path)
 
-            # Import the parser functions
-            from nesting_engine.io.aama_parser import load_aama_pattern, AAMAGrader
+            # Import the parser functions — each AAMA variant uses its own parser
+            if pattern.file_type == "gerber_aama":
+                from nesting_engine.io.gerber_aama_parser import parse_gerber_aama as load_aama_pattern, GerberAAMAGrader as AAMAGrader
+            elif pattern.file_type == "optitex_aama":
+                from nesting_engine.io.optitex_aama_parser import load_aama_pattern, AAMAGrader
+            else:
+                from nesting_engine.io.aama_parser import load_aama_pattern, AAMAGrader
 
             # Resolve paths - they may be relative
             rul_path = resolve_path(pattern.rul_file_path) if pattern.rul_file_path else None
@@ -101,10 +110,14 @@ class PatternService:
                 else:
                     bbox = None
 
-                # Get quantity info
+                # Get quantity info (PieceQuantity object for AAMA/OptiTex, plain int for Gerber AAMA)
                 qty = piece.quantity
-                has_lr = qty.has_left_right if qty else False
-                total_qty = qty.total if qty else 1
+                if isinstance(qty, int):
+                    has_lr = False
+                    total_qty = qty
+                else:
+                    has_lr = qty.has_left_right if qty else False
+                    total_qty = qty.total if qty else 1
 
                 # Simplify vertices for preview (reduce point count for performance)
                 simplified_vertices = None
@@ -126,8 +139,8 @@ class PatternService:
                     "material": piece.material,
                     "quantity": total_qty,
                     "has_left_right": has_lr,
-                    "left_qty": qty.left_qty if qty and has_lr else 0,
-                    "right_qty": qty.right_qty if qty and has_lr else 0,
+                    "left_qty": qty.left_qty if not isinstance(qty, int) and qty and has_lr else 0,
+                    "right_qty": qty.right_qty if not isinstance(qty, int) and qty and has_lr else 0,
                     "has_grain_line": bool(piece.grain_line) if hasattr(piece, 'grain_line') else False,
                     "bbox": bbox,
                     "vertices": simplified_vertices,
@@ -186,9 +199,13 @@ class PatternService:
                                     perimeter_native = 0.0
                                 perimeter_cm = perimeter_native * to_cm
                                 # Multiply by demand (total pieces per bundle)
-                                demand = orig_piece.quantity.total
-                                if orig_piece.quantity.has_left_right:
-                                    demand = orig_piece.quantity.left_qty + orig_piece.quantity.right_qty
+                                oq = orig_piece.quantity
+                                if isinstance(oq, int):
+                                    demand = oq
+                                else:
+                                    demand = oq.total
+                                    if oq.has_left_right:
+                                        demand = oq.left_qty + oq.right_qty
                                 total_perimeter += perimeter_cm * demand
                             perimeter_by_size[material][target_size] = round(total_perimeter, 2)
                 except Exception as e:
@@ -461,6 +478,134 @@ class PatternService:
             "metadata": pattern.parse_metadata,
         }
 
+    def _parse_gerber_accumark(self, db: Session, pattern: Pattern, dxf_path: str) -> Dict[str, Any]:
+        """Parse a Gerber AccuMark 'Expanded Shapes' DXF."""
+        import math
+        from nesting_engine.io.gerber_accumark_parser import parse_gerber_accumark_dxf
+
+        pieces, sizes, mat_map, piece_config = parse_gerber_accumark_dxf(dxf_path)
+
+        # Collect unique materials
+        materials = sorted(set(mat_map.values()))
+
+        # Build piece details for UI (same structure as other paths)
+        piece_details = []
+        for piece in pieces:
+            verts = list(piece.vertices)
+            pname = piece.identifier.piece_name
+            size = piece.identifier.size
+            mat = mat_map.get(pname, "UNKNOWN")
+            cfg = piece_config.get(pname, {'demand': 1, 'flipped': False})
+
+            if verts:
+                xs = [v[0] for v in verts]
+                ys = [v[1] for v in verts]
+                bbox = {
+                    "min_x": min(xs), "max_x": max(xs),
+                    "min_y": min(ys), "max_y": max(ys),
+                    "width": max(xs) - min(xs),
+                    "height": max(ys) - min(ys),
+                }
+                preview_verts = verts
+                if len(preview_verts) > 50:
+                    step = len(preview_verts) // 50
+                    preview_verts = preview_verts[::step]
+                simplified_vertices = [
+                    [v[0] - bbox["min_x"], v[1] - bbox["min_y"]]
+                    for v in preview_verts
+                ]
+            else:
+                bbox = None
+                simplified_vertices = None
+
+            has_lr = cfg.get('flipped', False)
+            demand = cfg.get('demand', 1)
+
+            piece_details.append({
+                "name": f"{pname}_{size}",
+                "material": mat,
+                "quantity": (demand * 2) if has_lr else demand,
+                "has_left_right": has_lr,
+                "left_qty": demand if has_lr else 0,
+                "right_qty": demand if has_lr else 0,
+                "has_grain_line": False,
+                "bbox": bbox,
+                "vertices": simplified_vertices,
+            })
+
+        # Group by material
+        pieces_by_material: Dict[str, list] = {}
+        for pd in piece_details:
+            mat = pd.get("material", "UNKNOWN")
+            if mat not in pieces_by_material:
+                pieces_by_material[mat] = []
+            pieces_by_material[mat].append(pd)
+
+        # Compute perimeter_by_size (vertices already in mm from parser)
+        perimeter_by_size: Dict[str, Dict[str, float]] = {}
+        for mat in materials:
+            perimeter_by_size[mat] = {}
+            for size in sizes:
+                total_perimeter = 0.0
+                for piece in pieces:
+                    if piece.identifier.size != size:
+                        continue
+                    pname = piece.identifier.piece_name
+                    if mat_map.get(pname) != mat:
+                        continue
+                    verts = list(piece.vertices)
+                    cfg = piece_config.get(pname, {'demand': 1, 'flipped': False})
+                    demand = cfg.get('demand', 1)
+                    if cfg.get('flipped', False):
+                        demand = demand * 2  # L+R
+                    if len(verts) >= 3:
+                        perim = 0.0
+                        for i in range(len(verts)):
+                            x1, y1 = verts[i]
+                            x2, y2 = verts[(i + 1) % len(verts)]
+                            perim += math.sqrt((x2 - x1)**2 + (y2 - y1)**2)
+                        # Convert mm to cm, multiply by demand
+                        total_perimeter += perim * 0.1 * demand
+                perimeter_by_size[mat][size] = round(total_perimeter, 2)
+
+        # Update pattern record
+        pattern.is_parsed = True
+        pattern.available_sizes = sizes
+        pattern.available_materials = materials
+        pattern.parse_metadata = {
+            "piece_count": len(set(p.identifier.piece_name for p in pieces)),
+            "sizes": sizes,
+            "materials": materials,
+            "pieces": piece_details,
+            "pieces_by_material": pieces_by_material,
+            "perimeter_by_size": perimeter_by_size,
+            "piece_config": {k: v for k, v in piece_config.items()},
+        }
+
+        # Create fabric mappings for each material
+        for material in materials:
+            existing = db.query(PatternFabricMapping).filter(
+                PatternFabricMapping.pattern_id == pattern.id,
+                PatternFabricMapping.material_name == material
+            ).first()
+            if not existing:
+                mapping = PatternFabricMapping(
+                    pattern_id=pattern.id,
+                    material_name=material,
+                )
+                db.add(mapping)
+
+        db.commit()
+        db.refresh(pattern)
+
+        return {
+            "success": True,
+            "sizes": sizes,
+            "materials": materials,
+            "piece_count": len(set(p.identifier.piece_name for p in pieces)),
+            "metadata": pattern.parse_metadata,
+        }
+
     def get_pattern_pieces(self, pattern: Pattern) -> List[Dict[str, Any]]:
         """Get list of pieces from a parsed pattern."""
         if not pattern.is_parsed or not pattern.parse_metadata:
@@ -493,6 +638,140 @@ class PatternService:
         db.commit()
         db.refresh(mapping)
         return mapping
+
+    def merge_materials(
+        self,
+        db: Session,
+        pattern: Pattern,
+        source_materials: List[str],
+        target_name: str,
+    ) -> Dict[str, Any]:
+        """
+        Merge multiple pattern materials into one.
+
+        Rewrites parse_metadata and PatternFabricMapping so that all
+        downstream code (nesting, cutplan, refine) sees a single material.
+
+        For AAMA patterns that re-parse the DXF at nesting time, a
+        material_merge_map is stored so the runners know to load pieces
+        from all source materials.
+        """
+        meta = dict(pattern.parse_metadata or {})
+        available = list(pattern.available_materials or [])
+
+        # Validate
+        for mat in source_materials:
+            if mat not in available:
+                return {"success": False, "error": f"Material '{mat}' not found in pattern"}
+
+        source_set = set(source_materials)
+
+        # 1. Update pieces list — rename material on each piece
+        pieces = meta.get("pieces", [])
+        for piece in pieces:
+            if piece.get("material") in source_set:
+                piece["material"] = target_name
+
+        # 2. Rebuild pieces_by_material
+        pieces_by_material = meta.get("pieces_by_material", {})
+        merged_pieces = []
+        for mat in source_materials:
+            merged_pieces.extend(pieces_by_material.pop(mat, []))
+        # Update material field on the moved piece dicts
+        for p in merged_pieces:
+            p["material"] = target_name
+        # Add to existing target group if it already exists
+        if target_name in pieces_by_material:
+            pieces_by_material[target_name].extend(merged_pieces)
+        else:
+            pieces_by_material[target_name] = merged_pieces
+
+        # 3. Merge perimeter_by_size — sum across source materials per size
+        perim = meta.get("perimeter_by_size", {})
+        merged_perim: Dict[str, float] = {}
+        for mat in source_materials:
+            mat_perim = perim.pop(mat, {})
+            for size, val in mat_perim.items():
+                merged_perim[size] = merged_perim.get(size, 0) + val
+        # Add to existing target if present
+        if target_name in perim:
+            for size, val in merged_perim.items():
+                perim[target_name][size] = perim[target_name].get(size, 0) + val
+        else:
+            perim[target_name] = merged_perim
+
+        # 4. Update materials list
+        new_materials = [m for m in available if m not in source_set]
+        if target_name not in new_materials:
+            new_materials.append(target_name)
+        new_materials.sort()
+
+        meta["materials"] = new_materials
+        meta["pieces"] = pieces
+        meta["pieces_by_material"] = pieces_by_material
+        meta["perimeter_by_size"] = perim
+
+        # 5. Store merge map for AAMA nesting runners
+        merge_map = meta.get("material_merge_map", {})
+        # Flatten: if target already has sources, extend
+        existing_sources = merge_map.get(target_name, [])
+        all_sources = list(existing_sources)
+        for mat in source_materials:
+            # If this source was itself a merge target, pull its sources
+            if mat in merge_map:
+                all_sources.extend(merge_map.pop(mat))
+            else:
+                all_sources.append(mat)
+        merge_map[target_name] = sorted(set(all_sources))
+        meta["material_merge_map"] = merge_map
+
+        # 6. Update pattern record
+        pattern.available_materials = new_materials
+        pattern.parse_metadata = meta
+        # Force SQLAlchemy to detect the JSON change
+        from sqlalchemy.orm.attributes import flag_modified
+        flag_modified(pattern, "parse_metadata")
+
+        # 7. Merge PatternFabricMapping records
+        existing_fabric_id = None
+        mappings_to_delete = []
+        for mat in source_materials:
+            mapping = db.query(PatternFabricMapping).filter(
+                PatternFabricMapping.pattern_id == pattern.id,
+                PatternFabricMapping.material_name == mat,
+            ).first()
+            if mapping:
+                if mapping.fabric_id and not existing_fabric_id:
+                    existing_fabric_id = mapping.fabric_id
+                mappings_to_delete.append(mapping)
+
+        for m in mappings_to_delete:
+            db.delete(m)
+        db.flush()
+
+        # Create or update target mapping
+        target_mapping = db.query(PatternFabricMapping).filter(
+            PatternFabricMapping.pattern_id == pattern.id,
+            PatternFabricMapping.material_name == target_name,
+        ).first()
+        if not target_mapping:
+            target_mapping = PatternFabricMapping(
+                pattern_id=pattern.id,
+                material_name=target_name,
+                fabric_id=existing_fabric_id,
+            )
+            db.add(target_mapping)
+        elif existing_fabric_id and not target_mapping.fabric_id:
+            target_mapping.fabric_id = existing_fabric_id
+
+        db.commit()
+        db.refresh(pattern)
+
+        return {
+            "success": True,
+            "materials": new_materials,
+            "merge_map": merge_map,
+        }
 
     def get_pattern_svg(self, pattern: Pattern) -> Optional[str]:
         """Generate SVG preview of pattern pieces."""

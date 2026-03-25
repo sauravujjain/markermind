@@ -8,8 +8,10 @@ import enum
 
 class FileType(str, enum.Enum):
     AAMA = "aama"  # AAMA/ASTM DXF format
-    GERBER = "gerber"
+    OPTITEX_AAMA = "optitex_aama"  # OptiTex AAMA DXF+RUL grading format
+    GERBER_ACCUMARK = "gerber_accumark"
     LECTRA = "lectra"
+    GERBER_AAMA = "gerber_aama"  # Gerber AccuMark AAMA DXF+RUL grading format
     DXF_ONLY = "dxf_only"  # Pre-sized pieces in DXF, no RUL grading needed
     VT_DXF = "vt_dxf"  # Optitex Graded Nest DXF (one file per material, sizes in blocks)
 

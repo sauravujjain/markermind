@@ -246,6 +246,11 @@ export default function OrdersPage() {
                           <div>
                             <h3 className="font-semibold text-foreground group-hover:text-primary transition-colors">
                               {order.order_number}
+                              {order.notes && (
+                                <span className="ml-2 text-xs font-normal text-muted-foreground bg-muted px-1.5 py-0.5 rounded">
+                                  {order.notes}
+                                </span>
+                              )}
                             </h3>
                             <p className="text-sm text-muted-foreground">
                               <span className="text-accent font-medium">{order.order_lines?.length || 0}</span> lines, {' '}

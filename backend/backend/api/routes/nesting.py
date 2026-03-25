@@ -1,5 +1,5 @@
 from typing import List, Optional
-from fastapi import APIRouter, Depends, HTTPException, status, WebSocket, WebSocketDisconnect, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, Query, status, WebSocket, WebSocketDisconnect, BackgroundTasks
 from sqlalchemy.orm import Session, joinedload, defer
 import asyncio
 import json
@@ -334,6 +334,33 @@ async def get_job_preview(
     }
 
 
+@router.get("/jobs/{job_id}/marker-svgs")
+async def get_marker_svgs(
+    job_id: str,
+    ratio_strs: str = Query(..., description="Comma-separated ratio strings"),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Get SVG previews for specific markers by ratio_str from a nesting job."""
+    job = db.query(NestingJob).join(Pattern).filter(
+        NestingJob.id == job_id,
+        Pattern.customer_id == current_user.customer_id,
+    ).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    requested = [r.strip() for r in ratio_strs.split(",") if r.strip()]
+    results = db.query(
+        NestingJobResult.ratio_str, NestingJobResult.svg_preview
+    ).filter(
+        NestingJobResult.nesting_job_id == job_id,
+        NestingJobResult.ratio_str.in_(requested),
+        NestingJobResult.svg_preview.isnot(None),
+    ).all()
+
+    return {r.ratio_str: r.svg_preview for r in results}
+
+
 @router.post("/test-marker", response_model=TestMarkerResponse)
 async def test_marker(
     request: TestMarkerRequest,
@@ -359,13 +386,13 @@ async def test_marker(
 
     if not pattern.dxf_file_path:
         raise HTTPException(status_code=400, detail="Pattern DXF file not available")
-    if not pattern.rul_file_path and pattern.file_type not in ("dxf_only", "vt_dxf"):
+    if not pattern.rul_file_path and pattern.file_type not in ("dxf_only", "vt_dxf", "gerber_accumark"):
         raise HTTPException(status_code=400, detail="Pattern RUL file not available")
 
     # Validate size_bundles
     total_bundles = sum(request.size_bundles.values())
-    if total_bundles < 1 or total_bundles > 8:
-        raise HTTPException(status_code=400, detail="Total bundles must be between 1 and 8")
+    if total_bundles < 1 or total_bundles > 20:
+        raise HTTPException(status_code=400, detail="Total bundles must be between 1 and 20")
 
     # Validate requested sizes exist in pattern
     valid_sizes = set(pattern.available_sizes)
@@ -416,10 +443,15 @@ async def test_marker(
     try:
         t0 = _time.time()
 
+        # Check for merged materials
+        merge_map = (pattern.parse_metadata or {}).get("material_merge_map", {})
+        mat_sources = merge_map.get(material)
+
         # Load and grade pieces (always local — parsing stays on-prem)
         nesting_pieces, piece_config = load_pieces_for_spyrrow(
             dxf_path, rul_path, material, sizes, allowed_rotations=allowed_rotations,
             file_type=pattern.file_type,
+            material_sources=mat_sources,
         )
 
         if use_cloud:
@@ -724,3 +756,81 @@ async def list_markers(
         }
         for m in markers
     ]
+
+
+# --------------------------------------------------------------------------
+# Surface Nesting Queue management
+# --------------------------------------------------------------------------
+
+@router.get("/surface-queue")
+async def get_surface_queue_status():
+    """Get current Surface nesting queue status."""
+    from ...services.surface_queue import SurfaceNestingQueue
+    return SurfaceNestingQueue.get().status()
+
+
+@router.delete("/surface-queue/current")
+async def kill_current_surface_job():
+    """Kill the currently running Surface nesting job."""
+    from ...services.surface_queue import SurfaceNestingQueue
+    killed = SurfaceNestingQueue.get().kill_current()
+    if not killed:
+        raise HTTPException(status_code=404, detail="No job currently running")
+    return {"message": "Current job killed"}
+
+
+@router.delete("/surface-queue/{job_id}")
+async def remove_surface_queue_job(job_id: str):
+    """Remove a queued (not yet running) job from the Surface queue."""
+    from ...services.surface_queue import SurfaceNestingQueue
+    removed = SurfaceNestingQueue.get().remove_job(job_id)
+    if not removed:
+        raise HTTPException(status_code=404, detail="Job not found or already running")
+    return {"message": f"Job {job_id} removed"}
+
+
+@router.delete("/surface-queue")
+async def clear_surface_queue():
+    """Kill current job and cancel all queued jobs."""
+    from ...services.surface_queue import SurfaceNestingQueue
+    SurfaceNestingQueue.get().clear_queue()
+    return {"message": "Queue cleared"}
+
+
+@router.post("/surface-queue/pause")
+async def pause_surface_queue():
+    """Pause the Surface queue — finish current job but don't start next."""
+    from ...services.surface_queue import SurfaceNestingQueue
+    SurfaceNestingQueue.get().pause()
+    return {"message": "Queue paused"}
+
+
+@router.post("/surface-queue/resume")
+async def resume_surface_queue():
+    """Resume the Surface queue."""
+    from ...services.surface_queue import SurfaceNestingQueue
+    SurfaceNestingQueue.get().resume()
+    return {"message": "Queue resumed"}
+
+
+@router.post("/surface-queue/{job_id}/priority")
+async def prioritize_surface_job(job_id: str):
+    """Move a queued job to the front of the queue."""
+    from ...services.surface_queue import SurfaceNestingQueue
+    moved = SurfaceNestingQueue.get().prioritize(job_id)
+    if not moved:
+        raise HTTPException(status_code=404, detail="Job not found in queue")
+    return {"message": f"Job {job_id} moved to front"}
+
+
+@router.patch("/surface-queue/{job_id}")
+async def update_surface_job(job_id: str, body: dict):
+    """Update a queued job's time limit before it starts running."""
+    from ...services.surface_queue import SurfaceNestingQueue
+    time_limit_s = body.get("time_limit_s")
+    if time_limit_s is None:
+        raise HTTPException(status_code=400, detail="time_limit_s required")
+    updated = SurfaceNestingQueue.get().update_time_limit(job_id, float(time_limit_s))
+    if not updated:
+        raise HTTPException(status_code=404, detail="Job not found or already running")
+    return {"message": f"Job {job_id} time limit updated to {time_limit_s}s"}

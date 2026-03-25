@@ -35,6 +35,9 @@ class Order(Base, TimestampMixin):
     pattern_id = Column(UUID(as_uuid=False), ForeignKey("patterns.id"))
     status = Column(SQLEnum(OrderStatus, values_callable=lambda x: [e.value for e in x]), default=OrderStatus.DRAFT, nullable=False)
 
+    # User notes / tags for quick identification
+    notes = Column(String(500), nullable=True)  # Free-text tag, e.g., "HD FGL pilot 3.5x3.5"
+
     # Nesting parameters
     piece_buffer_mm = Column(Float, default=0.0)  # Gap between pieces
     edge_buffer_mm = Column(Float, default=0.0)  # Gap from fabric edge
