@@ -16,12 +16,14 @@ import {
   X,
   ChevronDown,
   Scissors,
+  Cpu,
 } from 'lucide-react'
 
 const navigation = [
   { name: 'Dashboard', href: '/', icon: LayoutDashboard },
   { name: 'Orders', href: '/orders', icon: FileText },
   { name: 'Patterns', href: '/patterns', icon: Package },
+  { name: 'Queue', href: '/queue', icon: Cpu },
   { name: 'Fabrics', href: '/settings/fabrics', icon: Scissors },
   { name: 'Settings', href: '/settings', icon: Settings },
 ]

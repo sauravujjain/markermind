@@ -1,4 +1,5 @@
 import logging
+import uuid
 from typing import List, Optional, Dict
 from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
 from fastapi.responses import StreamingResponse
@@ -22,17 +23,10 @@ from ...models import User, Cutplan, CutplanMarker, Order, MarkerBank, MarkerLay
 from ...models.cutplan import CutplanStatus
 from ...services.cutplan_service import CutplanService
 from ..deps import get_current_user
+from ...services.job_registry import cutplan_jobs as _cutplan_jobs, refinement_jobs as _refinement_jobs
 
 router = APIRouter(prefix="/cutplans", tags=["cutplans"])
 cutplan_service = CutplanService()
-
-# In-memory status for cutplan generation jobs
-# Key: order_id, Value: {status, progress, message, started_at, strategies_total, strategies_done}
-_cutplan_jobs: Dict[str, Dict] = {}
-
-# In-memory status for refinement jobs
-# Key: cutplan_id, Value: {status, progress, message, markers_total, markers_done, started_at}
-_refinement_jobs: Dict[str, Dict] = {}
 
 
 def execute_cutplan_job(
@@ -46,11 +40,16 @@ def execute_cutplan_job(
     fabric_cost_per_yard: Optional[float] = None,
     max_ply_height: Optional[int] = None,
     min_plies_by_bundle: Optional[str] = None,
+    cost_metric: str = "efficiency",
+    generation_batch_id: Optional[str] = None,
 ):
     """Execute cutplan optimization in the background."""
     db = SessionLocal()
     try:
         color_label = f" for color {color_code}" if color_code else ""
+        # Look up order_number for activity dashboard
+        order = db.query(Order).filter(Order.id == order_id).first()
+        order_number = order.order_number if order else order_id[:8]
         _cutplan_jobs[order_id] = {
             "status": "running",
             "progress": 0,
@@ -58,11 +57,16 @@ def execute_cutplan_job(
             "started_at": time.time(),
             "strategies_total": len(strategies),
             "strategies_done": 0,
+            "phase": "ilp",
+            "order_number": order_number,
         }
 
         def progress_callback(pct: int, message: str):
             _cutplan_jobs[order_id]["progress"] = pct
             _cutplan_jobs[order_id]["message"] = message
+            # Detect cost estimation phase
+            if "Preparing cost" in message:
+                _cutplan_jobs[order_id]["phase"] = "cpu_nesting"
             # Parse "Strategy X/Y done:" to update strategies_done for incremental display
             if "done:" in message:
                 try:
@@ -89,6 +93,8 @@ def execute_cutplan_job(
             fabric_cost_per_yard=fabric_cost_per_yard,
             max_ply_height=max_ply_height,
             min_plies_by_bundle=min_plies_by_bundle,
+            cost_metric=cost_metric,
+            generation_batch_id=generation_batch_id,
         )
 
         elapsed = time.time() - _cutplan_jobs[order_id]["started_at"]
@@ -137,13 +143,17 @@ async def optimize_cutplan(
     if existing_job and existing_job.get("status") == "running":
         raise HTTPException(status_code=409, detail="Cutplan optimization already running for this order")
 
-    # Delete any existing cutplans for this order (re-generation)
+    # Supersede all non-superseded cutplans for this order (preserves history)
+    new_batch_id = str(uuid.uuid4())
     existing_cutplans = db.query(Cutplan).filter(
         Cutplan.order_id == request.order_id,
-        Cutplan.status.notin_(["approved", "in_production", "completed"])
+        Cutplan.status != CutplanStatus.superseded,
     ).all()
     for cp in existing_cutplans:
-        db.delete(cp)
+        cfg = dict(cp.solver_config or {})
+        cfg['pre_superseded_status'] = cp.status.value if hasattr(cp.status, 'value') else str(cp.status)
+        cp.solver_config = cfg
+        cp.status = CutplanStatus.superseded
     db.commit()
 
     # Get fabric_id from order line (filtered by color if specified)
@@ -178,6 +188,7 @@ async def optimize_cutplan(
         "min_plies": "min_end_cuts",  # Legacy alias
         "min_end_cuts": "min_end_cuts",
         "min_bundle_cuts": "min_bundle_cuts",
+        "endbit_optimized": "endbit_optimized",
     }
 
     strategies = []
@@ -199,6 +210,8 @@ async def optimize_cutplan(
         fabric_cost_per_yard=request.fabric_cost_per_yard,
         max_ply_height=request.max_ply_height,
         min_plies_by_bundle=request.min_plies_by_bundle,
+        cost_metric=request.cost_metric or "efficiency",
+        generation_batch_id=new_batch_id,
     )
 
     # Return empty list — frontend will poll for results
@@ -228,6 +241,7 @@ async def get_optimize_status(
             "message": "No optimization running",
             "strategies_total": 0,
             "strategies_done": 0,
+            "phase": "ilp",
         }
 
     return {
@@ -236,6 +250,7 @@ async def get_optimize_status(
         "message": job.get("message", ""),
         "strategies_total": job.get("strategies_total", 0),
         "strategies_done": job.get("strategies_done", 0),
+        "phase": job.get("phase", "ilp"),
     }
 
 
@@ -270,14 +285,14 @@ async def get_cutplan(
 ):
     """Get cutplan by ID."""
     cutplan = db.query(Cutplan).options(
-        joinedload(Cutplan.markers)
+        joinedload(Cutplan.markers).joinedload(CutplanMarker.layout)
     ).join(Order).filter(
         Cutplan.id == cutplan_id,
         Order.customer_id == current_user.customer_id
     ).first()
     if not cutplan:
         raise HTTPException(status_code=404, detail="Cutplan not found")
-    return cutplan
+    return CutplanResponse.model_validate(cutplan)
 
 
 @router.get("", response_model=List[CutplanResponse])
@@ -291,7 +306,7 @@ async def list_cutplans(
 ):
     """List cutplans."""
     query = db.query(Cutplan).options(
-        joinedload(Cutplan.markers)
+        joinedload(Cutplan.markers).joinedload(CutplanMarker.layout)
     ).join(Order).filter(
         Order.customer_id == current_user.customer_id
     )
@@ -308,7 +323,8 @@ async def list_cutplans(
         if c.id not in seen:
             seen.add(c.id)
             unique.append(c)
-    return unique
+    # Explicitly call model_validate so CutplanMarkerResponse picks up layout.svg_preview
+    return [CutplanResponse.model_validate(c) for c in unique]
 
 
 @router.post("/{cutplan_id}/approve", response_model=CutplanResponse)
@@ -349,8 +365,8 @@ async def delete_cutplan(
     if not cutplan:
         raise HTTPException(status_code=404, detail="Cutplan not found")
 
-    if cutplan.status in ["approved", "in_production", "completed"]:
-        raise HTTPException(status_code=400, detail="Cannot delete approved/in-production cutplan")
+    if cutplan.status in ["in_production", "completed"]:
+        raise HTTPException(status_code=400, detail="Cannot delete in-production/completed cutplan")
 
     db.delete(cutplan)
     db.commit()
@@ -449,8 +465,12 @@ def _recalculate_cutplan_costs(db: Session, cutplan: Cutplan, customer_id: str):
     else:
         ordered_sizes = sorted(order_sizes_set)
 
-    # Cost parameters
-    fabric_cost_per_yard = cost_config.fabric_cost_per_yard
+    # Use solver_config overrides if available (user-specified at generation time),
+    # otherwise fall back to cost_config defaults
+    solver_cfg = cutplan.solver_config or {}
+    fabric_cost_per_yard = solver_cfg.get('fabric_cost_per_yard') or cost_config.fabric_cost_per_yard
+    max_ply_height = solver_cfg.get('max_ply_height') or cost_config.max_ply_height or 100
+
     spreading_cost_per_yard = cost_config.spreading_cost_per_yard
     spreading_cost_per_ply = getattr(cost_config, 'spreading_cost_per_ply', 0.013)
     cutting_cost_per_cm = (
@@ -464,7 +484,6 @@ def _recalculate_cutplan_costs(db: Session, cutplan: Cutplan, customer_id: str):
         prep_cost_per_m += getattr(cost_config, 'prep_underlayer_cost_per_m', 0.1)
     if getattr(cost_config, 'prep_top_layer_enabled', True):
         prep_cost_per_m += getattr(cost_config, 'prep_top_layer_cost_per_m', 0.05)
-    max_ply_height = cost_config.max_ply_height or 100
 
     YARDS_TO_METERS = 0.9144
     AVG_PERIMETER_PER_BUNDLE_CM = 2540.0
@@ -528,6 +547,47 @@ def _recalculate_cutplan_costs(db: Session, cutplan: Cutplan, customer_id: str):
     cutplan.prep_cost = prep_cost
     cutplan.total_cost = total_cost
 
+    # Recompute weighted average efficiency from refined marker efficiencies
+    def _garments(m):
+        bundles = sum(int(x) for x in (m.ratio_str or "0").split("-")) if m.ratio_str else 1
+        return bundles * (m.total_plies or 0)
+    total_garments = sum(_garments(m) for m in cutplan.markers)
+    if total_garments > 0:
+        eff_src = lambda m: (m.layout.utilization if m.layout and m.layout.utilization else m.efficiency) or 0
+        cutplan.efficiency = sum(eff_src(m) * _garments(m) for m in cutplan.markers) / total_garments
+
+    # Recompute Est. Floor Waste with refined lengths (all cutplans, including endbit)
+    try:
+        from ...services.endbit_solver import estimate_floor_waste
+        from ...services.rollplan_simulator import MarkerSpec
+        from sqlalchemy.orm.attributes import flag_modified
+
+        _is_endbit = bool((cutplan.solver_config or {}).get("endbit_fill_rate"))
+        mc_specs = [
+            MarkerSpec(
+                marker_label=m.marker_label or f"M{i+1}",
+                length_yards=(m.layout.length_yards if m.layout and m.layout.length_yards else m.length_yards) or 0,
+                plies=m.total_plies or 0,
+                ratio_str=m.ratio_str or "0",
+            )
+            for i, m in enumerate(cutplan.markers)
+            if ((m.layout.length_yards if m.layout and m.layout.length_yards else m.length_yards) or 0) > 0
+            and (m.total_plies or 0) > 0
+        ]
+        if mc_specs:
+            waste = estimate_floor_waste(
+                mc_specs,
+                max_ply_height=max_ply_height,
+                buffer_step_pct=0.002,
+            )
+            if waste:
+                cfg = dict(cutplan.solver_config or {})
+                cfg.update(waste)
+                cutplan.solver_config = cfg
+                flag_modified(cutplan, "solver_config")
+    except Exception as mc_err:
+        print(f"[Refinement] Floor MC recalc failed: {mc_err}")
+
 
 def execute_refinement_job(
     cutplan_id: str,
@@ -569,6 +629,11 @@ def execute_refinement_job(
             "started_at": time.time(),
             "markers_total": len(markers),
             "markers_done": 0,
+            "backend": "surface" if use_surface else "local",
+            "order_id": order.id,
+            "order_number": order.order_number,
+            "cutplan_name": cutplan.name,
+            "completed_markers": [],
         }
 
         # Delete all existing layouts for this cutplan before re-running
@@ -593,7 +658,7 @@ def execute_refinement_job(
         dxf_path = resolve_path(pattern.dxf_file_path)
         rul_path = resolve_path(pattern.rul_file_path) if pattern.rul_file_path else None
 
-        if not rul_path and pattern.file_type not in ("dxf_only", "vt_dxf"):
+        if not rul_path and pattern.file_type not in ("dxf_only", "vt_dxf", "gerber_accumark"):
             raise ValueError("Pattern RUL file required for graded nesting")
 
         # Determine material and fabric width from order lines + nesting job
@@ -644,8 +709,12 @@ def execute_refinement_job(
         # Material = fabric_code (matches pattern material name)
         material = fabric_code
 
+        # Check for merged materials
+        merge_map = (pattern.parse_metadata or {}).get("material_merge_map", {})
+        material_sources = merge_map.get(material)  # None if not merged
+
         # Prepare marker list for refinement
-        marker_dicts = [{"ratio_str": m.ratio_str, "id": m.id} for m in markers]
+        marker_dicts = [{"ratio_str": m.ratio_str, "id": m.id, "cutplan_id": cutplan_id} for m in markers]
 
         # DXF output directory
         dxf_dir = os.path.join(resolve_path(settings.upload_dir), "markers", cutplan_id)
@@ -661,6 +730,13 @@ def execute_refinement_job(
                 "progress": pct,
                 "markers_done": marker_idx + 1,
                 "message": f"Completed {label} ({result['utilization']*100:.1f}%) — {marker_idx + 1}/{total}",
+            })
+            # Track per-marker results for activity dashboard
+            _refinement_jobs[cutplan_id].setdefault("completed_markers", []).append({
+                "marker_label": label,
+                "ratio_str": marker_record.ratio_str,
+                "utilization": result['utilization'],
+                "computation_time_s": result.get('computation_time_s', 0),
             })
 
             # Save result to DB immediately
@@ -732,6 +808,7 @@ def execute_refinement_job(
             compression_time=int(compression_time_s) if compression_time_s else None,
             seed_screening=seed_screening,
             use_surface=use_surface,
+            material_sources=material_sources,
         )
 
         elapsed = time.time() - _refinement_jobs[cutplan_id]["started_at"]
@@ -757,6 +834,12 @@ def execute_refinement_job(
 
             # Recalculate costs using refined marker lengths
             _recalculate_cutplan_costs(db, cutplan, customer_id)
+
+            # Persist refined values into CutplanMarker records so loadData() returns them
+            for marker in cutplan.markers:
+                if marker.layout:
+                    marker.efficiency = marker.layout.utilization
+                    marker.length_yards = marker.layout.length_yards
 
             _refinement_jobs[cutplan_id].update({
                 "status": "completed",

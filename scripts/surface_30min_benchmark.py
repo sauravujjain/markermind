@@ -84,12 +84,25 @@ TEST_MARKERS = [
 
 TIME_LIMIT = 1800  # 30 minutes per marker
 
-# Monkey-patch SSH timeout buffer for long runs (30s buffer is too short)
+# Monkey-patch subprocess.run for long SSH runs:
+# 1. Add SSH keep-alive to prevent connection drops on 30-min runs
+# 2. Increase timeout buffer (30s is too short for 1800s runs)
 import subprocess as _subprocess
 _orig_run = _subprocess.run
 def _patched_run(*args, **kwargs):
+    # Add SSH keep-alive options to prevent connection drops
+    cmd = args[0] if args else kwargs.get('args', [])
+    if isinstance(cmd, list) and len(cmd) > 0 and cmd[0] == 'ssh':
+        # Insert keep-alive options after 'ssh'
+        keepalive = ['-o', 'ServerAliveInterval=30', '-o', 'ServerAliveCountMax=120']
+        cmd = [cmd[0]] + keepalive + cmd[1:]
+        if args:
+            args = (cmd,) + args[1:]
+        else:
+            kwargs['args'] = cmd
+    # Add generous timeout buffer for long runs
     if 'timeout' in kwargs and kwargs['timeout'] > 600:
-        kwargs['timeout'] = kwargs['timeout'] + 120  # Add extra 120s buffer
+        kwargs['timeout'] = kwargs['timeout'] + 300  # 5-min buffer
     return _orig_run(*args, **kwargs)
 _subprocess.run = _patched_run
 

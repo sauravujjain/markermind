@@ -54,6 +54,9 @@ class RollPlan(Base, TimestampMixin):
     )
     pseudo_roll_avg_yards = Column(Float, default=100.0)
     pseudo_roll_delta_yards = Column(Float, default=20.0)
+    waste_threshold_pct = Column(Float, default=2.0)
+    pseudo_buffer_pct = Column(Float, default=5.0)  # % buffer over cutplan to trigger pseudo-roll generation
+    roll_adjustment_message = Column(String(500), nullable=True)
 
     # Progress
     progress = Column(Integer, default=0)

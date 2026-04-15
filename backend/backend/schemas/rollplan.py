@@ -18,6 +18,8 @@ class RollPlanCreateRequest(BaseModel):
     # Pseudo-roll config (used when no real rolls uploaded)
     pseudo_roll_avg_yards: float = 100.0
     pseudo_roll_delta_yards: float = 20.0
+    waste_threshold_pct: float = 2.0           # waste % threshold (min 0.1)
+    pseudo_buffer_pct: float = 5.0              # % buffer over cutplan to trigger pseudo-roll generation (0 = no pseudo rolls)
     # GA tuning (optional overrides)
     ga_pop_size: int = 30
     ga_generations: int = 50
@@ -128,8 +130,11 @@ class RollPlanListItem(BaseModel):
     status: str
     mode: str
     input_type: Optional[str] = None
+    total_fabric_required: Optional[float] = None
     mc_endbit_avg: Optional[float] = None       # Key metric for comparison
+    mc_real_waste_avg: Optional[float] = None
     ga_endbit_yards: Optional[float] = None
+    ga_real_waste_yards: Optional[float] = None
     created_at: datetime
 
     class Config:
@@ -167,6 +172,8 @@ class WasteAssessmentResponse(BaseModel):
     waste_pct: float
     exceeds_threshold: bool
     threshold_pct: float
+    waste_yards: Optional[float] = None
+    total_fabric_yards: Optional[float] = None
     recommendation: str
 
 
@@ -186,6 +193,7 @@ class RollPlanResponse(BaseModel):
     progress_message: Optional[str] = None
     error_message: Optional[str] = None
     preflight_warnings: Optional[List[PreflightWarningResponse]] = None
+    roll_adjustment_message: Optional[str] = None
 
     # Results
     monte_carlo: Optional[MonteCarloResultResponse] = None

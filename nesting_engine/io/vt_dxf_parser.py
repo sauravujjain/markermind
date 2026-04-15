@@ -4,15 +4,24 @@ VT DXF Parser for Optitex "Graded Nest" pattern files.
 Parses DXF files exported from Optitex where each material is a separate file
 and all sizes are pre-graded as separate blocks. No RUL file needed.
 
-**Block structure** (verified from 25528-101.dxf):
+Supports **two export variants**:
+
+**Variant A — Split per material** (e.g. ``25528-101.dxf``):
 - 112 blocks = 56 primary + 56 shadow
 - Primary blocks (odd-numbered): 8 TEXT annotations including
   ``Piece Name:``, ``Size:``, ``Quantity:``, ``Material:``
 - Shadow blocks (even-numbered): only 2 TEXT annotations, identical
   geometry -> skipped
 - Filter: skip blocks missing ``Quantity:`` annotation
+- Piece Name format: ``PieceNum_SizeLabel`` (e.g. ``4_M``)
 
-**Piece Name format**: ``PieceNum_SizeLabel`` (e.g. ``4_M`` -> piece ``4``, size ``M``)
+**Variant B — All materials in one file** (e.g. ``25528XX.dxf``):
+- N*S blocks (N pieces × S sizes), no shadow blocks
+- Full metadata (``Quantity:``, ``Material:``, etc.) only on the
+  **sample-size** block (marked with ``Sample Size`` text); other
+  sizes have only ``Piece Name:`` and ``Size:``
+- Piece Name format: ``PieceNum`` only (e.g. ``4``); size is in
+  the separate ``Size:`` annotation
 
 **Layers**:
 - Layer 1 POLYLINE: pre-graded boundary vertices
@@ -89,9 +98,30 @@ def parse_vt_dxf(
     # ---------------------------------------------------------------
     unit_scale = _detect_unit_scale(blocks)
 
+    # ---------------------------------------------------------------
+    # Detect variant: A (primary/shadow with Quantity on every primary)
+    # or B (pre-graded, Quantity only on sample-size block).
+    # Heuristic: if fewer than half the blocks have "Quantity:", it's B.
+    # ---------------------------------------------------------------
+    qty_count = sum(
+        1 for b in blocks if "Quantity" in _read_annotations(b)
+    )
+    variant_b = qty_count > 0 and qty_count < len(blocks) // 2
+
+    if variant_b:
+        return _parse_variant_b(blocks, unit_scale)
+    else:
+        return _parse_variant_a(blocks, unit_scale)
+
+
+def _parse_variant_a(
+    blocks,
+    unit_scale: float,
+) -> Tuple[List[Piece], List[str], Dict[str, int], str]:
+    """Parse Variant A: primary/shadow blocks, Quantity on every primary."""
     pieces: List[Piece] = []
     sizes_seen: set[str] = set()
-    piece_quantities: Dict[str, int] = {}  # piece_num -> qty
+    piece_quantities: Dict[str, int] = {}
     material: Optional[str] = None
 
     for block in blocks:
@@ -110,7 +140,10 @@ def parse_vt_dxf(
             continue
 
         # Parse piece_name: "4_M" -> piece_num="4", size="M"
+        # Fallback: if no underscore, use the Size: annotation
         piece_num, size = _parse_piece_name(piece_name_raw)
+        if not size:
+            size = annotations.get("Size", "").strip()
         if not piece_num or not size:
             logger.warning(
                 f"Block {block.name}: cannot parse piece name '{piece_name_raw}', skipping"
@@ -146,15 +179,94 @@ def parse_vt_dxf(
         )
         pieces.append(piece)
 
-    # Sort sizes in canonical garment order
     sorted_sizes = sorted(sizes_seen, key=_size_sort_key)
-
     material_name = material or "MAIN"
 
     logger.info(
-        f"VT DXF: {len(pieces)} pieces from {len(blocks)} blocks, "
+        f"VT DXF (variant A): {len(pieces)} pieces from {len(blocks)} blocks, "
         f"{len(sizes_seen)} sizes={sorted_sizes}, "
         f"material={material_name}, unit_scale={unit_scale}"
+    )
+
+    return pieces, sorted_sizes, piece_quantities, material_name
+
+
+def _parse_variant_b(
+    blocks,
+    unit_scale: float,
+) -> Tuple[List[Piece], List[str], Dict[str, int], str]:
+    """
+    Parse Variant B: all sizes pre-graded, metadata only on sample-size block.
+
+    Piece Name has no underscore-size suffix. Size comes from ``Size:`` TEXT.
+    Quantity/Material are propagated from the sample-size block to all blocks
+    of the same piece number.
+    """
+    # First pass: collect metadata from sample-size blocks (those with Quantity)
+    piece_quantities: Dict[str, int] = {}   # piece_num -> qty
+    piece_materials: Dict[str, str] = {}    # piece_num -> material
+    for block in blocks:
+        annotations = _read_annotations(block)
+        if "Quantity" not in annotations:
+            continue
+        piece_num = annotations.get("Piece Name", "").strip()
+        if not piece_num:
+            continue
+        qty_str = annotations.get("Quantity", "1")
+        piece_quantities[piece_num] = int(qty_str) if qty_str.isdigit() else 1
+        mat = annotations.get("Material", "")
+        if mat:
+            piece_materials[piece_num] = mat
+
+    # Second pass: build Piece objects from ALL blocks with Size + Piece Name
+    pieces: List[Piece] = []
+    sizes_seen: set[str] = set()
+
+    for block in blocks:
+        annotations = _read_annotations(block)
+
+        piece_num = annotations.get("Piece Name", "").strip()
+        size = annotations.get("Size", "").strip()
+
+        if not piece_num or not size:
+            continue
+
+        sizes_seen.add(size)
+
+        boundary_verts = _extract_boundary(block, unit_scale)
+        if not boundary_verts or len(boundary_verts) < 3:
+            logger.warning(f"Block {block.name}: no valid boundary, skipping")
+            continue
+
+        if boundary_verts[0] != boundary_verts[-1]:
+            boundary_verts.append(boundary_verts[0])
+
+        grain_line = _extract_grain_line(block, unit_scale)
+
+        piece = Piece(
+            vertices=boundary_verts,
+            identifier=PieceIdentifier(
+                piece_name=piece_num,
+                size=size,
+            ),
+            grain=grain_line,
+        )
+        pieces.append(piece)
+
+    sorted_sizes = sorted(sizes_seen, key=_size_sort_key)
+
+    # Determine material
+    materials = sorted(set(piece_materials.values())) if piece_materials else []
+    if len(materials) == 1:
+        material_name = materials[0]
+    else:
+        material_name = "MAIN"
+
+    logger.info(
+        f"VT DXF (variant B): {len(pieces)} pieces from {len(blocks)} blocks, "
+        f"{len(piece_quantities)} unique piece types, "
+        f"{len(sizes_seen)} sizes={sorted_sizes}, "
+        f"materials={materials or ['MAIN']}, unit_scale={unit_scale}"
     )
 
     return pieces, sorted_sizes, piece_quantities, material_name

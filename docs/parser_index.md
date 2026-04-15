@@ -8,7 +8,8 @@ Reference for all CAD format parsers in MarkerMind. When encountering a new file
 
 | Format | Parser File | Entry Function | Inputs | Status |
 |--------|------------|----------------|--------|--------|
-| AAMA/ASTM DXF+RUL | `nesting_engine/io/aama_parser.py` | `load_aama_pattern()` | DXF + RUL | Production |
+| AAMA/ASTM DXF+RUL (Boke) | `nesting_engine/io/aama_parser.py` | `load_aama_pattern()` | DXF + RUL | Production |
+| OptiTex AAMA DXF+RUL | `nesting_engine/io/optitex_aama_parser.py` | `load_aama_pattern()` | DXF + RUL | Production |
 | Block-based DXF | `nesting_engine/io/dxf_block_parser.py` | `parse_block_dxf()` | DXF only | Production |
 | Text-label DXF (Gerber-style) | `nesting_engine/io/dxf_text_parser.py` | `DXFParser.parse()` | DXF only | Production |
 | VT DXF (Graded Nest) | `nesting_engine/io/vt_dxf_parser.py` | `parse_vt_dxf()` | DXF only | Production |
@@ -105,6 +106,65 @@ print(grader.get_sample_size())       # "32"
 - Requires both DXF and RUL files -- if RUL is missing, falls back to DXF-only
 - Grade points must be on Layer 2 as POINT entities
 - Annotation format is specific to AAMA convention
+
+---
+
+## Format 1b: OptiTex AAMA (DXF + RUL)
+
+**File:** `nesting_engine/io/optitex_aama_parser.py`
+**FileType enum:** `optitex_aama`
+**Frontend workflow:** User uploads DXF + RUL files, selects "OptiTex"
+
+### What it is
+
+Self-contained fork of the AAMA parser for OptiTex-exported pattern files. Same AAMA/ANSI standard but with format differences in how data is written.
+
+### Differences from Boke AAMA (Format 1)
+
+| Feature | Boke/ASTM (Format 1) | OptiTex (Format 1b) |
+|---------|----------------------|---------------------|
+| RUL header | `ASTM/D13Proposal 1 Version: D 6673-04` | `ANSI/AAMA VERSION: 1.0.0` (blank first line) |
+| RUL delta layout | One `dx, dy` pair per line | Multiple `dx, dy` pairs packed per line |
+| DXF block names | Piece names (`CTR HD-M`) | Numeric (`1`, `2`, `3`) |
+| Piece name source | Block name split on `-` | TEXT metadata `Piece_Name:` field |
+
+### RUL delta format
+
+OptiTex packs 2 pairs per line for 6 sizes (3 data lines × 2 pairs = 6):
+```
+RULE: DELTA 42
+       0.500006,      0.000404       0.250003,      0.000193
+       0.000000,      0.000000      -0.250010,     -0.000560
+      -0.625012,     -0.001611      -1.000014,     -0.000776
+```
+
+vs Boke (one pair per line, 5 sizes = 5 data lines):
+```
+RULE: DELTA 42
+      0.500,      0.000
+      0.250,      0.000
+      0.000,      0.000
+     -0.250,     -0.001
+     -0.625,     -0.002
+```
+
+### Key classes
+
+Same as Format 1 — all classes are self-contained copies in the parser file.
+
+### Entry points
+
+Same API as Format 1:
+```python
+from nesting_engine.io.optitex_aama_parser import load_aama_pattern, AAMAGrader
+
+pieces, rules = load_aama_pattern(dxf_path, rul_path)
+nesting_pieces = grade_material_to_nesting_pieces(dxf_path, rul_path, material="L10", target_sizes=["XXS","XS","S","M","L","XL"])
+```
+
+### Tested with
+
+- Armada ARFW2410011 (OptiTex export, 85 pieces, 12 materials, 6 sizes, 3671 grading rules)
 
 ---
 

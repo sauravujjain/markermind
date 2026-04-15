@@ -11,7 +11,7 @@ class NestingJobCreate(BaseModel):
     max_bundle_count: int = 6
     top_n_results: int = 10
     full_coverage: bool = False  # If True, evaluate ALL ratios (brute force / 100% coverage)
-    gpu_scale: float = 0.15     # Rasterization resolution (px/mm). Default 0.15, use 0.3 for higher-quality demos
+    gpu_scale: float = 0.08     # Rasterization resolution (px/mm). Default 0.08, use 0.15 for higher quality
     selected_sizes: Optional[List[str]] = None  # Subset of pattern sizes to nest; None = all sizes
     strategy: str = "auto"      # "auto", "brute_force", "lhs_predict"
 

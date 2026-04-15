@@ -190,6 +190,13 @@ class ApiClient {
     })
   }
 
+  async mergeMaterials(patternId: string, sourceMaterials: string[], targetName: string) {
+    return this.request(`/patterns/${patternId}/merge-materials`, {
+      method: 'POST',
+      body: JSON.stringify({ source_materials: sourceMaterials, target_name: targetName }),
+    })
+  }
+
   async getPatternPieces(patternId: string, material?: string) {
     const query = material ? `?material=${encodeURIComponent(material)}` : ''
     return this.request<PatternPiecesResponse>(`/patterns/${patternId}/pieces${query}`)
@@ -245,6 +252,12 @@ class ApiClient {
   async getNestingJobs(orderId?: string) {
     const query = orderId ? `?order_id=${orderId}` : ''
     return this.request<NestingJob[]>(`/nesting/jobs${query}`)
+  }
+
+  async getMarkerSvgs(jobId: string, ratioStrs: string[]): Promise<Record<string, string>> {
+    return this.request<Record<string, string>>(
+      `/nesting/jobs/${jobId}/marker-svgs?ratio_strs=${encodeURIComponent(ratioStrs.join(','))}`
+    )
   }
 
   async getNestingJobPreview(jobId: string) {
@@ -322,6 +335,7 @@ class ApiClient {
       message: string
       strategies_total: number
       strategies_done: number
+      phase?: string
     }>(`/cutplans/optimize-status/${orderId}`)
   }
 
@@ -331,6 +345,10 @@ class ApiClient {
 
   async approveCutplan(id: string) {
     return this.request<Cutplan>(`/cutplans/${id}/approve`, { method: 'POST' })
+  }
+
+  async deleteCutplan(id: string) {
+    return this.request<{ message: string }>(`/cutplans/${id}`, { method: 'DELETE' })
   }
 
   async getCostAnalysis(id: string) {
@@ -380,6 +398,20 @@ class ApiClient {
     return response.blob()
   }
 
+  async downloadCutplanExcel(cutplanId: string, includeMarkers: boolean = false): Promise<Blob> {
+    const token = this.getToken()
+    const headers: Record<string, string> = {}
+    if (token) headers['Authorization'] = `Bearer ${token}`
+
+    const params = includeMarkers ? '?include_markers=true' : ''
+    const response = await fetch(`${API_URL}/export/cutplan/${cutplanId}/excel${params}`, { headers })
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}))
+      throw new Error(error.detail || 'Download failed')
+    }
+    return response.blob()
+  }
+
   async downloadTestMarkerDxf(resultId: string): Promise<Blob> {
     const token = this.getToken()
     const headers: Record<string, string> = {}
@@ -420,8 +452,12 @@ class ApiClient {
     return response.json() as Promise<RollUploadResponse>
   }
 
-  async startRollSimulation(rollplanId: string, params?: { ga_pop_size?: number; ga_generations?: number }) {
-    const query = params ? `?${new URLSearchParams(params as Record<string, string>)}` : ''
+  async startRollSimulation(rollplanId: string, params?: { ga_pop_size?: number; ga_generations?: number; confirm_shortfall?: boolean }) {
+    const queryParams: Record<string, string> = {}
+    if (params?.ga_pop_size) queryParams.ga_pop_size = String(params.ga_pop_size)
+    if (params?.ga_generations) queryParams.ga_generations = String(params.ga_generations)
+    if (params?.confirm_shortfall) queryParams.confirm_shortfall = 'true'
+    const query = Object.keys(queryParams).length ? `?${new URLSearchParams(queryParams)}` : ''
     return this.request<{ id: string }>(`/rollplans/${rollplanId}/simulate${query}`, { method: 'POST' })
   }
 
@@ -526,6 +562,47 @@ class ApiClient {
 
   async getTuneStatus(rollplanId: string) {
     return this.request<TuneStatus>(`/rollplans/${rollplanId}/tune-status`)
+  }
+
+  // Nesting Activity Dashboard
+  async getNestingActivity() {
+    return this.request<NestingActivity>('/nesting/activity')
+  }
+
+  // Surface Nesting Queue
+  async getSurfaceQueueStatus() {
+    return this.request<SurfaceQueueStatus>('/nesting/surface-queue')
+  }
+
+  async killCurrentSurfaceJob() {
+    return this.request<{ message: string }>('/nesting/surface-queue/current', { method: 'DELETE' })
+  }
+
+  async removeSurfaceQueueJob(jobId: string) {
+    return this.request<{ message: string }>(`/nesting/surface-queue/${jobId}`, { method: 'DELETE' })
+  }
+
+  async clearSurfaceQueue() {
+    return this.request<{ message: string }>('/nesting/surface-queue', { method: 'DELETE' })
+  }
+
+  async pauseSurfaceQueue() {
+    return this.request<{ message: string }>('/nesting/surface-queue/pause', { method: 'POST' })
+  }
+
+  async resumeSurfaceQueue() {
+    return this.request<{ message: string }>('/nesting/surface-queue/resume', { method: 'POST' })
+  }
+
+  async prioritizeSurfaceJob(jobId: string) {
+    return this.request<{ message: string }>(`/nesting/surface-queue/${jobId}/priority`, { method: 'POST' })
+  }
+
+  async updateSurfaceJobTimeLimit(jobId: string, timeLimitS: number) {
+    return this.request<{ message: string }>(`/nesting/surface-queue/${jobId}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ time_limit_s: timeLimitS }),
+    })
   }
 }
 
@@ -777,6 +854,7 @@ export interface CutplanOptimizeRequest {
   fabric_cost_per_yard?: number
   max_ply_height?: number
   min_plies_by_bundle?: string  // e.g. "6:50,5:40,4:30,3:10,2:1,1:1"
+  cost_metric?: string  // "efficiency" (default), "length", or "both"
 }
 
 export interface Cutplan {
@@ -796,6 +874,8 @@ export interface Cutplan {
   spreading_cost?: number
   cutting_cost?: number
   prep_cost?: number
+  solver_config?: Record<string, unknown>
+  generation_batch_id?: string
   markers: CutplanMarker[]
   created_at: string
   updated_at: string
@@ -812,6 +892,8 @@ export interface CutplanMarker {
   plies_by_color: Record<string, number>
   total_plies: number
   cuts: number
+  svg_preview?: string
+  computation_time_s?: number
 }
 
 export interface CostBreakdown {
@@ -908,6 +990,8 @@ export interface RollPlanCreateRequest {
   min_reuse_length_yards?: number
   pseudo_roll_avg_yards?: number
   pseudo_roll_delta_yards?: number
+  waste_threshold_pct?: number
+  pseudo_buffer_pct?: number
   ga_pop_size?: number
   ga_generations?: number
 }
@@ -971,6 +1055,8 @@ export interface WasteAssessment {
   waste_pct: number
   exceeds_threshold: boolean
   threshold_pct: number
+  waste_yards?: number
+  total_fabric_yards?: number
   recommendation: string
 }
 
@@ -997,6 +1083,7 @@ export interface RollPlan {
   progress_message?: string
   error_message?: string
   preflight_warnings?: PreflightWarning[]
+  roll_adjustment_message?: string
   monte_carlo?: MonteCarloResult
   ga?: GAResult
   waste_assessment?: WasteAssessment
@@ -1051,4 +1138,70 @@ export interface RollPreviewResponse {
   shortfall_yards?: number
   synthetic_rolls_needed?: number
   synthetic_roll_length_yards?: number
+}
+
+// Surface Queue types
+export interface SurfaceQueueJob {
+  id: string
+  marker_label: string
+  cutplan_id: string
+  status: string
+  submitted_at: number
+  started_at: number | null
+  completed_at: number | null
+  elapsed_s: number
+  estimated_time_s: number
+  time_limit_override: number | null
+  utilization: number | null
+  ratio_str: string
+}
+
+export interface SurfaceQueueStatus {
+  paused: boolean
+  current: SurfaceQueueJob | null
+  queued: SurfaceQueueJob[]
+  queued_count: number
+  completed: SurfaceQueueJob[]
+  completed_count: number
+  total_compute_s: number
+}
+
+// Nesting Activity Dashboard types
+export interface NestingActivity {
+  surface_queue: { paused: boolean; current_job_id: string | null; queued_count: number }
+  refine_batches: RefineBatch[]
+  quick_nests: QuickNestStatus[]
+}
+
+export interface RefineBatch {
+  cutplan_id: string
+  cutplan_name: string
+  order_id: string
+  order_number: string
+  backend: 'surface' | 'local'
+  status: string
+  progress: number
+  markers_total: number
+  markers_done: number
+  started_at: number | null
+  markers: RefineBatchMarker[]
+}
+
+export interface RefineBatchMarker {
+  marker_label: string
+  ratio_str: string
+  status: string  // completed | running | queued
+  elapsed_s: number
+  estimated_time_s: number
+  utilization: number | null
+  surface_job_id: string | null
+}
+
+export interface QuickNestStatus {
+  order_id: string
+  order_number: string
+  status: string
+  progress: number
+  message: string
+  phase: string
 }

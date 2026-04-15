@@ -243,7 +243,7 @@ class NestingService:
             # Get pattern file paths (convert relative to absolute)
             if not pattern.dxf_file_path:
                 raise ValueError("Pattern DXF file not available")
-            if not pattern.rul_file_path and pattern.file_type not in ("dxf_only", "vt_dxf"):
+            if not pattern.rul_file_path and pattern.file_type not in ("dxf_only", "vt_dxf", "gerber_accumark"):
                 raise ValueError("Pattern RUL file not available")
 
             from ..config import resolve_path
@@ -294,6 +294,11 @@ class NestingService:
                 return job.status == "cancelled"
 
             gpu_scale = job.gpu_scale or 0.15
+
+            # Check for merged materials (e.g., S10+S11 merged into "S10,11")
+            merge_map = (pattern.parse_metadata or {}).get("material_merge_map", {})
+            material_sources = merge_map.get(material)  # None if not merged
+
             update_progress(5, f"Starting GPU nesting for {material} (scale={gpu_scale} px/mm)...")
 
             # Run GPU nesting with callbacks for preview and incremental results
@@ -315,6 +320,7 @@ class NestingService:
                 file_type=pattern.file_type,
                 nesting_strategy=job.strategy or "auto",
                 fabric_widths=job.fabric_widths,
+                material_sources=material_sources,
             )
 
             # nesting_results is now {width_inches: {bc: [results]}}

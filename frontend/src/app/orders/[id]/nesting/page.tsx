@@ -7,7 +7,7 @@ import { api, Order, Pattern, NestingJob, Fabric } from '@/lib/api'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { useToast } from '@/hooks/use-toast'
-import { ArrowLeft, Play, Clock, CheckCircle2, Package, Layers, Zap, TrendingUp, AlertCircle, XCircle, ChevronDown } from 'lucide-react'
+import { ArrowLeft, Play, Clock, CheckCircle2, Package, Layers, Zap, TrendingUp, AlertCircle, XCircle } from 'lucide-react'
 
 interface MarkerResult {
   ratio: string
@@ -41,7 +41,6 @@ export default function NestingProgressPage() {
   const [elapsedTime, setElapsedTime] = useState(0)
   const [startTime, setStartTime] = useState<number | null>(null)
   const [selectedMarkerIdx, setSelectedMarkerIdx] = useState<number | null>(null)
-  const [showConfigDetails, setShowConfigDetails] = useState(false)
   const [activeWidthTab, setActiveWidthTab] = useState<number | null>(null)
 
   const timerRef = useRef<NodeJS.Timeout | null>(null)
@@ -250,7 +249,7 @@ export default function NestingProgressPage() {
       const maxBundles = parseInt(searchParams.get('maxBundles') || '6')
       const topN = parseInt(searchParams.get('topN') || '10')
       const fullCoverage = searchParams.get('fullCoverage') === 'true'
-      const gpuScale = parseFloat(searchParams.get('gpuScale') || '0.15')
+      const gpuScale = parseFloat(searchParams.get('gpuScale') || '0.08')
 
       // Create nesting job
       const job = await api.createNestingJob({
@@ -453,32 +452,7 @@ export default function NestingProgressPage() {
                   <span className="bg-muted px-2 py-1 rounded">
                     Max Bundles: {nestingJob.max_bundle_count}
                   </span>
-                  {nestingJob.full_coverage && (
-                    <span className="bg-amber-100 text-amber-800 px-2 py-1 rounded">
-                      100% Coverage
-                    </span>
-                  )}
-                  <button
-                    onClick={() => setShowConfigDetails(!showConfigDetails)}
-                    className="flex items-center gap-1 text-muted-foreground hover:text-foreground transition-colors px-1"
-                  >
-                    <ChevronDown className={`h-3 w-3 transition-transform ${showConfigDetails ? 'rotate-180' : ''}`} />
-                    Details
-                  </button>
                 </div>
-                {showConfigDetails && (
-                  <div className="flex flex-wrap gap-3 text-xs mt-2 pt-2 border-t border-border/50">
-                    <span className="bg-muted px-2 py-1 rounded">
-                      Top N: {nestingJob.top_n_results}
-                    </span>
-                    <span className="bg-muted px-2 py-1 rounded">
-                      {nestingJob.full_coverage ? 'Brute Force (All Ratios)' : 'GA Optimized'}
-                    </span>
-                    <span className="bg-muted px-2 py-1 rounded">
-                      Resolution: {nestingJob.gpu_scale || 0.15} px/mm
-                    </span>
-                  </div>
-                )}
               </div>
             )}
 
