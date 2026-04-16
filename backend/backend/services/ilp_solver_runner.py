@@ -18,10 +18,43 @@ MAX_PLIES_PER_CUT = 100
 # ILP solver time limit per strategy (seconds)
 ILP_TIME_LIMIT = 120  # 2 minutes max per strategy
 
-# Marker filtering: cap per bundle count for solver performance.
-# GPU nesting already applies top-25% retention; this caps the remainder
-# to keep the ILP variable count manageable (~200 markers → 400 vars).
-MARKER_CAP_PER_BC = 40  # Max markers per bundle count for bc≥3
+# Solver backend: "cpsat" (default, best quality), "scipy" (fallback)
+ILP_SOLVER_BACKEND = "cpsat"
+
+# Total marker budget per solver — dynamically distributed across BCs.
+# Target: solver finds OPTIMAL (not just feasible) within ILP_TIME_LIMIT.
+# Benchmarked Apr 2026 on P5 (7 sizes, 55 BCs):
+#   cpsat:  2000 markers (4000 vars) → optimal in ~30s
+#   scipy:   800 markers (1600 vars) → optimal in ~30s
+SOLVER_MARKER_BUDGET = {
+    "cpsat": 2500,
+    "scipy": 800,
+}
+
+
+def compute_marker_cap_per_bc(markers_by_bc: dict, backend: str = None) -> int:
+    """Dynamically compute per-BC marker cap based on solver budget.
+
+    BC 1-2 always keep ALL markers (brute-forced, few ratios).
+    Remaining budget is distributed evenly across BC 3+ groups.
+
+    Returns: cap per BC for bc >= 3.
+    """
+    if backend is None:
+        backend = ILP_SOLVER_BACKEND
+    total_budget = SOLVER_MARKER_BUDGET.get(backend, 800)
+
+    # Count BC 1-2 markers (always kept in full)
+    bc12_count = sum(len(markers_by_bc.get(bc, [])) for bc in [1, 2])
+    remaining = max(total_budget - bc12_count, 100)
+
+    # Count BC 3+ groups that have markers
+    bc3plus = [bc for bc in markers_by_bc if bc >= 3 and markers_by_bc[bc]]
+    if not bc3plus:
+        return remaining
+
+    cap = max(10, remaining // len(bc3plus))
+    return cap
 
 # Minimum plies by bundle count (to avoid wasteful small-ply large markers)
 MIN_PLIES_BY_BUNDLE = {
@@ -237,21 +270,21 @@ def generate_all_1_2_bundle_markers(
 
 def filter_markers_for_ilp(
     markers: List['Marker'],
-    cap_per_bc: int = MARKER_CAP_PER_BC,
+    cap_per_bc: int = None,
+    backend: str = None,
 ) -> List['Marker']:
     """
     Cap markers per bundle count for ILP solver performance.
 
-    The GPU nesting runner already applies top-25% retention per BC when saving
-    to MarkerBank. This function only caps bc≥3 to MARKER_CAP_PER_BC if the
-    pool is still too large (e.g., brute force on many sizes).
-
-    - bc=1,2: ALL kept (always needed for exact fulfillment)
-    - bc≥3: top `cap_per_bc` by efficiency (no-op if already under cap)
+    The cap is dynamically computed from the solver's marker budget:
+      - CP-SAT: ~2500 markers total (finds optimal in ~60s)
+      - SciPy:  ~800 markers total (finds optimal in ~30s)
+    BC 1-2 always kept in full. Remaining budget split across BC 3+ groups.
 
     Args:
         markers: List of Marker objects
-        cap_per_bc: Maximum markers to keep per bundle count (bc≥3)
+        cap_per_bc: Override per-BC cap (None = auto from solver budget)
+        backend: Solver backend name (None = use ILP_SOLVER_BACKEND)
 
     Returns:
         Filtered list of Marker objects
@@ -262,6 +295,10 @@ def filter_markers_for_ilp(
         if bc not in by_bundle:
             by_bundle[bc] = []
         by_bundle[bc].append(m)
+
+    # Compute dynamic cap if not overridden
+    if cap_per_bc is None:
+        cap_per_bc = compute_marker_cap_per_bc(by_bundle, backend)
 
     filtered = []
     stats = {}
@@ -278,8 +315,8 @@ def filter_markers_for_ilp(
     total_before = len(markers)
     total_after = len(filtered)
     if total_before != total_after:
-        print(f"[ILP] Marker cap: {total_before} → {total_after} markers "
-              f"({', '.join(f'{bc}-bndl: {k}/{t}' for bc, (k, t) in sorted(stats.items()))})")
+        print(f"[ILP] Marker filter ({backend or ILP_SOLVER_BACKEND}): "
+              f"{total_before} → {total_after} markers (cap={cap_per_bc}/BC)")
 
     return filtered
 
@@ -341,6 +378,86 @@ def markers_from_nesting_results(
     return markers
 
 
+# ─── ILP Solver Backends ─────────────────────────────────────────────
+
+def _solve_cpsat(c, A_eq, b_eq, A_ub, b_ub, num_vars, n_markers,
+                 objective, lb, ub, integrality, time_limit):
+    """Solve ILP using Google OR-Tools CP-SAT. Handles 1000+ markers easily."""
+    from ortools.sat.python import cp_model
+
+    model = cp_model.CpModel()
+    SCALE = 10000  # CP-SAT uses integers; scale float costs
+
+    # Variables
+    vars_ = []
+    for i in range(num_vars):
+        vars_.append(model.NewIntVar(int(lb[i]), int(ub[i]), f'x{i}'))
+
+    # Equality constraints: A_eq @ x = b_eq
+    for row_idx in range(len(b_eq)):
+        expr = sum(int(A_eq[row_idx, j]) * vars_[j] for j in range(num_vars)
+                   if A_eq[row_idx, j] != 0)
+        model.Add(expr == int(b_eq[row_idx]))
+
+    # Inequality constraints: A_ub @ x <= b_ub
+    for row_idx in range(len(b_ub)):
+        expr = sum(int(A_ub[row_idx, j]) * vars_[j] for j in range(num_vars)
+                   if A_ub[row_idx, j] != 0)
+        model.Add(expr <= int(b_ub[row_idx]))
+
+    # Objective: minimize c @ x (scale to integer)
+    obj_terms = []
+    for i in range(num_vars):
+        if c[i] != 0:
+            obj_terms.append(int(c[i] * SCALE) * vars_[i])
+    if obj_terms:
+        model.Minimize(sum(obj_terms))
+
+    solver = cp_model.CpSolver()
+    solver.parameters.max_time_in_seconds = time_limit
+    solver.parameters.num_workers = 0  # Use all cores
+
+    status = solver.Solve(model)
+
+    if status in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+        x = np.array([solver.Value(v) for v in vars_], dtype=float)
+        print(f"[ILP] CP-SAT: {'optimal' if status == cp_model.OPTIMAL else 'feasible'} "
+              f"in {solver.WallTime():.1f}s, obj={solver.ObjectiveValue()/SCALE:.4f}")
+        return x, True
+
+    print(f"[ILP] CP-SAT: infeasible or no solution (status={status})")
+    return None, False
+
+
+
+def _solve_scipy(c, A_eq, b_eq, A_ub, b_ub, num_vars,
+                 lb, ub, integrality, time_limit):
+    """Solve ILP using scipy.optimize.milp. Original backend."""
+    from scipy.optimize import milp as scipy_milp, LinearConstraint, Bounds
+
+    bounds = Bounds(lb=lb, ub=ub)
+    constraints = [
+        LinearConstraint(A_eq, b_eq, b_eq),
+    ]
+    if len(A_ub) > 0:
+        constraints.append(LinearConstraint(A_ub, -np.inf, b_ub))
+
+    options_dict = {"time_limit": time_limit, "disp": False}
+    result = scipy_milp(c, constraints=constraints, bounds=bounds,
+                        integrality=integrality, options=options_dict)
+
+    if result.success:
+        print(f"[ILP] SciPy: optimal, obj={result.fun:.4f}")
+        return result.x, True
+
+    if result.x is not None and "time limit" in str(result.message).lower():
+        print(f"[ILP] SciPy: time limit, using best feasible")
+        return result.x, True
+
+    print(f"[ILP] SciPy: {result.message}")
+    return None, False
+
+
 def solve_ilp(
     demand: Dict[str, int],
     all_markers: List[Marker],
@@ -375,11 +492,6 @@ def solve_ilp(
     Returns:
         Tuple of (CutPlan, solve_time_seconds)
     """
-    try:
-        from scipy.optimize import LinearConstraint, Bounds
-    except ImportError:
-        raise ImportError("scipy.optimize not available")
-
     t0 = time.time()
     n = len(all_markers)
 
@@ -513,30 +625,34 @@ def solve_ilp(
         ub = np.array([M] * n + [1] * n + [max_cuts] * n)
     else:
         ub = np.array([M] * n + [1] * n)
-    bounds = Bounds(lb=lb, ub=ub)
 
     # All integer
     integrality = np.ones(num_vars)
 
-    # Solve
-    constraints = [
-        LinearConstraint(np.array(A_eq), b_eq, b_eq),
-        LinearConstraint(np.array(A_ub), -np.inf, b_ub),
-    ]
-    from scipy.optimize import milp as scipy_milp
-    options_dict = {"time_limit": ILP_TIME_LIMIT, "disp": False}
-    result = scipy_milp(c, constraints=constraints, bounds=bounds, integrality=integrality, options=options_dict)
+    # ── Solve with selected backend ─────────────────────────────────
+    A_eq_np = np.array(A_eq)
+    A_ub_np = np.array(A_ub) if A_ub else np.empty((0, num_vars))
+    b_eq_np = np.array(b_eq)
+    b_ub_np = np.array(b_ub) if b_ub else np.empty(0)
+
+    backend = ILP_SOLVER_BACKEND
+    result_x = None
+    result_success = False
+
+    if backend == "cpsat":
+        result_x, result_success = _solve_cpsat(
+            c, A_eq_np, b_eq_np, A_ub_np, b_ub_np, num_vars, n,
+            objective, lb, ub, integrality, ILP_TIME_LIMIT)
+    else:  # "scipy" or any other fallback
+        result_x, result_success = _solve_scipy(
+            c, A_eq_np, b_eq_np, A_ub_np, b_ub_np, num_vars,
+            lb, ub, integrality, ILP_TIME_LIMIT)
+
     solve_time = time.time() - t0
 
-    if not result.success:
-        # If time limit reached but we have a feasible solution, use it
-        if result.x is not None and "time limit" in str(result.message).lower():
-            print(f"[ILP] {objective}: Time limit reached ({solve_time:.1f}s), using best feasible solution")
-        elif any(mp > 1 for mp in min_plies):
-            # Min-ply constraints likely caused infeasibility (e.g. rare sizes
-            # with low demand can't satisfy 30-ply minimums). Retry with all
-            # min-plies relaxed to 1 so we still return a valid plan.
-            print(f"[ILP] {objective}: Infeasible with min-ply constraints, "
+    if not result_success or result_x is None:
+        if any(mp > 1 for mp in min_plies):
+            print(f"[ILP] {objective} ({backend}): Infeasible with min-ply constraints, "
                   f"retrying with relaxed limits...")
             relaxed = {bc: 1 for bc in range(1, 9)}
             return solve_ilp(
@@ -552,11 +668,11 @@ def solve_ilp(
                 cost_metric=cost_metric,
             )
         else:
-            raise RuntimeError(f"ILP failed ({solve_time:.1f}s): {result.message}")
+            raise RuntimeError(f"ILP failed ({backend}, {solve_time:.1f}s)")
 
     # Build plan
     plan = CutPlan(name=name, strategy=objective, sizes=sizes, max_ply_height=max_ply_height)
-    x = np.round(result.x).astype(int)
+    x = np.round(result_x).astype(int)
     plies_vals = x[:n]
 
     for i, plies in enumerate(plies_vals):

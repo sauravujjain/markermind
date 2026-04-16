@@ -501,16 +501,51 @@ efficiency = total_vector_area_mm2 / (fabric_width_mm × gpu_length_mm)
 - `_polygon_area_mm2()` added to `gpu_nesting_runner.py` — used in all 6 efficiency calculation sites
 - **DONE in production code** — all `_evaluate_single_sort`, `_evaluate_with_svg_single_sort`, typed/column-fill variants, and Ridge prediction efficiency now use vector area
 
-### GPU Scale: 0.30 px/mm (Recommended)
+### GPU Scale: 0.08 px/mm (Production Default)
 
-| Scale | Total Fabric Δ vs CPU 2-min | Time/marker | Notes |
-|-------|---------------------------|-------------|-------|
-| 0.15 | +1.0% | ~200ms | Current production default |
-| 0.30 | +0.3% | ~950ms | Recommended — nearly halves length error |
-| 1.00 | N/A | ~minutes | CUDA kernel too slow; needs FFT convolution |
+| Scale | GP Pred MAPE vs 0.15 | Spearman rho | Speed | Notes |
+|-------|----------------------|-------------|-------|-------|
+| 0.08 | 2.53% | 0.9993 | ~7.8/s | **Production default** — fast, GP absorbs error |
+| 0.15 | baseline | 1.0 | ~5/s | Higher quality, use for calibration |
+| 0.30 | N/A | N/A | ~1/s | Best raw GPU accuracy |
 
+- Validated Apr 2026: 275 markers, 0.08 vs 0.15, ranking near-perfect (rho=0.9993)
 - Use `round()` for strip width (not `int()`) to avoid 0.1" truncation
 - Dual sort: `width_desc` + `area_desc`, pick shortest length
+
+### DEAD END: Batch GPU Nesting via CUDA Streams/Threading
+
+**Do NOT attempt parallel GPU marker evaluation using CUDA streams, Python threading, or batched 3D kernels.** This has been tested twice and **makes things slower** (0.57x of sequential).
+
+**Why it fails:** A single BLF kernel already saturates the RTX 3060's 30 SMs with ~500 thread blocks. Adding concurrent streams creates GPU contention, not parallelism. The Python BLF loop overhead (argmin, place, update per piece) is the real bottleneck, not GPU compute.
+
+**NVIDIA library survey (Apr 2026):** cuOpt, cuSpatial, Warp, CUDA Graphs, Cooperative Groups, CUB — none help. 2D irregular strip packing is too niche. No open-source GPU irregular nesting exists.
+
+**The only viable path to 50+ markers/sec:** A monolithic CUDA kernel that runs the entire BLF loop (all pieces) in one launch, eliminating Python roundtrips. Significant CUDA engineering effort (weeks).
+
+### PROVEN: Lookahead BLF for GPU Nesting Quality
+
+**GPU BLF quality can be improved 0.5-3.7% by evaluating top-K alternative positions with L-step greedy rollout.** Time cost: 0.3-3.8s per marker (vs 0.13s greedy). Best config: K=10 positions, L=5-8 lookahead steps.
+
+**How it works:**
+1. GPU kernel computes valid (x, y) for ALL positions and both rotations (already done in one launch)
+2. Extract top-K diverse positions (different x, y, or rotation) from kernel output
+3. For each candidate: snapshot container → place piece → greedily place next L pieces → measure strip length → rollback
+4. Commit the position that minimizes strip length after rollout
+
+**Validated Apr 2026** across 3 garment types:
+
+| Pattern | Marker | Pieces | Gain | Notes |
+|---------|--------|--------|------|-------|
+| FGL shirt | bc9 (5 sizes) | 36 | **+3.7%** | Best gain — moderate piece variety |
+| P5 panty | bc12 | 12 | **+2.6%** | Single body piece |
+| FGL shirt | bc12 | 48 | +0.2% | Large markers — greedy already good |
+| AAMA jacket | bc1-2 | 23-46 | 0.0% | High shape diversity — greedy interlocks well |
+
+**Key insight:** Mid-complexity markers (20-40 pieces, moderate shape variety) benefit most. Very simple or very complex markers give greedy BLF less room for error.
+
+**Scripts:** `scripts/ilp_lookahead_v2_poc.py`, `scripts/lookahead_multipattern_test.py`
+**PNGs:** `experiment_results/lookahead_pngs/`
 
 ### Correlation with Spyrrow
 
