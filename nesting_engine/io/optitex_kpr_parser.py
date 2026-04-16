@@ -788,8 +788,10 @@ class AAMADXFParser:
     _GEOMETRY_LAYERS = {'1', '8'}
 
     # Grade point POINT layers (turn points = 2, curve points = 3).
-    # KPR variant: grade rule TEXT labels (e.g. "# 42") are on layer 14, not 2/3.
-    _GRADE_POINT_LAYERS = {'2', '3', '14'}
+    # KPR variant: grade rule TEXT labels appear on layer 14 OR layer 1.
+    # Layer 14 labels: found on the first group of grade points (inner-line offset).
+    # Layer 1 labels: found on the exact-boundary grade points (dist=0 from boundary).
+    _GRADE_POINT_LAYERS = {'2', '3', '14', '1'}
 
     # Tolerance for matching a grade point coordinate to a boundary vertex.
     TOLERANCE = 0.01
