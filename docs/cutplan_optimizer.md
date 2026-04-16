@@ -2,6 +2,35 @@
 
 Integer Linear Programming (ILP) based solver for selecting optimal marker combinations to fulfill production demand.
 
+## Cutplan Pipeline Stages
+
+The cutplan pipeline has 3 stages. Each stage refines the previous stage's results.
+
+### Stage 1: ILP Solve (Ratio + Plies Selection)
+
+**Input**: GPU-nested marker bank (ratios with GPU lengths/efficiencies), order demand
+**Output**: Cutplan options (A, B, C, D) — each is a set of marker ratios + ply counts
+**What happens**: The ILP solver selects optimal marker ratios and ply counts using GPU lengths as the cost metric. EndBit Optimized (Option D) also runs its own solver.
+**Frontend**: Shows cutplan options with ratio/plies only. **No marker lengths, efficiencies, or costs are displayed yet** — GPU lengths are internal to the solver and not shown to the user.
+
+### Stage 2: Quick CPU-Vector Nest (Lengths + Costs)
+
+**Input**: Marker ratios from Stage 1
+**Trigger**: Automatic — starts immediately after Stage 1 completes
+**Output**: CPU-nested marker lengths, efficiencies, mini SVG previews, cost breakdown, floor waste estimate
+**What happens**: Each unique marker ratio is CPU-vector nested for a short duration (~20s). Updated lengths replace GPU lengths. Costs (fabric, spreading, cutting, prep) and floor MC waste are calculated using these CPU lengths. Results are pushed to the frontend as each cutplan completes.
+**Frontend**: Marker lengths, efficiencies, SVG thumbnails, cost breakdown, and Est. Floor Waste appear.
+
+### Stage 3: Refine Markers (User-Triggered)
+
+**Input**: Markers from Stage 2
+**Trigger**: User clicks "Refine" on a cutplan with advanced nesting settings (time limit, piece buffer, etc.)
+**Output**: Refined marker lengths, efficiencies, full SVG previews
+**What happens**: Markers are CPU-vector nested for longer duration with user-configured settings to squeeze maximum nesting efficiency. Lengths and efficiencies are updated. Marker is ready for roll plan stage if needed.
+**Frontend**: Updated lengths/efficiencies, refined SVG previews, recalculated costs. Card shows gold/amber styling.
+
+---
+
 ## Purpose
 
 Given an order demand (garments per size) and a pool of available markers (pre-computed via GPU nesting), select which markers to use and how many plies of each to minimize total fabric usage while meeting exact demand.

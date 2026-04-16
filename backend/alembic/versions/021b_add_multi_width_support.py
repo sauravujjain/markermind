@@ -1,7 +1,7 @@
 """Add multi-width support to nesting jobs, results, and marker bank
 
-Revision ID: 021
-Revises: 020
+Revision ID: 021b
+Revises: 021
 Create Date: 2026-03-08
 
 """
@@ -11,8 +11,8 @@ from alembic import op
 import sqlalchemy as sa
 
 # revision identifiers, used by Alembic.
-revision: str = '021'
-down_revision: Union[str, None] = '020'
+revision: str = '021b'
+down_revision: Union[str, None] = '021'
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

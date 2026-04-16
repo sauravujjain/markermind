@@ -145,8 +145,9 @@ export function OrderProvider({ children }: { children: ReactNode }) {
 
   const isConfigured = !!currentPattern && orderFabricsInPattern.length > 0 && allConfigured
   const hasNestingResults = nestingJobs.some(j => j.status === 'completed')
-  const hasCutplans = cutplans.length > 0
-  const hasApprovedCutplan = cutplans.some(
+  const activeCutplans = cutplans.filter(c => c.status !== 'superseded')
+  const hasCutplans = activeCutplans.length > 0
+  const hasApprovedCutplan = activeCutplans.some(
     c => c.status === 'approved' || c.status === 'refining' || c.status === 'refined'
   )
 
@@ -172,8 +173,8 @@ export function OrderProvider({ children }: { children: ReactNode }) {
   }
   if (hasApprovedCutplan) {
     currentStep = 6
-    const hasRefined = cutplans.some(c => c.status === 'refined')
-    const isRefining = cutplans.some(c => c.status === 'refining')
+    const hasRefined = activeCutplans.some(c => c.status === 'refined')
+    const isRefining = activeCutplans.some(c => c.status === 'refining')
     if (hasRefined) {
       stepLabel = 'Roll Plan'
     } else if (isRefining) {

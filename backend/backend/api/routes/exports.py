@@ -240,7 +240,7 @@ async def export_order_excel(
     from ...services.excel_export_service import (
         TITLE_FONT, SUBTITLE_FONT, CUTPLAN_FILL, HEADER_FONT,
         write_demand_table, write_marker_table,
-        write_cost_breakdown, write_cost_charts,
+        write_cost_breakdown,
         write_lay_plan_sheet, write_marker_details,
     )
 
@@ -429,8 +429,13 @@ async def export_order_excel(
                 "cutting_cost_per_cm": cutting_cost_per_cm,
                 "prep_cost_per_meter": prep_cost_per_meter,
             }
+            sorted_markers = sorted(
+                plan.markers,
+                key=lambda m: (m.layout.length_yards if m.layout and m.layout.length_yards else (m.length_yards or 0)),
+                reverse=True,
+            )
             row, cost_totals = write_marker_table(
-                ws, row, sizes, plan.markers,
+                ws, row, sizes, sorted_markers,
                 perimeter_by_size, cost_params,
                 max_ply_height=plan_max_ply,
             )
@@ -439,9 +444,8 @@ async def export_order_excel(
             ws.cell(row=row, column=1, value=f"Total Yards: {cost_totals['total_fabric_yards']:.2f}").font = HEADER_FONT
             row += 2
 
-            # -- Cost Breakdown + two pie charts --
-            row, cost_data_start = write_cost_breakdown(ws, row, cost_totals, fc_cost_per_yard)
-            write_cost_charts(ws, cost_data_start)
+            # -- Cost Breakdown --
+            row, _cost_data_start = write_cost_breakdown(ws, row, cost_totals, fc_cost_per_yard)
             row += 2
 
             # -- Marker Details with images (after full cutplan) --
@@ -461,7 +465,7 @@ async def export_order_excel(
             safe_fabric = re.sub(r'[\\/?*\[\]:]', '', fabric_code)[:10]
             safe_plan = re.sub(r'[\\/?*\[\]:]', '', plan_label)[:10]
             lay_name = f"Lay-{safe_fabric}-{safe_plan}"
-            write_lay_plan_sheet(wb, lay_name, sizes, plan.markers, plan_max_ply)
+            write_lay_plan_sheet(wb, lay_name, sizes, sorted_markers, plan_max_ply)
 
         # Auto-fit column widths
         for col in ws.columns:
@@ -478,6 +482,185 @@ async def export_order_excel(
     output.seek(0)
 
     filename = f"order_{order.order_number}_cutplan.xlsx"
+    return StreamingResponse(
+        output,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename={filename}"}
+    )
+
+
+@router.get("/cutplan/{cutplan_id}/excel")
+async def export_single_cutplan_excel(
+    cutplan_id: str,
+    include_markers: bool = False,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Export a single cutplan as Excel workbook.
+    Includes demand table, marker table, cost breakdown, lay plan,
+    and optionally marker images.
+    """
+    import openpyxl
+    from ...services.excel_export_service import (
+        TITLE_FONT, SUBTITLE_FONT, CUTPLAN_FILL, HEADER_FONT,
+        write_demand_table, write_marker_table,
+        write_cost_breakdown, write_lay_plan_sheet,
+        write_marker_details,
+    )
+
+    cutplan = db.query(Cutplan).options(
+        joinedload(Cutplan.markers).joinedload(CutplanMarker.layout)
+    ).join(Order).filter(
+        Cutplan.id == cutplan_id,
+        Order.customer_id == current_user.customer_id,
+    ).first()
+    if not cutplan:
+        raise HTTPException(status_code=404, detail="Cutplan not found")
+
+    order = db.query(Order).filter(Order.id == cutplan.order_id).first()
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+
+    # Get canonical sizes and perimeter data from pattern
+    canonical_sizes = None
+    perimeter_all_materials = {}
+    pattern = None
+    if order.pattern_id:
+        pattern = db.query(Pattern).filter(Pattern.id == order.pattern_id).first()
+        if pattern:
+            if pattern.available_sizes:
+                canonical_sizes = pattern.available_sizes
+            meta = pattern.parse_metadata or {}
+            perimeter_all_materials = meta.get("perimeter_by_size", {})
+
+    # Load cost config
+    from ...models import CostConfig as CostConfigModel, Fabric as FabricModel
+    cost_config = db.query(CostConfigModel).filter(
+        CostConfigModel.customer_id == current_user.customer_id
+    ).first()
+
+    # Cost parameters (same logic as order-level export)
+    fc_cost_per_yard = cost_config.fabric_cost_per_yard if cost_config else 3.0
+    spreading_cost_per_yard = cost_config.spreading_cost_per_yard if cost_config else 0.00122
+    spreading_cost_per_ply = cost_config.spreading_cost_per_ply if cost_config else 0.013
+    cutting_labor_per_hour = cost_config.cutting_labor_cost_per_hour if cost_config else 1.0
+    cutting_workers = cost_config.cutting_workers_per_cut if cost_config else 1
+    cutting_speed_cm_s = cost_config.cutting_speed_cm_per_s if cost_config else 10.0
+    cutting_cost_per_cm = (cutting_labor_per_hour * cutting_workers) / 3600.0 / cutting_speed_cm_s if cutting_speed_cm_s > 0 else 0.0
+    prep_cost_per_meter = 0.0
+    if cost_config:
+        if cost_config.prep_perf_paper_enabled:
+            prep_cost_per_meter += cost_config.prep_perf_paper_cost_per_m or 0.0
+        if cost_config.prep_underlayer_enabled:
+            prep_cost_per_meter += cost_config.prep_underlayer_cost_per_m or 0.0
+        if cost_config.prep_top_layer_enabled:
+            prep_cost_per_meter += cost_config.prep_top_layer_cost_per_m or 0.0
+    else:
+        prep_cost_per_meter = 0.25
+
+    max_ply_height = cost_config.max_ply_height if cost_config else 100
+    plan_max_ply = max_ply_height
+    if cutplan.solver_config and isinstance(cutplan.solver_config, dict):
+        plan_max_ply = cutplan.solver_config.get("max_ply_height", max_ply_height)
+
+    DEFAULT_PERIMETER_CM_PER_BUNDLE = 2540.0
+
+    # Build demand from order lines
+    from collections import defaultdict
+    demand: dict = defaultdict(int)
+    for line in order.order_lines:
+        for sq in line.size_quantities:
+            demand[sq.size_code] += sq.quantity
+
+    sizes = canonical_sizes or sorted(demand.keys())
+
+    # Resolve perimeter_by_size (use first material if only one)
+    perimeter_by_size = {}
+    if perimeter_all_materials:
+        if len(perimeter_all_materials) == 1:
+            perimeter_by_size = list(perimeter_all_materials.values())[0]
+
+    # Sort markers by descending length
+    sorted_markers = sorted(
+        cutplan.markers,
+        key=lambda m: (m.layout.length_yards if m.layout and m.layout.length_yards else (m.length_yards or 0)),
+        reverse=True,
+    )
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    import re
+    ws.title = re.sub(r'[\\/?*\[\]:]', '-', cutplan.name or "Cutplan")[:31]
+
+    # Title
+    row = 1
+    ws.cell(row=row, column=1, value=f"Order: {order.style_number or order.order_number}").font = TITLE_FONT
+    row += 1
+    ws.cell(row=row, column=1, value=f"Cutplan: {cutplan.name}").font = SUBTITLE_FONT
+    row += 2
+
+    # Demand table
+    fabric_color_demands = {"ALL": dict(demand)}
+    row = write_demand_table(ws, row, sizes, fabric_color_demands)
+    row += 1
+
+    # Marker table
+    cost_params = {
+        "default_perimeter_cm": DEFAULT_PERIMETER_CM_PER_BUNDLE,
+        "fc_cost_per_yard": fc_cost_per_yard,
+        "spreading_cost_per_yard": spreading_cost_per_yard,
+        "spreading_cost_per_ply": spreading_cost_per_ply,
+        "cutting_cost_per_cm": cutting_cost_per_cm,
+        "prep_cost_per_meter": prep_cost_per_meter,
+    }
+    row, cost_totals = write_marker_table(
+        ws, row, sizes, sorted_markers,
+        perimeter_by_size, cost_params,
+        max_ply_height=plan_max_ply,
+    )
+
+    # Summary
+    ws.cell(row=row, column=1, value=f"Total Yards: {cost_totals['total_fabric_yards']:.2f}").font = HEADER_FONT
+    row += 2
+
+    # Cost breakdown
+    row, _cost_data_start = write_cost_breakdown(ws, row, cost_totals, fc_cost_per_yard)
+    row += 2
+
+    # Marker images if requested
+    from ...models.nesting import NestingJob
+    fabric_width_inches = None
+    latest_job = db.query(NestingJob).filter(
+        NestingJob.order_id == order.id,
+        NestingJob.status == "completed",
+    ).order_by(NestingJob.created_at.desc()).first()
+    if latest_job:
+        fabric_width_inches = latest_job.fabric_width_inches
+
+    if include_markers:
+        row = write_marker_details(ws, row, sizes, sorted_markers, fabric_width_inches)
+
+    # Lay plan sheet
+    import re
+    safe_plan = re.sub(r'[\\/?*\[\]:]', '', cutplan.name or "cutplan")[:20]
+    write_lay_plan_sheet(wb, f"Lay-{safe_plan}", sizes, sorted_markers, plan_max_ply)
+
+    # Auto-size columns
+    for col_cells in ws.columns:
+        col_letter = col_cells[0].column_letter
+        max_length = 0
+        for cell in col_cells:
+            if cell.value:
+                max_length = max(max_length, len(str(cell.value)))
+        ws.column_dimensions[col_letter].width = min(max_length + 3, 20)
+
+    output = io.BytesIO()
+    wb.save(output)
+    output.seek(0)
+
+    safe_name = (cutplan.name or "cutplan").replace(" ", "_").replace(":", "")
+    filename = f"order_{order.order_number}_{safe_name}.xlsx"
     return StreamingResponse(
         output,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",

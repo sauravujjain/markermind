@@ -7,6 +7,7 @@ from .cutplans import router as cutplans_router
 from .exports import router as exports_router
 from .costs import router as costs_router
 from .rollplans import router as rollplans_router
+from .activity import router as activity_router
 
 __all__ = [
     "auth_router",
@@ -18,4 +19,5 @@ __all__ = [
     "exports_router",
     "costs_router",
     "rollplans_router",
+    "activity_router",
 ]

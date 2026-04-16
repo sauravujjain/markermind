@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useState, useRef } from 'react'
+import React, { useEffect, useState, useRef } from 'react'
 import { useRouter } from 'next/navigation'
 import Link from 'next/link'
 import { api, RefinementConfig, RefinementStatus, MarkerLayout } from '@/lib/api'
@@ -20,6 +20,8 @@ import {
   ChevronRight,
   Eye,
   EyeOff,
+  History,
+  Trash2,
 } from 'lucide-react'
 
 export default function CutplanPage() {
@@ -42,14 +44,14 @@ export default function CutplanPage() {
   const [cutplanConfig, setCutplanConfig] = useState({
     maxPlyHeight: 100,
     fabricCostPerYard: 3.0,
-    strategies: ['max_efficiency', 'balanced', 'min_markers'] as string[],  // default 3 selected
-    selectedColor: 'all' as string,
+    strategies: ['max_efficiency', 'balanced', 'min_bundle_cuts', 'endbit_optimized'] as string[],
+    selectedColor: '' as string,  // '' = auto-detect on mount
     minPliesByBundle: '6:50,5:40,4:30,3:10,2:1,1:1',
   })
   const [showAdvanced, setShowAdvanced] = useState(false)
   const [isGeneratingCutplan, setIsGeneratingCutplan] = useState(false)
   const [cutplanOptStatus, setCutplanOptStatus] = useState<{
-    status: string; progress: number; message: string; strategies_total: number; strategies_done: number
+    status: string; progress: number; message: string; strategies_total: number; strategies_done: number; phase?: string
   } | null>(null)
 
   // Per-cutplan refinement state
@@ -60,15 +62,27 @@ export default function CutplanPage() {
   // Excel export option
   const [includeMarkerImages, setIncludeMarkerImages] = useState(false)
 
-  // Per-cutplan expanded marker tracking for refined layouts
-  const [expandedMarkers, setExpandedMarkers] = useState<Record<string, Set<number>>>({})
+  // History toggle
+  const [showHistory, setShowHistory] = useState(false)
+
+  // Split active vs superseded cutplans
+  const activeCutplans = cutplans.filter(c => c.status !== 'superseded')
+  const supersededCutplans = cutplans.filter(c => c.status === 'superseded')
+
+  // (removed: expandedMarkers — refined layouts now shown in unified marker table)
+
+  // Per-cutplan expanded marker preview tracking (pre-refinement, GPU SVGs)
+  const [previewMarkers, setPreviewMarkers] = useState<Record<string, Set<number>>>({})
+
+  // Per-cutplan advanced refinement toggle
+  const [showRefAdvanced, setShowRefAdvanced] = useState<Record<string, boolean>>({})
 
   const cutplanPollingRef = useRef<NodeJS.Timeout | null>(null)
   const refinementPollingRefs = useRef<Record<string, NodeJS.Timeout>>({})
   const lastStrategiesDone = useRef(0)
 
   const getRefinementConfig = (cpId: string): RefinementConfig =>
-    refinementConfigs[cpId] || { piece_buffer_mm: 0.0, edge_buffer_mm: 0.0, time_limit_s: 120, rotation_mode: 'free', quadtree_depth: 5, early_termination: true, exploration_time_s: null, compression_time_s: null, seed_screening: false, use_cloud: false }
+    refinementConfigs[cpId] || { piece_buffer_mm: 0.0, edge_buffer_mm: 0.0, time_limit_s: 120, rotation_mode: 'free', quadtree_depth: 3, early_termination: false, exploration_time_s: null, compression_time_s: null, seed_screening: false, use_cloud: true }
 
   const setRefinementConfig = (cpId: string, config: RefinementConfig) =>
     setRefinementConfigs(prev => ({ ...prev, [cpId]: config }))
@@ -85,6 +99,16 @@ export default function CutplanPage() {
     }).catch(() => {})
   }, [])
 
+  // Auto-default to single color if order has only one color
+  useEffect(() => {
+    if (!order || cutplanConfig.selectedColor !== '') return
+    const colors = Array.from(new Set(order.order_lines.map(l => l.color_code)))
+    setCutplanConfig(prev => ({
+      ...prev,
+      selectedColor: colors.length === 1 ? colors[0] : colors[0],  // default to first (single) color
+    }))
+  }, [order])
+
   // Check if cutplan optimization is already running on load
   useEffect(() => {
     if (!orderId) return
@@ -100,7 +124,7 @@ export default function CutplanPage() {
   // Check if refinement is already running on load
   useEffect(() => {
     if (!orderId) return
-    const eligiblePlans = cutplans.filter(c => c.status === 'approved' || c.status === 'refining' || c.status === 'refined')
+    const eligiblePlans = activeCutplans.filter(c => c.status === 'approved' || c.status === 'refining' || c.status === 'refined')
     for (const plan of eligiblePlans) {
       if (plan.status === 'refining' || plan.status === 'refined') {
         api.getRefinementStatus(plan.id).then(status => {
@@ -112,14 +136,14 @@ export default function CutplanPage() {
         }).catch(() => {})
       }
     }
-  }, [orderId, cutplans.length])
+  }, [orderId, activeCutplans.length])
 
   // Auto-show config panel if nesting results exist but no cutplans
   useEffect(() => {
-    if (hasNestingResults && cutplans.length === 0 && !isGeneratingCutplan) {
+    if (hasNestingResults && activeCutplans.length === 0 && !isGeneratingCutplan) {
       setShowCutplanConfig(true)
     }
-  }, [hasNestingResults, cutplans.length, isGeneratingCutplan])
+  }, [hasNestingResults, activeCutplans.length, isGeneratingCutplan])
 
   // Cleanup polling on unmount
   useEffect(() => {
@@ -139,7 +163,8 @@ export default function CutplanPage() {
         setCutplanOptStatus(status)
 
         // Reload cutplans when a new strategy completes (incremental display)
-        if (status.strategies_done > lastStrategiesDone.current) {
+        // Also reload during cost estimation phase to pick up per-cutplan updates
+        if (status.strategies_done > lastStrategiesDone.current || status.phase === 'cpu_nesting') {
           lastStrategiesDone.current = status.strategies_done
           loadData()
         }
@@ -162,7 +187,8 @@ export default function CutplanPage() {
 
   const handleOptimizeCutplan = async () => {
     setIsGeneratingCutplan(true)
-    setCutplanOptStatus({ status: 'running', progress: 0, message: 'Starting...', strategies_total: cutplanConfig.strategies.length, strategies_done: 0 })
+    const totalStrategies = cutplanConfig.strategies.length
+    setCutplanOptStatus({ status: 'running', progress: 0, message: 'Starting...', strategies_total: totalStrategies, strategies_done: 0 })
     try {
       await api.optimizeCutplan({
         order_id: orderId,
@@ -171,6 +197,7 @@ export default function CutplanPage() {
         fabric_cost_per_yard: cutplanConfig.fabricCostPerYard,
         max_ply_height: cutplanConfig.maxPlyHeight,
         min_plies_by_bundle: cutplanConfig.minPliesByBundle,
+        cost_metric: 'length',
         ...(cutplanConfig.selectedColor !== 'all' ? { color_code: cutplanConfig.selectedColor } : {}),
       })
       setShowCutplanConfig(false)
@@ -357,6 +384,7 @@ export default function CutplanPage() {
                 <div>
                   <label className="text-sm font-medium mb-2 block">Color</label>
                   <div className="flex flex-wrap gap-2">
+                    {Array.from(new Set(order.order_lines.map(l => l.color_code))).length > 1 && (
                     <button
                       onClick={() => setCutplanConfig({ ...cutplanConfig, selectedColor: 'all' })}
                       className={`px-3 py-2 rounded-lg border text-sm transition-all ${
@@ -365,11 +393,12 @@ export default function CutplanPage() {
                           : 'bg-muted/30 hover:bg-muted border-border'
                       }`}
                     >
-                      <div className="font-medium">All Colors</div>
+                      <div className="font-medium">Multicolor (Rainbow)</div>
                       <div className={`text-xs ${cutplanConfig.selectedColor === 'all' ? 'text-primary-foreground/80' : 'text-muted-foreground'}`}>
                         Aggregate demand across all colors
                       </div>
                     </button>
+                    )}
                     {Array.from(new Set(order.order_lines.map(l => l.color_code))).map((color) => {
                       const colorLines = order.order_lines.filter(l => l.color_code === color)
                       const firstLine = colorLines[0]
@@ -444,9 +473,8 @@ export default function CutplanPage() {
                   {[
                     { id: 'max_efficiency', label: 'Max Efficiency', desc: 'Best fabric utilization' },
                     { id: 'balanced', label: 'Balanced', desc: 'Efficiency vs marker count trade-off' },
-                    { id: 'min_markers', label: 'Min Markers', desc: 'Fewest unique markers' },
-                    { id: 'min_end_cuts', label: 'Min End Cuts', desc: '95% large markers + 5% small fills' },
                     { id: 'min_bundle_cuts', label: 'Min Cutting Work', desc: 'Least cutting operations' },
+                    { id: 'endbit_optimized', label: 'EndBit Optimized', desc: 'Long markers + end-bit recovery' },
                   ].map((strategy) => {
                     const isSelected = cutplanConfig.strategies.includes(strategy.id)
                     return (
@@ -560,12 +588,18 @@ export default function CutplanPage() {
                 <Loader2 className="h-5 w-5 text-white animate-spin" />
               </div>
               <div className="flex-1">
-                <CardTitle>Cutplan Optimization Running</CardTitle>
+                <CardTitle>{cutplanOptStatus.phase === 'cpu_nesting' ? 'Preparing Cost Estimates' : 'Cutplan Optimization Running'}</CardTitle>
                 <CardDescription>{cutplanOptStatus.message}</CardDescription>
               </div>
               <div className="text-right text-sm">
-                <span className="font-medium">{cutplanOptStatus.strategies_done}/{cutplanOptStatus.strategies_total}</span>
-                <span className="text-muted-foreground"> strategies</span>
+                {cutplanOptStatus.phase === 'cpu_nesting' ? (
+                  <span className="text-muted-foreground">Preparing marker previews</span>
+                ) : (
+                  <>
+                    <span className="font-medium">{cutplanOptStatus.strategies_done}/{cutplanOptStatus.strategies_total}</span>
+                    <span className="text-muted-foreground"> strategies</span>
+                  </>
+                )}
               </div>
             </div>
           </CardHeader>
@@ -595,7 +629,7 @@ export default function CutplanPage() {
       )}
 
       {/* Cutplan Options */}
-      {cutplans.length > 0 && (
+      {activeCutplans.length > 0 && (
         <Card data-cutplan-options>
           <CardHeader>
             <div className="flex items-center justify-between">
@@ -603,7 +637,7 @@ export default function CutplanPage() {
                 <CardTitle>Cutplan Options</CardTitle>
                 <CardDescription>Compare and select the best cutplan for production</CardDescription>
               </div>
-              {cutplans.some(c => c.status === 'refined') && (
+              {activeCutplans.some(c => c.status === 'refined') && (
                 <div className="flex items-center gap-3">
                   <label className="flex items-center gap-1.5 text-xs text-muted-foreground cursor-pointer select-none">
                     <input
@@ -639,31 +673,53 @@ export default function CutplanPage() {
             </div>
           </CardHeader>
           <CardContent className="space-y-6">
-            {cutplans.map((plan, planIdx) => {
+            {activeCutplans.map((plan, planIdx) => {
               const effPercent = (plan.efficiency || 0) * 100
+              const isCpuNesting = isGeneratingCutplan && cutplanOptStatus?.phase === 'cpu_nesting'
+              const totalBundleCuts = plan.markers?.reduce((sum: number, m: { ratio_str: string; cuts: number }) => {
+                const bundles = m.ratio_str.split('-').reduce((a: number, b: string) => a + (parseInt(b) || 0), 0)
+                return sum + bundles * m.cuts
+              }, 0) || 0
               return (
-                <div key={plan.id} className={`border rounded-lg overflow-hidden ${plan.status === 'approved' ? 'border-green-500 bg-green-50/50' : ''}`}>
+                <div key={plan.id} className={`border rounded-lg overflow-hidden ${plan.status === 'approved' ? 'border-amber-400 ring-1 ring-amber-200 bg-amber-50/40' : ''} ${plan.status === 'refined' ? 'border-amber-500 ring-2 ring-amber-300/60 bg-gradient-to-br from-amber-50/60 to-yellow-50/40' : ''}`}>
                   {/* Plan Header */}
-                  <div className="bg-muted/50 px-4 py-3 flex items-center justify-between">
+                  <div className={`px-4 py-3 flex items-center justify-between ${plan.status === 'refined' ? 'bg-gradient-to-r from-amber-100/70 to-yellow-50/50' : plan.status === 'approved' ? 'bg-amber-50/60' : 'bg-muted/50'}`}>
                     <div>
                       <h3 className="font-semibold">{plan.name || `Option ${planIdx + 1}`}</h3>
                       <div className="text-xs text-muted-foreground flex gap-3 mt-1">
-                        <span className={`font-medium ${effPercent >= 80 ? 'text-green-600' : effPercent >= 75 ? 'text-amber-600' : 'text-red-600'}`}>
-                          {effPercent.toFixed(2)}% Efficiency
-                        </span>
+                        {isCpuNesting ? (
+                          <span className="flex items-center gap-1 text-purple-600 font-medium">
+                            <Loader2 className="h-3 w-3 animate-spin" />
+                            Preparing...
+                          </span>
+                        ) : (
+                          <span className={`font-medium ${effPercent >= 80 ? 'text-green-600' : effPercent >= 75 ? 'text-amber-600' : 'text-red-600'}`}>
+                            {effPercent.toFixed(2)}% Efficiency
+                          </span>
+                        )}
                         <span>{plan.unique_markers} markers</span>
                         <span>{plan.total_plies} plies</span>
                         <span>{plan.total_cuts} cuts</span>
+                        <span>{totalBundleCuts} bundle-cuts</span>
                       </div>
                     </div>
                     <div className="flex items-center gap-3">
-                      <div className="text-right">
-                        <div className="text-lg font-bold">${plan.total_cost?.toFixed(2)}</div>
-                        <div className="text-xs text-muted-foreground">Total Cost</div>
-                      </div>
+                      {isCpuNesting ? (
+                        <div className="text-right">
+                          <div className="text-sm text-purple-600 flex items-center gap-1.5">
+                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                            Preparing costs...
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="text-right">
+                          <div className="text-lg font-bold">${plan.total_cost?.toFixed(2)}</div>
+                          <div className="text-xs text-muted-foreground">Total Cost</div>
+                        </div>
+                      )}
                       {plan.status === 'refined' ? (
-                        <Button variant="outline" disabled className="bg-green-100">
-                          <CheckCircle2 className="mr-2 h-4 w-4 text-green-600" />
+                        <Button variant="outline" disabled className="bg-amber-100 border-amber-400 text-amber-800">
+                          <CheckCircle2 className="mr-2 h-4 w-4 text-amber-600" />
                           Refined
                         </Button>
                       ) : plan.status === 'refining' ? (
@@ -672,8 +728,8 @@ export default function CutplanPage() {
                           Refining...
                         </Button>
                       ) : plan.status === 'approved' ? (
-                        <Button variant="outline" disabled className="bg-green-100">
-                          <CheckCircle2 className="mr-2 h-4 w-4 text-green-600" />
+                        <Button variant="outline" disabled className="bg-amber-50 border-amber-300 text-amber-700">
+                          <CheckCircle2 className="mr-2 h-4 w-4 text-amber-500" />
                           Approved
                         </Button>
                       ) : (
@@ -690,10 +746,105 @@ export default function CutplanPage() {
                   </div>
 
                   {/* Marker Table */}
-                  {plan.markers && plan.markers.length > 0 && (
+                  {plan.markers && plan.markers.length > 0 && (() => {
+                    const cpId = plan.id
+                    const previews = previewMarkers[cpId] || new Set<number>()
+                    const allPreviewed = previews.size === plan.markers.length && plan.markers.length > 0
+                    const completedJob = nestingJobs.find(j => j.status === 'completed')
+                    const hasSvgs = plan.markers.some((m: any) => m.svg_preview)
+
+                    // Build refined overlay map from in-progress refinement status
+                    const refStatus = refinementStatuses[cpId]
+                    const isRefiningThis = refiningCutplans[cpId] || false
+                    const refinedMap = new Map<string, MarkerLayout>()
+                    if (refStatus?.layouts) {
+                      for (const l of refStatus.layouts) {
+                        refinedMap.set(l.cutplan_marker_id, l)
+                      }
+                    }
+                    const allMarkersRefined = plan.status === 'refined' || (refinedMap.size === plan.markers.length && refinedMap.size > 0)
+
+                    const togglePreview = (idx: number) => {
+                      setPreviewMarkers(prev => {
+                        const current = new Set(prev[cpId] || [])
+                        if (current.has(idx)) current.delete(idx)
+                        else current.add(idx)
+                        return { ...prev, [cpId]: current }
+                      })
+                    }
+
+                    const toggleAllPreviews = () => {
+                      setPreviewMarkers(prev => {
+                        if (allPreviewed) return { ...prev, [cpId]: new Set<number>() }
+                        return { ...prev, [cpId]: new Set(plan.markers.map((_: any, i: number) => i)) }
+                      })
+                    }
+
+                    return (
                     <div className="overflow-x-auto">
+                      {(hasSvgs || allMarkersRefined) && (
+                        <div className="flex items-center justify-between px-3 py-1.5 border-b bg-muted/10">
+                          <div className="flex items-center gap-2">
+                            {allMarkersRefined && !isRefiningThis && refStatus?.status === 'completed' && (
+                              <>
+                                <Button size="sm" className="h-7 text-xs gap-1.5" onClick={() => handleDownloadMarkers(cpId)}>
+                                  <Download className="h-3.5 w-3.5" />
+                                  Download DXF
+                                </Button>
+                                <Button variant="outline" size="sm" className="h-7 text-xs gap-1.5" onClick={async () => {
+                                  try {
+                                    const blob = await api.downloadCutplanExcel(cpId, includeMarkerImages)
+                                    const url = URL.createObjectURL(blob)
+                                    const a = document.createElement('a')
+                                    a.href = url
+                                    a.download = `cutplan_${plan.name?.replace(/\s+/g, '_') || cpId}.xlsx`
+                                    a.click()
+                                    URL.revokeObjectURL(url)
+                                  } catch (e) {
+                                    toast({ title: 'Export failed', description: e instanceof Error ? e.message : 'Please try again', variant: 'destructive' })
+                                  }
+                                }}>
+                                  <Download className="h-3.5 w-3.5" />
+                                  Export Excel
+                                </Button>
+                                <label className="flex items-center gap-1 text-[10px] text-muted-foreground cursor-pointer select-none">
+                                  <input
+                                    type="checkbox"
+                                    checked={includeMarkerImages}
+                                    onChange={(e) => setIncludeMarkerImages(e.target.checked)}
+                                    className="rounded border-gray-300 h-3 w-3"
+                                  />
+                                  With markers
+                                </label>
+                                <Button variant="outline" size="sm" className="h-7 text-xs gap-1.5" onClick={() => {
+                                  setRefinementStatuses(prev => {
+                                    const next = { ...prev }
+                                    delete next[cpId]
+                                    return next
+                                  })
+                                }}>
+                                  Re-run Refinement
+                                </Button>
+                              </>
+                            )}
+                          </div>
+                          {hasSvgs && (
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              className="h-7 text-xs gap-1.5"
+                              onClick={toggleAllPreviews}
+                            >
+                              {allPreviewed
+                                ? <><EyeOff className="h-3.5 w-3.5" /> Hide All Markers</>
+                                : <><Eye className="h-3.5 w-3.5" /> Show All Markers</>
+                              }
+                            </Button>
+                          )}
+                        </div>
+                      )}
                       <table className="w-full text-sm">
-                        <thead className="bg-muted/30">
+                        <thead className={`bg-muted/30 ${allMarkersRefined ? 'border-l-4 border-l-amber-400' : ''}`}>
                           <tr className="border-b">
                             <th className="text-left py-2 px-3 font-medium">Marker</th>
                             {sizes.map(size => (
@@ -701,6 +852,8 @@ export default function CutplanPage() {
                             ))}
                             <th className="text-center py-2 px-3 font-medium">Bundles</th>
                             <th className="text-center py-2 px-3 font-medium">Width</th>
+                            <th className="text-center py-2 px-3 font-medium">Length</th>
+                            <th className="text-center py-2 px-3 font-medium">Eff%</th>
                             <th className="text-center py-2 px-3 font-medium">Plies</th>
                             <th className="text-center py-2 px-3 font-medium">Cuts</th>
                           </tr>
@@ -709,12 +862,33 @@ export default function CutplanPage() {
                           {[...plan.markers].sort((a, b) => (b.length_yards || 0) - (a.length_yards || 0)).map((marker, idx) => {
                             const ratioValues = marker.ratio_str.split('-').map(v => parseInt(v) || 0)
                             const bundles = ratioValues.reduce((a, b) => a + b, 0)
-                            const completedJob = nestingJobs.find(j => j.status === 'completed')
                             const markerResult = completedJob?.results?.find(r => r.ratio_str === marker.ratio_str)
                             const markerWidth = markerResult?.fabric_width_inches || completedJob?.fabric_width_inches
+
+                            // Refined overlay: use in-progress layout if available, else fall back to marker data
+                            const refinedLayout = refinedMap.get(marker.id)
+                            const isRefined = plan.status === 'refined' || !!refinedLayout || !!marker.computation_time_s
+                            const displayEff = refinedLayout ? refinedLayout.utilization : marker.efficiency
+                            const displayLength = refinedLayout ? refinedLayout.length_yards : marker.length_yards
+                            const displaySvg = refinedLayout ? refinedLayout.svg_preview : marker.svg_preview
+                            const displayTime = refinedLayout ? refinedLayout.computation_time_s : marker.computation_time_s
+
+                            const svgPreview = displaySvg
+                            const isPreviewOpen = previews.has(idx)
                             return (
-                              <tr key={marker.id || idx} className="border-b border-border/50 hover:bg-muted/20">
-                                <td className="py-2 px-3 font-medium">{marker.marker_label || `M${idx + 1}`}</td>
+                              <React.Fragment key={marker.id || idx}>
+                              <tr
+                                className={`border-b border-border/50 hover:bg-muted/20 ${svgPreview ? 'cursor-pointer' : ''} ${isPreviewOpen ? 'bg-muted/30' : ''} ${isRefined && !isPreviewOpen ? 'bg-amber-50/50 border-l-4 border-l-amber-400' : ''}`}
+                                onClick={() => svgPreview && togglePreview(idx)}
+                              >
+                                <td className="py-2 px-3 font-medium flex items-center gap-1.5">
+                                  {svgPreview && (
+                                    isPreviewOpen
+                                      ? <ChevronDown className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+                                      : <ChevronRight className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+                                  )}
+                                  {marker.marker_label || `M${idx + 1}`}
+                                </td>
                                 {sizes.map((size, sizeIdx) => (
                                   <td key={size} className="text-center py-2 px-2 tabular-nums">
                                     {ratioValues[sizeIdx] > 0 ? ratioValues[sizeIdx] : <span className="text-muted-foreground/30">-</span>}
@@ -728,9 +902,35 @@ export default function CutplanPage() {
                                 <td className="text-center py-2 px-3 text-xs text-muted-foreground">
                                   {markerWidth ? `${markerWidth}"` : '-'}
                                 </td>
+                                <td className="text-center py-2 px-3 tabular-nums text-xs">
+                                  {isCpuNesting
+                                    ? <span className="text-purple-500 text-[10px]">...</span>
+                                    : displayLength ? `${displayLength.toFixed(2)} yd` : <span className="text-muted-foreground/40">-</span>}
+                                </td>
+                                <td className="text-center py-2 px-3 tabular-nums text-xs">
+                                  {isCpuNesting
+                                    ? <span className="text-purple-500 text-[10px]">...</span>
+                                    : displayEff ? `${(displayEff * 100).toFixed(1)}%` : <span className="text-muted-foreground/40">-</span>}
+                                </td>
                                 <td className="text-center py-2 px-3 tabular-nums font-medium">{marker.total_plies}</td>
                                 <td className="text-center py-2 px-3 tabular-nums">{marker.cuts}</td>
                               </tr>
+                              {isPreviewOpen && svgPreview && (
+                                <tr className="border-b border-border/50 bg-muted/10">
+                                  <td colSpan={sizes.length + 7} className="p-3">
+                                    <div
+                                      className="w-full [&>svg]:w-full [&>svg]:h-auto [&>svg]:max-h-[180px] rounded border bg-white p-2"
+                                      dangerouslySetInnerHTML={{ __html: svgPreview }}
+                                    />
+                                    {displayTime != null && (
+                                      <div className="text-[10px] text-muted-foreground mt-1 text-right">
+                                        Refined in {displayTime.toFixed(1)}s
+                                      </div>
+                                    )}
+                                  </td>
+                                </tr>
+                              )}
+                              </React.Fragment>
                             )
                           })}
                         </tbody>
@@ -749,16 +949,34 @@ export default function CutplanPage() {
                             })}
                             <td className="text-center py-2 px-3">-</td>
                             <td className="text-center py-2 px-3">-</td>
+                            <td className="text-center py-2 px-3 tabular-nums text-xs">
+                              {isCpuNesting
+                                ? <span className="text-purple-500 text-[10px]">...</span>
+                                : plan.total_yards ? `${plan.total_yards.toFixed(1)} yd` : '-'}
+                            </td>
+                            <td className="text-center py-2 px-3 tabular-nums text-xs">
+                              {isCpuNesting
+                                ? <span className="text-purple-500 text-[10px]">...</span>
+                                : plan.efficiency ? `${(plan.efficiency * 100).toFixed(1)}%` : '-'}
+                            </td>
                             <td className="text-center py-2 px-3 tabular-nums">{plan.total_plies}</td>
                             <td className="text-center py-2 px-3 tabular-nums">{plan.total_cuts}</td>
                           </tr>
                         </tfoot>
                       </table>
                     </div>
-                  )}
+                    )
+                  })()}
 
                   {/* Cost Breakdown */}
                   <div className="px-4 py-3 bg-muted/20 border-t">
+                    {isCpuNesting ? (
+                      <div className="flex items-center gap-2 py-2 text-sm text-purple-600">
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                        Preparing cost calculations...
+                      </div>
+                    ) : (
+                    <>
                     <div className="flex items-center justify-between mb-3">
                       <div className="text-sm font-medium">Cost Breakdown</div>
                       <div className="text-xs text-muted-foreground">
@@ -787,7 +1005,52 @@ export default function CutplanPage() {
                         <div className="font-bold text-primary">${plan.total_cost?.toFixed(2) || '0.00'}</div>
                       </div>
                     </div>
+                    {/* Floor waste estimate + Total incl. waste */}
+                    {(plan as any).solver_config?.mc_waste_pct != null && (() => {
+                      const sc = (plan as any).solver_config
+                      const wasteYards = sc.mc_waste_yards || 0
+                      const fabricCost = sc.fabric_cost_per_yard || 0
+                      const totalInclWaste = (plan.total_cost || 0) + wasteYards * fabricCost
+                      return (
+                        <div className="mt-3 flex items-center gap-3 flex-wrap">
+                          <div className="bg-emerald-50 rounded-lg px-3 py-1.5 border border-emerald-200 inline-flex items-center gap-2">
+                            <span className="text-emerald-700 text-xs">Est. Floor Waste</span>
+                            <span className="font-semibold text-emerald-800">{sc.mc_waste_pct.toFixed(1)}%</span>
+                            {wasteYards > 0 && <span className="text-emerald-600 text-xs">({wasteYards.toFixed(1)} yd)</span>}
+                          </div>
+                          {wasteYards > 0 && fabricCost > 0 && (
+                            <div className="bg-orange-50 rounded-lg px-3 py-1.5 border border-orange-200 inline-flex items-center gap-2">
+                              <span className="text-orange-700 text-xs">Total Cost (Incl. Est. Waste)</span>
+                              <span className="font-bold text-orange-800">${totalInclWaste.toFixed(2)}</span>
+                            </div>
+                          )}
+                        </div>
+                      )
+                    })()}
+                    </>
+                    )}
                   </div>
+
+                  {/* Approve + Refine prompt */}
+                  {plan.status === 'ready' && !isCpuNesting && (
+                    <div className="px-4 py-2.5 bg-indigo-50/50 border-t border-indigo-200 flex items-center justify-between">
+                      <div className="flex items-center gap-2 text-xs text-indigo-700">
+                        <Layers className="h-3.5 w-3.5" />
+                        Approve this cutplan to unlock Marker Refinement for optimized layouts
+                      </div>
+                      <Button
+                        size="sm"
+                        className="h-7 text-xs"
+                        onClick={async () => {
+                          await api.approveCutplan(plan.id)
+                          loadData()
+                        }}
+                      >
+                        <CheckCircle2 className="mr-1.5 h-3.5 w-3.5" />
+                        Approve
+                      </Button>
+                    </div>
+                  )}
 
                   {/* Inline Refinement Section */}
                   {(plan.status === 'approved' || plan.status === 'refining' || plan.status === 'refined') && (() => {
@@ -801,53 +1064,18 @@ export default function CutplanPage() {
                       <div className="px-4 py-3 bg-indigo-50/50 border-t border-indigo-200">
                         <div className="flex items-center gap-2 mb-3">
                           <Layers className="h-4 w-4 text-indigo-600" />
-                          <span className="text-sm font-semibold text-indigo-800">CPU Refinement</span>
+                          <span className="text-sm font-semibold text-indigo-800">Marker Refinement</span>
                         </div>
 
                         {/* Config panel */}
                         {!isRefiningThis && !hasLayouts && (() => {
-                          const timeSplitMode = (config.exploration_time_s != null && config.compression_time_s != null) ? 'custom' : 'auto'
+                          const isRefAdvanced = showRefAdvanced[cpId] || false
+                          const toggleRefAdvanced = () => setShowRefAdvanced(prev => ({ ...prev, [cpId]: !prev[cpId] }))
                           const totalTime = config.time_limit_s || 120
-                          const explorePct = timeSplitMode === 'custom' && config.exploration_time_s != null && config.compression_time_s != null
-                            ? Math.round(config.exploration_time_s / (config.exploration_time_s + config.compression_time_s) * 100)
-                            : 80
-
-                          const setTimeSplit = (mode: 'auto' | 'custom') => {
-                            if (mode === 'auto') {
-                              setRefinementConfig(cpId, { ...config, exploration_time_s: null, compression_time_s: null })
-                            } else {
-                              const expT = Math.round(totalTime * 0.8)
-                              setRefinementConfig(cpId, { ...config, exploration_time_s: expT, compression_time_s: totalTime - expT })
-                            }
-                          }
-
-                          const setExplorePctVal = (pct: number) => {
-                            pct = Math.max(1, Math.min(99, pct))
-                            setRefinementConfig(cpId, {
-                              ...config,
-                              exploration_time_s: Math.round(totalTime * pct / 100),
-                              compression_time_s: Math.round(totalTime * (100 - pct) / 100),
-                            })
-                          }
-
-                          // Build param summary tag
-                          const paramParts: string[] = [`qt${config.quadtree_depth}`]
-                          if (timeSplitMode === 'custom') {
-                            paramParts.push(`${explorePct}/${100 - explorePct}`)
-                          } else {
-                            paramParts.push(`${totalTime}s`)
-                          }
-                          if (!config.early_termination) paramParts.push('no-es')
-                          if (config.piece_buffer_mm > 0) paramParts.push(`pb${config.piece_buffer_mm}`)
-                          if (config.edge_buffer_mm > 0) paramParts.push(`eb${config.edge_buffer_mm}`)
-                          if (config.rotation_mode === 'nap_one_way') paramParts.push('nap')
-                          if (config.seed_screening) paramParts.push('seed-screen')
-                          if (config.use_cloud) paramParts.push('surface')
-                          const paramSummary = paramParts.join(' ')
 
                           return (
                           <div className="space-y-3 p-3 bg-white rounded-lg border">
-                            {/* Row 1: Time, Early Stop, Quadtree */}
+                            {/* Main settings: Time, Orientation, Piece Buffer */}
                             <div className="grid grid-cols-3 gap-3">
                               <div>
                                 <label className="text-xs font-medium text-muted-foreground block mb-1">Max Time/Marker (sec)</label>
@@ -856,34 +1084,11 @@ export default function CutplanPage() {
                                   value={config.time_limit_s}
                                   onChange={(e) => {
                                     const v = e.target.value
-                                    const newTime = v === '' ? '' as any : parseFloat(v)
-                                    // If custom split, update explore/compress proportionally
-                                    if (timeSplitMode === 'custom' && typeof newTime === 'number') {
-                                      setRefinementConfig(cpId, {
-                                        ...config,
-                                        time_limit_s: newTime,
-                                        exploration_time_s: Math.round(newTime * explorePct / 100),
-                                        compression_time_s: Math.round(newTime * (100 - explorePct) / 100),
-                                      })
-                                    } else {
-                                      setRefinementConfig(cpId, { ...config, time_limit_s: newTime })
-                                    }
+                                    setRefinementConfig(cpId, { ...config, time_limit_s: v === '' ? '' as any : parseFloat(v) })
                                   }}
                                   className="w-full px-2 py-1.5 border rounded text-sm"
                                   min={10} max={600} step={10}
                                 />
-                              </div>
-                              <div>
-                                <label className="text-xs font-medium text-muted-foreground block mb-1">Quadtree Depth</label>
-                                <div className="flex gap-1 mt-0.5">
-                                  {[2, 3, 4, 5, 6, 7, 8].map(d => (
-                                    <button key={d} onClick={() => setRefinementConfig(cpId, { ...config, quadtree_depth: d })}
-                                      className={`px-2 py-1 rounded text-xs font-medium border transition-colors ${
-                                        config.quadtree_depth === d ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-foreground border-border hover:border-indigo-400'
-                                      }`}
-                                    >{d}</button>
-                                  ))}
-                                </div>
                               </div>
                               <div>
                                 <label className="text-xs font-medium text-muted-foreground block mb-1">Orientation</label>
@@ -898,10 +1103,6 @@ export default function CutplanPage() {
                                     }`}>Nap (0 only)</button>
                                 </div>
                               </div>
-                            </div>
-
-                            {/* Row 2: Piece Buffer, Edge Buffer, Early Stop */}
-                            <div className="grid grid-cols-3 gap-3">
                               <div>
                                 <label className="text-xs font-medium text-muted-foreground block mb-1">Piece Buffer (mm)</label>
                                 <input
@@ -912,96 +1113,82 @@ export default function CutplanPage() {
                                   min={0} max={10} step={0.5}
                                 />
                               </div>
-                              <div>
-                                <label className="text-xs font-medium text-muted-foreground block mb-1">Edge Buffer (mm)</label>
-                                <input
-                                  type="number"
-                                  value={config.edge_buffer_mm}
-                                  onChange={(e) => { const v = e.target.value; setRefinementConfig(cpId, { ...config, edge_buffer_mm: v === '' ? '' as any : parseFloat(v) }) }}
-                                  className="w-full px-2 py-1.5 border rounded text-sm"
-                                  min={0} max={20} step={0.5}
-                                />
-                              </div>
-                              <div className="flex items-center pt-4">
-                                <label className="flex items-center gap-2 text-xs font-medium text-muted-foreground cursor-pointer">
-                                  <input
-                                    type="checkbox"
-                                    checked={config.early_termination}
-                                    onChange={(e) => setRefinementConfig(cpId, { ...config, early_termination: e.target.checked })}
-                                    className="rounded"
-                                  />
-                                  Early stop (auto)
-                                </label>
-                              </div>
                             </div>
 
-                            {/* Row 3: Time Split */}
-                            <div className="flex items-center gap-3">
-                              <label className="text-xs font-medium text-muted-foreground w-28 shrink-0">Time Split</label>
-                              <div className="flex gap-1">
-                                <button onClick={() => setTimeSplit('auto')}
-                                  className={`px-2 py-1 rounded text-xs font-medium border transition-colors ${
-                                    timeSplitMode === 'auto' ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-foreground border-border hover:border-indigo-400'
-                                  }`}>Auto</button>
-                                <button onClick={() => setTimeSplit('custom')}
-                                  className={`px-2 py-1 rounded text-xs font-medium border transition-colors ${
-                                    timeSplitMode === 'custom' ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-foreground border-border hover:border-indigo-400'
-                                  }`}>Custom</button>
-                              </div>
-                              {timeSplitMode === 'auto' && (
-                                <span className="text-[10px] text-muted-foreground">solver decides (80/20 default)</span>
-                              )}
-                            </div>
-                            {timeSplitMode === 'custom' && (
-                              <div className="flex items-center gap-3 ml-[7.5rem]">
-                                <div className="flex items-center gap-1">
-                                  <span className="text-xs text-muted-foreground">Explore</span>
-                                  <input type="number" value={explorePct}
-                                    onChange={(e) => { const v = e.target.value; setExplorePctVal(v === '' ? 80 : Number(v)) }}
-                                    className="w-14 px-2 py-1 border rounded text-sm" min={1} max={99} step={5}
-                                  />
-                                  <span className="text-xs text-muted-foreground">%</span>
+                            {/* Advanced toggle */}
+                            <button
+                              onClick={toggleRefAdvanced}
+                              className="text-[10px] text-muted-foreground hover:text-foreground flex items-center gap-1"
+                            >
+                              <span className={`transition-transform ${isRefAdvanced ? 'rotate-90' : ''}`}>▶</span>
+                              Advanced
+                            </button>
+                            {isRefAdvanced && (
+                              <div className="space-y-3 p-2.5 rounded border bg-muted/10">
+                                <div className="grid grid-cols-3 gap-3">
+                                  <div>
+                                    <label className="text-xs font-medium text-muted-foreground block mb-1">Quadtree Depth</label>
+                                    <div className="flex gap-1">
+                                      {[2, 3, 4, 5, 6, 7, 8].map(d => (
+                                        <button key={d} onClick={() => setRefinementConfig(cpId, { ...config, quadtree_depth: d })}
+                                          className={`px-2 py-1 rounded text-xs font-medium border transition-colors ${
+                                            config.quadtree_depth === d ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-foreground border-border hover:border-indigo-400'
+                                          }`}
+                                        >{d}</button>
+                                      ))}
+                                    </div>
+                                  </div>
+                                  <div>
+                                    <label className="text-xs font-medium text-muted-foreground block mb-1">Edge Buffer (mm)</label>
+                                    <input
+                                      type="number"
+                                      value={config.edge_buffer_mm}
+                                      onChange={(e) => { const v = e.target.value; setRefinementConfig(cpId, { ...config, edge_buffer_mm: v === '' ? '' as any : parseFloat(v) }) }}
+                                      className="w-full px-2 py-1.5 border rounded text-sm"
+                                      min={0} max={20} step={0.5}
+                                    />
+                                  </div>
+                                  <div className="flex items-center pt-4">
+                                    <label className="flex items-center gap-2 text-xs font-medium text-muted-foreground cursor-pointer">
+                                      <input type="checkbox" checked={config.early_termination}
+                                        onChange={(e) => setRefinementConfig(cpId, { ...config, early_termination: e.target.checked })}
+                                        className="rounded" />
+                                      Early stop
+                                    </label>
+                                  </div>
                                 </div>
-                                <span className="text-[10px] text-muted-foreground font-mono">
-                                  {config.exploration_time_s}s explore / {config.compression_time_s}s compress
-                                </span>
+                                <div className="grid grid-cols-2 gap-3">
+                                  <div className="flex items-center gap-2">
+                                    <label className="text-xs font-medium text-muted-foreground shrink-0">Seed Selection</label>
+                                    <label className="flex items-center gap-1.5 text-xs text-muted-foreground cursor-pointer">
+                                      <input type="checkbox" checked={config.seed_screening || false}
+                                        onChange={(e) => setRefinementConfig(cpId, { ...config, seed_screening: e.target.checked })}
+                                        className="rounded" />
+                                      Screen 6 seeds (+60s/marker)
+                                    </label>
+                                  </div>
+                                  <div className="flex items-center gap-2">
+                                    <label className="text-xs font-medium text-muted-foreground shrink-0">Compute</label>
+                                    <label className="flex items-center gap-1.5 text-xs text-muted-foreground cursor-pointer">
+                                      <input type="checkbox" checked={config.use_cloud || false}
+                                        onChange={(e) => setRefinementConfig(cpId, { ...config, use_cloud: e.target.checked })}
+                                        className="rounded" />
+                                      Surface / Cloud
+                                    </label>
+                                  </div>
+                                </div>
                               </div>
                             )}
 
-                            {/* Row 4: Seed Screening */}
-                            <div className="flex items-center gap-3">
-                              <label className="text-xs font-medium text-muted-foreground w-28 shrink-0">Seed Selection</label>
-                              <label className="flex items-center gap-1.5 text-xs text-muted-foreground cursor-pointer">
-                                <input type="checkbox" checked={config.seed_screening || false}
-                                  onChange={(e) => setRefinementConfig(cpId, { ...config, seed_screening: e.target.checked })}
-                                  className="rounded" />
-                                Screen 6 seeds (adds ~60s per marker)
-                              </label>
-                            </div>
-
-                            {/* Row 5: Surface CPU */}
-                            <div className="flex items-center gap-3">
-                              <label className="text-xs font-medium text-muted-foreground w-28 shrink-0">Compute</label>
-                              <label className="flex items-center gap-1.5 text-xs text-muted-foreground cursor-pointer">
-                                <input type="checkbox" checked={config.use_cloud || false}
-                                  onChange={(e) => setRefinementConfig(cpId, { ...config, use_cloud: e.target.checked })}
-                                  className="rounded" />
-                                Surface CPU (remote)
-                              </label>
-                            </div>
-
                             {/* Summary + Start button */}
                             <div className="flex items-center justify-between pt-1 border-t border-border/50">
-                              <div>
-                                <p className="text-xs text-muted-foreground">
-                                  {plan.markers.length} markers &times; {config.time_limit_s}s = {plan.markers.length * config.time_limit_s}s max
-                                  {config.seed_screening ? ' (+seed screening)' : ''}
-                                </p>
-                                <p className="text-[10px] font-mono text-indigo-500 mt-0.5">{paramSummary}</p>
-                              </div>
+                              <p className="text-xs text-muted-foreground">
+                                {plan.markers.length} markers &times; {totalTime}s = {plan.markers.length * totalTime}s max
+                                {config.seed_screening ? ' (+seed screening)' : ''}
+                              </p>
                               <Button size="sm" onClick={() => handleStartRefinement(cpId)}>
                                 <Play className="mr-2 h-4 w-4" />
-                                Start CPU Refine
+                                Start Refinement
                               </Button>
                             </div>
                           </div>
@@ -1033,139 +1220,13 @@ export default function CutplanPage() {
                           </div>
                         )}
 
-                        {/* Completed layouts with collapsible marker dropdowns */}
-                        {hasLayouts && (() => {
-                          const layouts = refStatus!.layouts
-                          const expanded = expandedMarkers[cpId] || new Set<number>()
-                          const allExpanded = expanded.size === layouts.length
-                          const completedJob = nestingJobs.find(j => j.status === 'completed')
-                          const defaultFabricWidth = completedJob?.fabric_width_inches
-                          const lookupWidth = (ratioStr: string) => {
-                            const result = completedJob?.results?.find(r => r.ratio_str === ratioStr)
-                            return result?.fabric_width_inches || defaultFabricWidth
-                          }
-
-                          const toggleMarker = (idx: number) => {
-                            setExpandedMarkers(prev => {
-                              const current = new Set(prev[cpId] || [])
-                              if (current.has(idx)) current.delete(idx)
-                              else current.add(idx)
-                              return { ...prev, [cpId]: current }
-                            })
-                          }
-
-                          const toggleAll = () => {
-                            setExpandedMarkers(prev => {
-                              if (allExpanded) {
-                                return { ...prev, [cpId]: new Set<number>() }
-                              } else {
-                                return { ...prev, [cpId]: new Set(layouts.map((_, i) => i)) }
-                              }
-                            })
-                          }
-
-                          // Build "Size:Qty" ratio string
-                          const formatRatio = (ratioStr: string) => {
-                            const ratioValues = ratioStr.split('-').map(v => parseInt(v) || 0)
-                            return sizes
-                              .map((size, i) => ratioValues[i] > 0 ? `${size}:${ratioValues[i]}` : null)
-                              .filter(Boolean)
-                              .join(', ')
-                          }
-
-                          return (
-                            <div className="space-y-1">
-                              {/* Show All / Hide All toggle */}
-                              <div className="flex items-center justify-between mb-2">
-                                <span className="text-xs font-medium text-muted-foreground">
-                                  {layouts.length} refined markers
-                                </span>
-                                <Button
-                                  variant="ghost"
-                                  size="sm"
-                                  className="h-7 text-xs gap-1.5"
-                                  onClick={toggleAll}
-                                >
-                                  {allExpanded
-                                    ? <><EyeOff className="h-3.5 w-3.5" /> Hide All</>
-                                    : <><Eye className="h-3.5 w-3.5" /> Show All</>
-                                  }
-                                </Button>
-                              </div>
-
-                              {/* Marker rows */}
-                              {layouts.map((layout, idx) => {
-                                const isOpen = expanded.has(idx)
-                                const ratioValues = layout.ratio_str.split('-').map(v => parseInt(v) || 0)
-                                const bundles = ratioValues.reduce((a: number, b: number) => a + b, 0)
-                                const utilPct = layout.utilization * 100
-
-                                return (
-                                  <div key={layout.id} className="border rounded-lg overflow-hidden bg-white">
-                                    {/* Compact summary row — always visible */}
-                                    <button
-                                      onClick={() => toggleMarker(idx)}
-                                      className="w-full px-4 py-2.5 flex items-center gap-3 hover:bg-muted/30 transition-colors text-left"
-                                    >
-                                      {isOpen
-                                        ? <ChevronDown className="h-4 w-4 text-muted-foreground shrink-0" />
-                                        : <ChevronRight className="h-4 w-4 text-muted-foreground shrink-0" />
-                                      }
-                                      <span className="font-semibold text-sm w-8 shrink-0">{layout.marker_label || `M${idx + 1}`}</span>
-                                      {lookupWidth(layout.ratio_str) && (
-                                        <span className="text-xs text-muted-foreground shrink-0">{lookupWidth(layout.ratio_str)}&quot;W</span>
-                                      )}
-                                      <span className="text-xs text-muted-foreground flex-1 truncate font-mono">
-                                        {formatRatio(layout.ratio_str)}
-                                      </span>
-                                      <span className="text-xs bg-primary/10 text-primary px-1.5 py-0.5 rounded shrink-0">
-                                        {bundles}bndl
-                                      </span>
-                                      <span className={`text-xs font-medium shrink-0 w-14 text-right ${utilPct >= 80 ? 'text-green-600' : utilPct >= 75 ? 'text-amber-600' : 'text-red-600'}`}>
-                                        {utilPct.toFixed(1)}%
-                                      </span>
-                                      <span className="text-xs text-muted-foreground shrink-0 w-16 text-right">
-                                        {layout.length_yards.toFixed(2)}yd
-                                      </span>
-                                      <span className="text-xs text-muted-foreground shrink-0 w-12 text-right">
-                                        {layout.computation_time_s.toFixed(1)}s
-                                      </span>
-                                    </button>
-
-                                    {/* Expanded: SVG preview */}
-                                    {isOpen && (
-                                      <div className="border-t p-3 overflow-x-auto bg-muted/10">
-                                        <div
-                                          className="min-w-[400px]"
-                                          dangerouslySetInnerHTML={{ __html: layout.svg_preview }}
-                                        />
-                                      </div>
-                                    )}
-                                  </div>
-                                )
-                              })}
-
-                              {/* Download / Re-run buttons */}
-                              {!isRefiningThis && refStatus!.status === 'completed' && (
-                                <div className="flex items-center gap-3 pt-2">
-                                  <Button size="sm" onClick={() => handleDownloadMarkers(cpId)}>
-                                    <Download className="mr-2 h-4 w-4" />
-                                    Download DXF
-                                  </Button>
-                                  <Button variant="outline" size="sm" onClick={() => {
-                                    setRefinementStatuses(prev => {
-                                      const next = { ...prev }
-                                      delete next[cpId]
-                                      return next
-                                    })
-                                  }}>
-                                    Re-run with Different Settings
-                                  </Button>
-                                </div>
-                              )}
-                            </div>
-                          )
-                        })()}
+                        {/* Refinement complete summary */}
+                        {!isRefiningThis && hasLayouts && refStatus?.status === 'completed' && (
+                          <div className="text-xs text-green-600 font-medium flex items-center gap-1.5">
+                            <CheckCircle2 className="h-3.5 w-3.5" />
+                            {refStatus.message}
+                          </div>
+                        )}
                       </div>
                     )
                   })()}
@@ -1173,6 +1234,113 @@ export default function CutplanPage() {
               )
             })}
           </CardContent>
+        </Card>
+      )}
+
+      {/* Cutplan History (superseded) */}
+      {supersededCutplans.length > 0 && (
+        <Card className="border-muted">
+          <CardHeader className="py-3 cursor-pointer" onClick={() => setShowHistory(!showHistory)}>
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                {showHistory ? <ChevronDown className="h-4 w-4 text-muted-foreground" /> : <ChevronRight className="h-4 w-4 text-muted-foreground" />}
+                <History className="h-4 w-4 text-muted-foreground" />
+                <span className="text-sm font-medium text-muted-foreground">
+                  History ({supersededCutplans.length} superseded)
+                </span>
+              </div>
+            </div>
+          </CardHeader>
+          {showHistory && (
+            <CardContent className="pt-0 space-y-4">
+              {(() => {
+                // Group by generation_batch_id
+                const batches = new Map<string, typeof supersededCutplans>()
+                for (const cp of supersededCutplans) {
+                  const key = cp.generation_batch_id || 'legacy'
+                  if (!batches.has(key)) batches.set(key, [])
+                  batches.get(key)!.push(cp)
+                }
+                // Sort batches by newest first
+                const sortedBatches = Array.from(batches.entries()).sort((a, b) => {
+                  const aDate = a[1][0]?.created_at || ''
+                  const bDate = b[1][0]?.created_at || ''
+                  return bDate.localeCompare(aDate)
+                })
+                return sortedBatches.map(([batchId, batchPlans]) => {
+                  const batchDate = batchPlans[0]?.created_at
+                    ? new Date(batchPlans[0].created_at).toLocaleString()
+                    : 'Unknown'
+                  return (
+                    <div key={batchId} className="border rounded-lg overflow-hidden opacity-60">
+                      <div className="px-3 py-2 bg-muted/30 border-b flex items-center justify-between">
+                        <div className="flex items-center gap-2">
+                          <span className="text-xs font-medium text-muted-foreground">
+                            {batchDate}
+                          </span>
+                          <span className="text-[10px] bg-muted px-1.5 py-0.5 rounded font-medium text-muted-foreground">
+                            Superseded
+                          </span>
+                        </div>
+                        <span className="text-[10px] text-muted-foreground">
+                          {batchPlans.length} option{batchPlans.length !== 1 ? 's' : ''}
+                        </span>
+                      </div>
+                      <table className="w-full text-xs">
+                        <thead className="bg-muted/20">
+                          <tr className="border-b">
+                            <th className="text-left py-1.5 px-3 font-medium">Name</th>
+                            <th className="text-center py-1.5 px-2 font-medium">Eff%</th>
+                            <th className="text-center py-1.5 px-2 font-medium">Markers</th>
+                            <th className="text-center py-1.5 px-2 font-medium">Cost</th>
+                            <th className="text-center py-1.5 px-2 font-medium">Was</th>
+                            <th className="text-center py-1.5 px-2 font-medium w-8"></th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {batchPlans.map(cp => {
+                            const prevStatus = (cp.solver_config as Record<string, unknown>)?.pre_superseded_status as string || 'ready'
+                            return (
+                              <tr key={cp.id} className="border-b border-border/30 hover:bg-muted/10">
+                                <td className="py-1.5 px-3">{cp.name || 'Untitled'}</td>
+                                <td className="text-center py-1.5 px-2 tabular-nums">
+                                  {cp.efficiency ? `${(cp.efficiency * 100).toFixed(1)}%` : '-'}
+                                </td>
+                                <td className="text-center py-1.5 px-2 tabular-nums">{cp.unique_markers || '-'}</td>
+                                <td className="text-center py-1.5 px-2 tabular-nums">
+                                  {cp.total_cost ? `$${cp.total_cost.toFixed(2)}` : '-'}
+                                </td>
+                                <td className="text-center py-1.5 px-2">
+                                  <span className="text-[10px] bg-muted/60 px-1.5 py-0.5 rounded">{prevStatus}</span>
+                                </td>
+                                <td className="text-center py-1.5 px-2">
+                                  <button
+                                    className="text-muted-foreground hover:text-red-500 transition-colors"
+                                    title="Delete superseded cutplan"
+                                    onClick={async (e) => {
+                                      e.stopPropagation()
+                                      try {
+                                        await api.deleteCutplan(cp.id)
+                                        loadData()
+                                      } catch (err) {
+                                        toast({ title: 'Delete failed', description: err instanceof Error ? err.message : 'Unknown error', variant: 'destructive' })
+                                      }
+                                    }}
+                                  >
+                                    <Trash2 className="h-3 w-3" />
+                                  </button>
+                                </td>
+                              </tr>
+                            )
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  )
+                })
+              })()}
+            </CardContent>
+          )}
         </Card>
       )}
     </>

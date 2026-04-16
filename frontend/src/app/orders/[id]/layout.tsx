@@ -1,6 +1,5 @@
 'use client'
 
-import { useEffect } from 'react'
 import { useRouter, usePathname } from 'next/navigation'
 import Link from 'next/link'
 import { DashboardLayout } from '@/components/dashboard-layout'
@@ -14,17 +13,12 @@ import {
   CheckCircle2,
   Clock,
   Settings,
-  AlertCircle,
   Loader2,
-  Download,
 } from 'lucide-react'
-import { api } from '@/lib/api'
-import { useToast } from '@/hooks/use-toast'
 
 function OrderLayoutInner({ children }: { children: React.ReactNode }) {
   const router = useRouter()
   const pathname = usePathname()
-  const { toast } = useToast()
   const {
     order,
     orderId,
@@ -79,6 +73,7 @@ function OrderLayoutInner({ children }: { children: React.ReactNode }) {
   const isOnNesting = pathname === `/orders/${orderId}/nesting`
   const isOnCutplan = pathname === `/orders/${orderId}/cutplan`
   const isOnRollplan = pathname === `/orders/${orderId}/rollplan`
+  const isOnExport = pathname === `/orders/${orderId}/export`
 
   // Determine next action for sticky bar
   let nextAction: { label: string; onClick: () => void; disabled?: boolean } | null = null
@@ -99,20 +94,8 @@ function OrderLayoutInner({ children }: { children: React.ReactNode }) {
     const isRefining = cutplans.some(c => c.status === 'refining')
     if (hasRefined) {
       nextAction = {
-        label: 'Export All (Excel)',
-        onClick: async () => {
-          try {
-            const blob = await api.downloadOrderExcel(orderId)
-            const url = URL.createObjectURL(blob)
-            const a = document.createElement('a')
-            a.href = url
-            a.download = `order_${order.order_number}_cutplan.xlsx`
-            a.click()
-            URL.revokeObjectURL(url)
-          } catch (e) {
-            toast({ title: 'Export failed', description: e instanceof Error ? e.message : 'Please try again', variant: 'destructive' })
-          }
-        },
+        label: 'View Reports',
+        onClick: () => router.push(`/orders/${orderId}/export`),
       }
     } else if (!isRefining) {
       nextAction = {
@@ -278,8 +261,8 @@ function OrderLayoutInner({ children }: { children: React.ReactNode }) {
             </Card>
           </Link>
 
-          <Link href={`/orders/${orderId}/cutplan`}>
-            <Card className={`cursor-pointer transition-all hover:shadow-md ${cutplans.some(c => c.status === 'refined') ? 'border-green-500' : cutplans.some(c => c.status === 'refining') ? 'border-blue-500' : cutplans.some(c => c.status === 'approved') ? 'border-amber-500' : ''} ${isOnCutplan ? 'ring-2 ring-primary/30' : ''}`}>
+          <Link href={`/orders/${orderId}/export`}>
+            <Card className={`cursor-pointer transition-all hover:shadow-md ${cutplans.some(c => c.status === 'refined') ? 'border-green-500' : cutplans.some(c => c.status === 'refining') ? 'border-blue-500' : cutplans.some(c => c.status === 'approved') ? 'border-amber-500' : ''} ${isOnExport ? 'ring-2 ring-primary/30' : ''}`}>
               <CardHeader className="pb-2">
                 <div className="flex items-center space-x-2">
                   <div className={`w-7 h-7 rounded-full flex items-center justify-center text-xs ${cutplans.some(c => c.status === 'refined') ? 'bg-green-100 text-green-600' : cutplans.some(c => c.status === 'refining') ? 'bg-blue-100 text-blue-600' : 'bg-gray-100 text-gray-400'}`}>

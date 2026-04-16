@@ -30,6 +30,12 @@ This applies to:
 
 ---
 
+## CRITICAL: Business Units Are Always Garments
+
+**Never calculate or report "pieces" — the business unit is always garments.** A garment has multiple pattern pieces (e.g., Front + Back + 2 Sleeves = 4 pieces), but all demand, production counts, shortfall analysis, and comparisons must be expressed in **garments**, not pieces.
+
+---
+
 ## CRITICAL: GPU Nesting — Bundle Counts 1 and 2 Always Brute-Forced
 
 **Bundle counts 1 and 2 MUST ALWAYS be brute-forced in GPU nesting.** They have trivially few ratios (≤28 for 7 sizes), complete in seconds, and their results are saved to the marker bank. Never apply sampling, prediction, or any shortcut to bc=1 or bc=2. This is a hard rule across all future iterations of GPU nesting.
@@ -58,21 +64,27 @@ This applies to:
 
 This is a **toll booth** - no design or improvement work proceeds until a full successful test cycle is demonstrated through the web UI.
 
-### Quick Start for Testing
+### App Startup (all 4 required)
+
+The app needs **4 services**: PostgreSQL (Docker), Redis (Docker), Backend (uvicorn), Frontend (next dev). Run these commands in order:
 
 ```bash
-# Terminal 1: Start backend
-cd /home/sarv/projects/MarkerMind/backend
-source venv/bin/activate
-uvicorn backend.main:app --reload
+# 1. Check what's already running
+docker ps --filter "name=markermind" --format "{{.Names}} {{.Status}}"
+lsof -i :8000 -sTCP:LISTEN 2>/dev/null && echo "Backend running" || echo "Backend not running"
+lsof -i :3000 -sTCP:LISTEN 2>/dev/null && echo "Frontend running" || echo "Frontend not running"
 
-# Terminal 2: Start frontend
-cd /home/sarv/projects/MarkerMind/frontend
-npm run dev
+# 2. Start Docker containers (PostgreSQL + Redis)
+docker start markermind_postgres markermind_redis
 
-# Terminal 3: Run Puppeteer tests
-# (Puppeteer MCP server should be configured)
+# 3. Start Backend (bind 0.0.0.0 for remote access)
+cd /home/sarv/projects/MarkerMind/backend && source venv/bin/activate && uvicorn backend.main:app --reload --host 0.0.0.0 > /home/sarv/projects/MarkerMind/logs/backend.log 2>&1 &
+
+# 4. Start Frontend (bind 0.0.0.0 for remote access)
+cd /home/sarv/projects/MarkerMind/frontend && npx next dev -H 0.0.0.0 > /home/sarv/projects/MarkerMind/logs/frontend.log 2>&1 &
 ```
+
+**Tailscale fallback** (if VS Code port forwarding drops): `http://100.104.25.113:3000` / `:8000`
 
 ---
 
@@ -80,47 +92,20 @@ npm run dev
 
 **During development, ALWAYS use dev mode (`next dev`), NOT production mode (`next start`).**
 
-### After editing code — what to do:
-
 | What changed | Action needed | Why |
 |---|---|---|
-| **Frontend files** (`.tsx`, `.ts`, `.css`) | **Nothing.** Dev server picks up changes via HMR instantly. | `next dev` watches the filesystem and hot-reloads the browser automatically. |
-| **Backend files** (`.py`) | **Nothing.** Uvicorn `--reload` detects changes and restarts. | The `--reload` flag watches Python files. |
-| **package.json / config files** | Restart the frontend dev server (see below). | Config changes aren't covered by HMR. |
+| **Frontend files** (`.tsx`, `.ts`, `.css`) | **Nothing.** HMR picks it up. | `next dev` watches the filesystem. |
+| **Backend files** (`.py`) | **Nothing.** Uvicorn `--reload` restarts. | The `--reload` flag watches Python files. |
+| **package.json / config files** | Restart the frontend dev server. | Config changes aren't covered by HMR. |
 
 **Do NOT run `npx next build`.** That is only for production deployment.
 **Do NOT kill and restart the frontend** after normal code edits — HMR handles it.
 
-### Starting the servers (only needed once per session):
-
-**Frontend:**
+### If the frontend is stuck (rare):
 ```bash
-cd /home/sarv/projects/MarkerMind/frontend
-npx next dev > /home/sarv/projects/MarkerMind/logs/frontend.log 2>&1 &
+kill $(lsof -t -i :3000) 2>/dev/null; sleep 1
+cd /home/sarv/projects/MarkerMind/frontend && npx next dev -H 0.0.0.0 > /home/sarv/projects/MarkerMind/logs/frontend.log 2>&1 &
 ```
-
-**Backend:**
-```bash
-cd /home/sarv/projects/MarkerMind/backend
-uvicorn backend.main:app --reload &
-```
-
-### Before starting, verify servers aren't already running:
-```bash
-lsof -i :3000 -sTCP:LISTEN 2>/dev/null && echo "Frontend already running" || echo "Frontend not running"
-lsof -i :8000 -sTCP:LISTEN 2>/dev/null && echo "Backend already running" || echo "Backend not running"
-```
-
-### If the frontend is stuck or not reflecting changes (rare):
-```bash
-kill $(lsof -t -i :3000) 2>/dev/null
-sleep 1
-cd /home/sarv/projects/MarkerMind/frontend
-npx next dev > /home/sarv/projects/MarkerMind/logs/frontend.log 2>&1 &
-```
-
-### Production mode (deployment only — via `start.sh`):
-Only use `next build && next start` for production deployment. Never use it during active development.
 
 ---
 
@@ -160,6 +145,20 @@ When adding new features to pattern upload (new parser types, new fields, etc.),
 
 ---
 
+## Cutplan Pipeline Stages
+
+> **Full details**: [`docs/cutplan_optimizer.md`](docs/cutplan_optimizer.md)
+
+| Stage | Trigger | What happens | Frontend shows |
+|-------|---------|-------------|----------------|
+| **Stage 1: ILP Solve** | User clicks "Generate Cutplan" | ILP selects marker ratios + ply counts using GPU lengths. EndBit (Option D) runs its own solver. | Cutplan options with ratios/plies only. **No lengths, efficiencies, or costs.** |
+| **Stage 2: Quick CPU Nest** | Auto after Stage 1 | Each unique marker is CPU-vector nested (~20s). Costs + floor MC waste calculated from CPU lengths. | Marker lengths, efficiencies, SVG thumbnails, costs, Est. Floor Waste |
+| **Stage 3: Refine** | User clicks "Refine" | Longer CPU nest with advanced settings. Lengths/efficiencies updated. Marker ready for roll plan. | Refined SVGs, updated costs, gold/amber card styling |
+
+**Key files**: `cutplan_service.py` (orchestrator), `ilp_solver_runner.py` (Stage 1), `endbit_solver.py` (Stage 1 Option D), `spyrrow_nesting_runner.py` (Stages 2-3)
+
+---
+
 ## Project Overview
 
 A 2D irregular nesting engine for garment manufacturing, targeting state-of-the-art material utilization using the Spyrrow heuristic as the core solver.
@@ -179,15 +178,32 @@ src/nesting_engine/
 ├── engine/         # Nesting solvers
 │   └── spyrrow_engine.py   # Spyrrow wrapper (primary solver)
 ├── io/             # File I/O  (see docs/parser_index.md for full format guide)
-│   ├── aama_parser.py      # AAMA/ASTM DXF+RUL grading parser
-│   ├── dxf_text_parser.py  # Text-label DXF (Gerber-style markers)
-│   ├── dxf_block_parser.py # Block-based production DXF (pre-sized)
-│   └── dxf_parser.py       # Orchestrator + backward-compat re-exports
+│   ├── aama_parser.py           # AAMA/ASTM DXF+RUL grading parser (Boke)
+│   ├── optitex_aama_parser.py   # OptiTex AAMA DXF+RUL grading parser
+│   ├── dxf_text_parser.py       # Text-label DXF (Gerber-style markers)
+│   ├── dxf_block_parser.py      # Block-based production DXF (pre-sized)
+│   └── dxf_parser.py            # Orchestrator + backward-compat re-exports
 └── apps/
     └── app.py      # Streamlit UI
 ```
 
 ## Key Concepts
+
+### CRITICAL: Fabric Axis Convention — ABSOLUTE INVARIANT
+
+**This must NEVER be gotten wrong. It applies to ALL nesting code, rendering, and piece orientation logic.**
+
+| Axis | Direction | Meaning |
+|------|-----------|---------|
+| **X** | Fabric LENGTH | Grain direction, parallel to fabric edges, the OPEN/extending dimension in strip packing |
+| **Y** | Fabric WIDTH | Perpendicular to edges, the FIXED/constrained dimension (e.g., 63.5") |
+
+- **Grain ALWAYS runs along X** (fabric length, parallel to edges)
+- **GPU packer container**: shape `(strip_width_px, max_length_px)` = `(Y, X)` — axis 0 = fabric width, axis 1 = fabric length
+- **Spyrrow**: `strip_height` = fabric WIDTH (Y constraint), `sol.width` = marker LENGTH (X extent)
+- **PIL rasterization**: `(x, y)` where x = columns = X = fabric length, y = rows = Y = fabric width
+- **SVG rendering**: x axis = fabric length (horizontal), y axis = fabric width (vertical)
+- **Piece orientation**: the piece's grain line direction must map to the X axis when placed
 
 ### CRITICAL: Fold Line vs Flip
 
@@ -289,7 +305,8 @@ Before any PR:
 | `core/instance.py` | Problem definition | Carefully |
 | `core/solution.py` | Solution format | Carefully |
 | `engine/spyrrow_engine.py` | Solver wrapper | When needed |
-| `io/aama_parser.py` | AAMA/ASTM DXF+RUL grading parser | When needed |
+| `io/aama_parser.py` | AAMA/ASTM DXF+RUL grading parser (Boke) | When needed |
+| `io/optitex_aama_parser.py` | OptiTex AAMA DXF+RUL grading parser | When needed |
 | `io/dxf_text_parser.py` | Text-label DXF parser (Gerber-style) | When needed |
 | `io/dxf_block_parser.py` | Block-based production DXF parser | When needed |
 | `io/vt_dxf_parser.py` | Optitex Graded Nest DXF parser (VT format) | When needed |
@@ -314,6 +331,10 @@ For in-depth algorithm documentation, see:
 | [`docs/cutting_costs.md`](docs/cutting_costs.md) | Cost calculation methodology: fabric, spreading, cutting, prep costs |
 | [`docs/production_deployment.md`](docs/production_deployment.md) | **Production deployment guide**: GCP architecture, Cloud Run GPU, multi-tenant subdomain routing, pricing, cost analysis |
 | [`docs/multi_width_nesting.md`](docs/multi_width_nesting.md) | Multi-width GPU nesting: cross-width Ridge prediction, sampling strategy |
+| [`docs/endbit_optimized_solver.md`](docs/endbit_optimized_solver.md) | **EndBit Optimized cutplan**: two-phase strategy, floor MC, end-bit marker selection, validation |
+| [`docs/multilot_cutplan_solver.md`](docs/multilot_cutplan_solver.md) | **Multi-lot cutplan solver**: greedy+GA pipeline, lot grouping, area-model lengths, validated on 2 colors |
+
+**IMPORTANT: Keep docs in sync with code.** When modifying algorithm logic in any solver (especially `endbit_solver.py`, `ilp_solver_runner.py`, `rollplan_simulator.py`), update the corresponding doc in `docs/`. If branching an algorithm to handle a new scenario, document the variant in the same doc file with a clear section heading.
 
 ## GPU Raster Nesting (Fast Marker Algorithm)
 
@@ -466,6 +487,66 @@ When evaluating marker ratios with GPU raster nesting, sorting strategy matters 
 - "GPU says 9.5Y but factory is 8.4Y, so we're worse" ❌
 - GPU lengths are relative measures for ratio selection, not production estimates
 
+### CRITICAL: GPU Efficiency Calculation — Use Vector Area (IMPLEMENTED)
+
+**GPU marker efficiency MUST be computed using vector polygon area (shoelace formula), NOT raster pixel area.**
+
+```
+efficiency = total_vector_area_mm2 / (fabric_width_mm × gpu_length_mm)
+```
+
+- **Vector area** = `sum(_polygon_area_mm2(piece.vertices_mm) × demand)` — exact geometric area via shoelace formula
+- **Raster pixel area** overestimates by ~3-8% due to rasterization aliasing at any scale (0.15–1.0 px/mm)
+- GPU **lengths** are accurate (within 0.3–2.7% of CPU/SS) — the length measurement is reliable
+- `_polygon_area_mm2()` added to `gpu_nesting_runner.py` — used in all 6 efficiency calculation sites
+- **DONE in production code** — all `_evaluate_single_sort`, `_evaluate_with_svg_single_sort`, typed/column-fill variants, and Ridge prediction efficiency now use vector area
+
+### GPU Scale: 0.08 px/mm (Production Default)
+
+| Scale | GP Pred MAPE vs 0.15 | Spearman rho | Speed | Notes |
+|-------|----------------------|-------------|-------|-------|
+| 0.08 | 2.53% | 0.9993 | ~7.8/s | **Production default** — fast, GP absorbs error |
+| 0.15 | baseline | 1.0 | ~5/s | Higher quality, use for calibration |
+| 0.30 | N/A | N/A | ~1/s | Best raw GPU accuracy |
+
+- Validated Apr 2026: 275 markers, 0.08 vs 0.15, ranking near-perfect (rho=0.9993)
+- Use `round()` for strip width (not `int()`) to avoid 0.1" truncation
+- Dual sort: `width_desc` + `area_desc`, pick shortest length
+
+### DEAD END: Batch GPU Nesting via CUDA Streams/Threading
+
+**Do NOT attempt parallel GPU marker evaluation using CUDA streams, Python threading, or batched 3D kernels.** This has been tested twice and **makes things slower** (0.57x of sequential).
+
+**Why it fails:** A single BLF kernel already saturates the RTX 3060's 30 SMs with ~500 thread blocks. Adding concurrent streams creates GPU contention, not parallelism. The Python BLF loop overhead (argmin, place, update per piece) is the real bottleneck, not GPU compute.
+
+**NVIDIA library survey (Apr 2026):** cuOpt, cuSpatial, Warp, CUDA Graphs, Cooperative Groups, CUB — none help. 2D irregular strip packing is too niche. No open-source GPU irregular nesting exists.
+
+**The only viable path to 50+ markers/sec:** A monolithic CUDA kernel that runs the entire BLF loop (all pieces) in one launch, eliminating Python roundtrips. Significant CUDA engineering effort (weeks).
+
+### PROVEN: Lookahead BLF for GPU Nesting Quality
+
+**GPU BLF quality can be improved 0.5-3.7% by evaluating top-K alternative positions with L-step greedy rollout.** Time cost: 0.3-3.8s per marker (vs 0.13s greedy). Best config: K=10 positions, L=5-8 lookahead steps.
+
+**How it works:**
+1. GPU kernel computes valid (x, y) for ALL positions and both rotations (already done in one launch)
+2. Extract top-K diverse positions (different x, y, or rotation) from kernel output
+3. For each candidate: snapshot container → place piece → greedily place next L pieces → measure strip length → rollback
+4. Commit the position that minimizes strip length after rollout
+
+**Validated Apr 2026** across 3 garment types:
+
+| Pattern | Marker | Pieces | Gain | Notes |
+|---------|--------|--------|------|-------|
+| FGL shirt | bc9 (5 sizes) | 36 | **+3.7%** | Best gain — moderate piece variety |
+| P5 panty | bc12 | 12 | **+2.6%** | Single body piece |
+| FGL shirt | bc12 | 48 | +0.2% | Large markers — greedy already good |
+| AAMA jacket | bc1-2 | 23-46 | 0.0% | High shape diversity — greedy interlocks well |
+
+**Key insight:** Mid-complexity markers (20-40 pieces, moderate shape variety) benefit most. Very simple or very complex markers give greedy BLF less room for error.
+
+**Scripts:** `scripts/ilp_lookahead_v2_poc.py`, `scripts/lookahead_multipattern_test.py`
+**PNGs:** `experiment_results/lookahead_pngs/`
+
 ### Correlation with Spyrrow
 
 GPU raster results correlate well with Spyrrow CPU results:
@@ -554,6 +635,81 @@ For multiple orders/colors with shared markers:
 
 **Key insight**: Joint multicolor optimization typically reduces unique markers by 5-8 compared to independent per-color solving, with similar or better fabric usage.
 
+### Multi-Lot Cutplan Solver (Greedy + GA Polish) — Pre-Final
+
+> **Full documentation**: [`docs/multilot_cutplan_solver.md`](docs/multilot_cutplan_solver.md)
+
+For orders with multiple fabric lots (different shrinkage × width combinations):
+
+**Pipeline**: Lot Grouping → Area-Model Lengths → Greedy Construction → GA Polish
+
+| Phase | What | Time |
+|-------|------|------|
+| **Lot Grouping** | Cumulative waste heuristic reduces raw lots (18→9), cross-shrinkage never merged | <1ms |
+| **Area Model** | `length = Σ(ratio[s] × area[s]) / (eff × width)` — 2-3% error, pre-compute ~16K lengths | 0.02s |
+| **Greedy** | Fill lots biggest-first, score = demand_pct × lot_fill × bc_bonus, tail fill BC 1-2 | 0.03s |
+| **GA Polish** | 200 gen, pop 50, mutations: adjust plies / swap ratio / move lot / remove / split | 2-3s |
+
+**Validated results** (HD FGL 2 order, AEO-5907):
+- **210BONEWHI**: 8 markers, 4,120 yd, 0.906 yd/gmt — **matches SS benchmark**
+- **100BWNW**: 7 markers, 4,434 yd, 0.898 yd/gmt — **beats SS by 9 yd**
+
+**Key files**: `scripts/linear_lot_ilp.py` (210BONEWHI), `scripts/multilot_solver_100bwnw.py` (100BWNW)
+
+## GPU-Accelerated Sparrow: Internal Collision Detection on GPU
+
+**Goal**: Replace the hot inner loop of Sparrow's collision detection with GPU batch evaluation, achieving 10-50x speedup while keeping Sparrow's orchestration logic (exploration, compression, GLS) on CPU.
+
+**North Star**: Sparrow is already the best open-source 2D nesting solver. Don't try to replace it or skip its phases — **accelerate its internals with GPU**.
+
+### Why This Architecture (Lessons Learned)
+
+**DEAD END — Warm-start / GPU seeding (Apr 2026)**: We spent a full session building a GPU raster → Spyrrow warm-start pipeline. Results: warm-start matches cold-start at same time budgets but provides zero speed advantage. GPU BLF produces ~75% efficiency placements vs Spyrrow's ~85%. Spyrrow's exploration phase IS the value — trying to skip it was the wrong approach entirely. The forked Spyrrow 0.9.0 with `initial_solution` works mechanically but adds no production value.
+
+**RIGHT APPROACH**: Put GPU inside Sparrow's hot loop, not outside it.
+
+### The Hot Loop (90% of Runtime)
+
+From profiling: **`collect_poly_collisions_in_detector_custom`** in `eval/specialized_jaguars_pipeline.rs` takes over 90% of time. This calls `overlap_area_proxy` (Algorithm 3) which is an O(N×M) nested loop over pole pairs:
+
+```rust
+// vendor/sparrow/src/quantify/overlap_proxy.rs
+pub fn overlap_area_proxy(sp1: &SPSurrogate, sp2: &SPSurrogate, epsilon: f32) -> f32 {
+    for p1 in &sp1.poles {
+        for p2 in &sp2.poles {
+            let pd = (p1.radius + p2.radius) - p1.center.distance_to(&p2.center);
+            // ... decay function, accumulate
+        }
+    }
+}
+```
+
+This is called ~75 times per colliding item per iteration (50 container-wide + 25 focused samples). With 20+ colliding items, that's 1500+ sequential evaluations per iteration.
+
+### Implementation Plan
+
+1. **Modify jagua-rs** — expose pole data (SoA format: x[], y[], r[], item_id[]) via FFI or shared memory
+2. **In Sparrow's separation loop** — when evaluating candidate positions for a colliding item, collect ALL candidates into a batch
+3. **Send batch to GPU** — evaluate 1000+ (tx, ty, theta) transforms in parallel using the CUDA kernel
+4. **GPU returns loss values** — CPU picks best, updates layout, continues GLS orchestration
+
+### Existing Components
+
+- **CUDA kernel**: `nesting_engine/engine/gpu_overlap_evaluator.py` — implements Algorithm 3 on GPU, benchmarked at 3.4M evals/sec (112x vs estimated sequential Sparrow)
+- **Forked repos**: `vendor/sparrow/`, `vendor/jagua-rs/`, `vendor/spyrrow/`
+- **Forked Spyrrow 0.9.0**: Has `initial_solution` warm-start (works but not useful)
+
+### Key Implementation Decisions
+
+- **Rust ↔ GPU bridge**: Options are (a) cudarc crate in Rust, (b) FFI to Python/CuPy, (c) shared memory + subprocess. cudarc is cleanest but requires CUDA in the Rust build chain.
+- **Batch size**: Sparrow evaluates ~75 candidates/item × ~20 items = 1500/iteration. GPU is efficient at 1000+, so batching one full iteration is ideal.
+- **Granularity**: Replace ONLY the pole overlap evaluation, not the quadtree traversal or edge collision checks. Quadtree is CPU-optimal (branch-heavy), pole overlap is GPU-optimal (data-parallel).
+
+**Sparrow repos**:
+- Sparrow (solver): https://github.com/JeroenGar/sparrow
+- jagua-rs (collision engine): https://github.com/JeroenGar/jagua-rs
+- Spyrrow (Python wrapper): https://github.com/PaulDL-RS/spyrrow
+
 ## Future Work
 
 - ESICUP benchmark integration
@@ -561,3 +717,5 @@ For multiple orders/colors with shared markers:
 - Batch processing
 - Solution export improvements
 - GPU raster sampling strategy optimization
+- **GPU-accelerated Sparrow internals** (see section above)
+- **Shading/stripe marker constraints in GPU nester**

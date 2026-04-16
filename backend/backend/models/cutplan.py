@@ -15,6 +15,7 @@ class CutplanStatus(str, enum.Enum):
     refined = "refined"
     in_production = "in_production"
     completed = "completed"
+    superseded = "superseded"
 
 
 class SolverType(str, enum.Enum):
@@ -47,6 +48,9 @@ class Cutplan(Base, TimestampMixin):
     spreading_cost = Column(Float)
     cutting_cost = Column(Float)
     prep_cost = Column(Float)
+
+    # Generation batch (groups cutplans created in the same optimize run)
+    generation_batch_id = Column(String(36), nullable=True, index=True)
 
     # Solver parameters (for reproducibility)
     solver_config = Column(JSON, default=dict)

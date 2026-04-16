@@ -635,6 +635,10 @@ class CutplanService:
                     if order_for_cpu and order_for_cpu.order_lines:
                         cpu_material = order_for_cpu.order_lines[0].fabric_code or ""
 
+                    # Check for merged materials
+                    cpu_merge_map = (pattern_obj_cpu.parse_metadata or {}).get("material_merge_map", {})
+                    cpu_material_sources = cpu_merge_map.get(cpu_material)
+
                     # Determine rotation mode from nesting job
                     rotation_mode = "free"
                     if nesting_job and hasattr(nesting_job, 'rotation_mode') and nesting_job.rotation_mode:
@@ -682,6 +686,7 @@ class CutplanService:
                                 rotation_mode=rotation_mode,
                                 file_type=pattern_obj_cpu.file_type,
                                 progress_callback=cpu_progress,
+                                material_sources=cpu_material_sources,
                             )
                             cpu_cache.update(new_results)
 

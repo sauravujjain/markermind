@@ -14,6 +14,7 @@ from .api.routes import (
     exports_router,
     costs_router,
     rollplans_router,
+    activity_router,
 )
 
 
@@ -57,6 +58,7 @@ app.include_router(cutplans_router, prefix="/api")
 app.include_router(exports_router, prefix="/api")
 app.include_router(costs_router, prefix="/api")
 app.include_router(rollplans_router, prefix="/api")
+app.include_router(activity_router, prefix="/api")
 
 
 @app.get("/")

@@ -52,6 +52,9 @@ export default function ConfigurePage() {
   const [editablePieces, setEditablePieces] = useState<Record<string, Record<string, { qty: number; leftQty: number; rightQty: number }>>>({})
   const [isPiecesEditMode, setIsPiecesEditMode] = useState(false)
   const [isSavingMappings, setIsSavingMappings] = useState(false)
+  const [mergeMode, setMergeMode] = useState(false)
+  const [mergeSelected, setMergeSelected] = useState<Set<string>>(new Set())
+  const [isMerging, setIsMerging] = useState(false)
   const [nestingConfig, setNestingConfig] = useState({
     fabricWidthInches: 60,
     maxBundleCount: 6,
@@ -100,7 +103,7 @@ export default function ConfigurePage() {
         maxMarkerLengthYards: 15,
         topN: 10,
         fullCoverage: false,
-        gpuScale: 0.15,
+        gpuScale: 0.08,
         strategy: 'auto',
         additionalWidths: '',
       }
@@ -229,10 +232,10 @@ export default function ConfigurePage() {
         fabric_widths: fabricWidths,
         max_bundle_count: fabricConfig?.maxBundles || nestingConfig.maxBundleCount,
         top_n_results: fabricConfig?.topN || nestingConfig.topNResults,
-        full_coverage: fabricConfig?.fullCoverage || nestingConfig.fullCoverage,
-        gpu_scale: fabricConfig?.gpuScale || 0.15,
+        full_coverage: false,
+        gpu_scale: fabricConfig?.gpuScale || 0.08,
         selected_sizes: selectedSizes.length > 0 ? selectedSizes : undefined,
-        strategy: fabricConfig?.strategy || 'auto',
+        strategy: 'auto',
       })
       toast({ title: 'Nesting job started', description: 'The GPU nesting job has been queued' })
       loadData()
@@ -243,9 +246,7 @@ export default function ConfigurePage() {
         width: String(fabricConfig?.widthInches || nestingConfig.fabricWidthInches),
         maxBundles: String(fabricConfig?.maxBundles || nestingConfig.maxBundleCount),
         topN: String(fabricConfig?.topN || nestingConfig.topNResults),
-        fullCoverage: String(fabricConfig?.fullCoverage || nestingConfig.fullCoverage),
-        gpuScale: String(fabricConfig?.gpuScale || 0.15),
-        strategy: fabricConfig?.strategy || 'auto',
+        gpuScale: String(fabricConfig?.gpuScale || 0.08),
       })
       router.push(`/orders/${orderId}/nesting?${params.toString()}`)
     } catch (error) {
@@ -379,6 +380,98 @@ export default function ConfigurePage() {
                   )}
                 </div>
               </div>
+
+              {/* Merge Materials */}
+              {currentPattern && (currentPattern.available_materials?.length ?? 0) >= 2 && (
+                <div className="pt-3">
+                  {!mergeMode ? (
+                    <button
+                      onClick={() => { setMergeMode(true); setMergeSelected(new Set()) }}
+                      className="inline-flex items-center gap-1.5 text-xs font-medium text-primary/70 hover:text-primary transition-colors px-3 py-1.5 rounded-md border border-dashed border-primary/30 hover:border-primary/50 hover:bg-primary/5"
+                    >
+                      <Package className="h-3 w-3" />
+                      Merge materials (same fabric)
+                    </button>
+                  ) : (
+                    <div className="rounded-lg border border-primary/20 bg-primary/5 p-4 space-y-3">
+                      <div className="flex items-center justify-between">
+                        <div>
+                          <h5 className="text-sm font-medium">Merge Materials</h5>
+                          <p className="text-xs text-muted-foreground">Select materials that share the same fabric to nest them together</p>
+                        </div>
+                        <button
+                          onClick={() => { setMergeMode(false); setMergeSelected(new Set()) }}
+                          className="text-xs text-muted-foreground hover:text-foreground px-2 py-1 rounded hover:bg-muted"
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                      <div className="flex flex-wrap gap-2">
+                        {(currentPattern.available_materials || []).map(code => {
+                          const isChecked = mergeSelected.has(code)
+                          return (
+                            <label
+                              key={code}
+                              className={`flex items-center gap-2 cursor-pointer px-3 py-2 rounded-md border text-sm transition-all ${
+                                isChecked
+                                  ? 'bg-primary/10 border-primary/40 text-primary font-medium'
+                                  : 'bg-background border-border hover:border-primary/30 text-foreground'
+                              }`}
+                            >
+                              <input
+                                type="checkbox"
+                                checked={isChecked}
+                                onChange={(e) => {
+                                  const next = new Set(mergeSelected)
+                                  e.target.checked ? next.add(code) : next.delete(code)
+                                  setMergeSelected(next)
+                                }}
+                                className="rounded border-muted-foreground/50"
+                              />
+                              {code}
+                            </label>
+                          )
+                        })}
+                      </div>
+                      {mergeSelected.size >= 2 && (
+                        <div className="flex items-center gap-3 pt-1">
+                          <span className="text-xs text-muted-foreground">
+                            {mergeSelected.size} selected → will become one material
+                          </span>
+                          <Button
+                            size="sm"
+                            className="h-8"
+                            disabled={isMerging}
+                            onClick={async () => {
+                              if (!currentPattern) return
+                              const sources = Array.from(mergeSelected).sort()
+                              const targetName = prompt(
+                                'Name for the merged material:',
+                                sources.join(',')
+                              )
+                              if (!targetName) return
+                              setIsMerging(true)
+                              try {
+                                await api.mergeMaterials(currentPattern.id, sources, targetName)
+                                toast({ title: `Merged ${sources.join(' + ')} → ${targetName}` })
+                                setMergeMode(false)
+                                setMergeSelected(new Set())
+                                await loadData()
+                              } catch (e) {
+                                toast({ title: 'Merge failed', description: (e as Error).message, variant: 'destructive' })
+                              } finally {
+                                setIsMerging(false)
+                              }
+                            }}
+                          >
+                            {isMerging ? 'Merging...' : `Merge ${mergeSelected.size} Materials`}
+                          </Button>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
 
             {/* Size Summary */}
@@ -521,7 +614,7 @@ export default function ConfigurePage() {
                   maxMarkerLengthYards: 15,
                   topN: 10,
                   fullCoverage: false,
-                  gpuScale: 0.15,
+                  gpuScale: 0.08,
                   strategy: 'auto',
                 }
                 const editables = editablePieces[activeNestingFabric] || {}
@@ -640,58 +733,15 @@ export default function ConfigurePage() {
                           </div>
                         </div>
                       </div>
-                      {/* 100% Coverage Toggle */}
-                      <div className="mt-3 flex items-center gap-2">
-                        <label className="flex items-center gap-2 cursor-pointer">
-                          <input
-                            type="checkbox"
-                            checked={config.fullCoverage}
-                            onChange={(e) => setPerFabricConfig({
-                              ...perFabricConfig,
-                              [activeNestingFabric]: { ...config, fullCoverage: e.target.checked }
-                            })}
-                            className="w-4 h-4 rounded border-gray-300 text-primary focus:ring-primary"
-                          />
-                          <span className="text-xs font-medium">100% Coverage</span>
-                        </label>
-                        <span className="text-xs text-muted-foreground">(Evaluate all ratio combinations - slower but thorough)</span>
-                      </div>
-                      {/* Nesting Strategy */}
-                      <div className="mt-3 flex items-center gap-3">
-                        <label className="text-xs text-muted-foreground whitespace-nowrap">Strategy</label>
-                        <div className="flex gap-1">
-                          {[
-                            { value: 'auto', label: 'Auto', desc: 'Brute force for small spaces, LHS+predict for large (default)' },
-                            { value: 'brute_force', label: 'Brute Force', desc: 'GPU-evaluate all ratios (thorough but slow for 1000+ ratios)' },
-                            { value: 'lhs_predict', label: 'LHS + Predict', desc: 'Sample 12% via LHS, predict rest with Ridge regression (fast)' },
-                          ].map(opt => (
-                            <button
-                              key={opt.value}
-                              onClick={() => setPerFabricConfig({
-                                ...perFabricConfig,
-                                [activeNestingFabric]: { ...config, strategy: opt.value }
-                              })}
-                              className={`px-2.5 py-1 rounded text-xs font-medium border transition-colors ${
-                                (config.strategy || 'auto') === opt.value
-                                  ? 'bg-primary text-primary-foreground border-primary'
-                                  : 'bg-background text-foreground border-border hover:border-primary/50'
-                              }`}
-                              title={opt.desc}
-                            >
-                              {opt.label}
-                            </button>
-                          ))}
-                        </div>
-                      </div>
                       {/* GPU Resolution */}
                       <div className="mt-3 flex items-center gap-3">
                         <label className="text-xs text-muted-foreground whitespace-nowrap">GPU Resolution</label>
                         <div className="flex gap-1">
                           {[
-                            { value: 0.15, label: 'Standard', desc: 'Fast (default)' },
-                            { value: 0.3, label: 'High', desc: 'Better quality' },
+                            { value: 0.08, label: 'Fast', desc: 'Default (0.08 px/mm)' },
+                            { value: 0.15, label: 'Standard', desc: 'Higher quality' },
+                            { value: 0.3, label: 'High', desc: 'Best quality' },
                             { value: 0.5, label: 'Fine', desc: 'High fidelity' },
-                            { value: 1.0, label: 'Demo', desc: 'Maximum quality (1 px/mm)' },
                           ].map(opt => (
                             <button
                               key={opt.value}
@@ -700,7 +750,7 @@ export default function ConfigurePage() {
                                 [activeNestingFabric]: { ...config, gpuScale: opt.value }
                               })}
                               className={`px-2.5 py-1 rounded text-xs font-medium border transition-colors ${
-                                (config.gpuScale || 0.15) === opt.value
+                                (config.gpuScale || 0.08) === opt.value
                                   ? 'bg-primary text-primary-foreground border-primary'
                                   : 'bg-background text-foreground border-border hover:border-primary/50'
                               }`}
@@ -710,7 +760,7 @@ export default function ConfigurePage() {
                             </button>
                           ))}
                         </div>
-                        <span className="text-xs text-muted-foreground">({(config.gpuScale || 0.15).toFixed(2)} px/mm)</span>
+                        <span className="text-xs text-muted-foreground">({(config.gpuScale || 0.08).toFixed(2)} px/mm)</span>
                       </div>
                     </div>
 

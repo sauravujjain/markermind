@@ -214,6 +214,7 @@ def execute_rollplan_job(
     rollplan_id: str,
     ga_pop_size: int = 30,
     ga_generations: int = 50,
+    confirm_shortfall: bool = False,
 ):
     """Execute roll plan simulation in the background."""
     db = SessionLocal()
@@ -247,16 +248,24 @@ def execute_rollplan_job(
         def cancel_check() -> bool:
             return _rollplan_jobs.get(rollplan_id, {}).get("status") == "cancelled"
 
-        rollplan_service.run_simulation(
+        result = rollplan_service.run_simulation(
             db=db,
             roll_plan=roll_plan,
             progress_callback=progress_callback,
             cancel_check=cancel_check,
             ga_pop_size=ga_pop_size,
             ga_generations=ga_generations,
+            confirm_shortfall=confirm_shortfall,
         )
 
-        if cancel_check():
+        if result == "needs_confirmation":
+            _rollplan_jobs[rollplan_id].update({
+                "status": "needs_confirmation",
+                "progress": 0,
+                "message": roll_plan.roll_adjustment_message or "Roll shortfall detected",
+            })
+            db.commit()
+        elif cancel_check():
             roll_plan.status = RollPlanStatus.cancelled
             roll_plan.progress_message = "Cancelled by user"
             _rollplan_jobs[rollplan_id].update({
@@ -314,6 +323,9 @@ async def create_rollplan(
     if not cutplan:
         raise HTTPException(status_code=404, detail="Cutplan not found")
 
+    if cutplan.status == CutplanStatus.superseded:
+        raise HTTPException(status_code=400, detail="Cannot create roll plan for a superseded cutplan")
+
     # Map mode string
     mode_map = {
         "monte_carlo": RollPlanMode.monte_carlo,
@@ -331,6 +343,8 @@ async def create_rollplan(
         min_reuse_length_yards=request.min_reuse_length_yards,
         pseudo_roll_avg_yards=request.pseudo_roll_avg_yards,
         pseudo_roll_delta_yards=request.pseudo_roll_delta_yards,
+        waste_threshold_pct=max(0.1, request.waste_threshold_pct),
+        pseudo_buffer_pct=max(0.0, request.pseudo_buffer_pct),
         status=RollPlanStatus.pending,
         input_type=RollInputType.pseudo,
     )
@@ -379,10 +393,16 @@ async def start_simulation(
     background_tasks: BackgroundTasks,
     ga_pop_size: int = 30,
     ga_generations: int = 50,
+    confirm_shortfall: bool = False,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Start MC/GA simulation in the background."""
+    """Start MC/GA simulation in the background.
+
+    If real rolls have a shortfall and confirm_shortfall=False, returns
+    status="needs_confirmation" with the shortfall message. Re-call with
+    confirm_shortfall=True to add generated rolls and proceed.
+    """
     roll_plan = _get_rollplan_or_404(db, rollplan_id, current_user)
 
     if roll_plan.status == RollPlanStatus.running:
@@ -400,6 +420,7 @@ async def start_simulation(
         rollplan_id=rollplan_id,
         ga_pop_size=ga_pop_size,
         ga_generations=ga_generations,
+        confirm_shortfall=confirm_shortfall,
     )
 
     return {"id": rollplan_id, "status": "queued", "message": "Simulation started"}
@@ -587,30 +608,19 @@ async def export_rollplan_excel(
 ):
     """
     Export roll plan as Excel workbook:
-      Sheet 1: Cutplan report (demand, markers, costs, charts)
-      Sheet 2: Lay plan
-      Sheet 3: Roll Plan Summary (waste + docket overview)
-      Sheet 4+: Per-cut docket sheets
+      Sheet 1: Lay Plan (cut-by-cut expansion)
+      Sheet 2: Roll Plan Summary (waste + docket overview)
+      Sheet 3+: Batched docket sheets (10 per tab)
     """
     import io
-    import re
     import openpyxl
     from fastapi.responses import StreamingResponse
-    from openpyxl.styles import Font as XlFont
 
-    from ...models import (
-        CostConfig as CostConfigModel,
-        Fabric as FabricModel,
-        Pattern,
-        PatternFabricMapping,
-    )
+    from ...models import Pattern
     from ...models.cutplan import CutplanMarker
     from ...services.excel_export_service import (
-        TITLE_FONT, SUBTITLE_FONT, CUTPLAN_FILL, HEADER_FONT,
-        write_demand_table, write_marker_table,
-        write_cost_breakdown, write_cost_charts,
         write_lay_plan_sheet,
-        write_roll_plan_summary_sheet, write_docket_sheet,
+        write_roll_plan_summary_sheet, write_docket_batch_sheet,
     )
 
     roll_plan = _get_rollplan_or_404(db, rollplan_id, current_user)
@@ -641,42 +651,19 @@ async def export_rollplan_excel(
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
 
-    # --- Gather context (mirrors export_order_excel) ---
+    # --- Gather context ---
     canonical_sizes = None
-    perimeter_all_materials = {}
     pattern = None
     if order.pattern_id:
         pattern = db.query(Pattern).filter(Pattern.id == order.pattern_id).first()
-        if pattern:
-            if pattern.available_sizes:
-                canonical_sizes = pattern.available_sizes
-            meta = pattern.parse_metadata or {}
-            perimeter_all_materials = meta.get("perimeter_by_size", {})
+        if pattern and pattern.available_sizes:
+            canonical_sizes = pattern.available_sizes
 
+    from ...models import CostConfig as CostConfigModel
     cost_config = db.query(CostConfigModel).filter(
         CostConfigModel.customer_id == current_user.customer_id
     ).first()
-
-    fabric_cost_per_yard = cost_config.fabric_cost_per_yard if cost_config else 3.0
-    spreading_cost_per_yard = cost_config.spreading_cost_per_yard if cost_config else 0.00122
-    spreading_cost_per_ply = cost_config.spreading_cost_per_ply if cost_config else 0.013
-    cutting_labor_per_hour = cost_config.cutting_labor_cost_per_hour if cost_config else 1.0
-    cutting_workers = cost_config.cutting_workers_per_cut if cost_config else 1
-    cutting_speed_cm_s = cost_config.cutting_speed_cm_per_s if cost_config else 10.0
-    cutting_cost_per_cm = (cutting_labor_per_hour * cutting_workers) / 3600.0 / cutting_speed_cm_s if cutting_speed_cm_s > 0 else 0.0
-    prep_cost_per_meter = 0.0
-    if cost_config:
-        if cost_config.prep_perf_paper_enabled:
-            prep_cost_per_meter += cost_config.prep_perf_paper_cost_per_m or 0.0
-        if cost_config.prep_underlayer_enabled:
-            prep_cost_per_meter += cost_config.prep_underlayer_cost_per_m or 0.0
-        if cost_config.prep_top_layer_enabled:
-            prep_cost_per_meter += cost_config.prep_top_layer_cost_per_m or 0.0
-    else:
-        prep_cost_per_meter = 0.25
-
     max_ply_height = cost_config.max_ply_height if cost_config else 100
-    DEFAULT_PERIMETER_CM = 2540.0
 
     # Collect sizes from order
     demand_sizes_set = set()
@@ -697,117 +684,61 @@ async def export_rollplan_excel(
     else:
         sizes = sorted(demand_sizes_set)
 
-    # Fabric info
-    fabric_codes = list(dict.fromkeys(line.fabric_code for line in order.order_lines))
-    fabric_cost_map = {}
-    for fc in fabric_codes:
-        fab = db.query(FabricModel).filter(
-            FabricModel.customer_id == current_user.customer_id,
-            FabricModel.code == fc,
-        ).first()
-        if fab and fab.cost_per_yard:
-            fabric_cost_map[fc] = fab.cost_per_yard
+    # Fabric code for this roll plan's color
+    fabric_code = ""
+    for line in order.order_lines:
+        if line.color_code == roll_plan.color_code:
+            fabric_code = line.fabric_code
+            break
+
+    plan_max_ply = max_ply_height
+    if cutplan.solver_config and isinstance(cutplan.solver_config, dict):
+        plan_max_ply = cutplan.solver_config.get("max_ply_height", max_ply_height)
+
+    # Header info for all sheets
+    header_info = {
+        "order_number": order.order_number or "",
+        "style_number": order.style_number or "",
+        "fabric_code": fabric_code,
+        "color_code": roll_plan.color_code or "",
+        "cutplan_name": cutplan.name or "Cutplan",
+    }
+
+    # --- Map simulator cut numbers to lay-plan global cut numbers ---
+    # The lay plan numbers cuts globally across all colors; the simulator
+    # numbers them within a single color.  Walk the same marker/color/ply
+    # expansion the lay plan uses and record the global cut numbers that
+    # belong to this roll plan's color.
+    rp_color = roll_plan.color_code or ""
+    global_cuts_for_color: list[int] = []
+    global_cut = 0
+    for marker in cutplan.markers:
+        plies_by_color = marker.plies_by_color or {}
+        if not plies_by_color:
+            plies_by_color = {"ALL": marker.total_plies or 0}
+        for color, color_plies in plies_by_color.items():
+            remaining = color_plies
+            while remaining > 0:
+                lay_plies = min(remaining, plan_max_ply)
+                remaining -= lay_plies
+                global_cut += 1
+                if color == rp_color or (not rp_color and color == "ALL"):
+                    global_cuts_for_color.append(global_cut)
+
+    # Remap docket cut_numbers to global lay plan numbers
+    for i, d in enumerate(dockets):
+        if i < len(global_cuts_for_color):
+            d["cut_number"] = global_cuts_for_color[i]
 
     # --- Build workbook ---
     wb = openpyxl.Workbook()
     wb.remove(wb.active)
 
-    # Sheet 1: Cutplan report (one fabric tab)
-    fabric_lines = {}
-    for line in order.order_lines:
-        fabric_lines.setdefault(line.fabric_code, []).append(line)
+    # Sheet 1: Lay Plan (foundation — promoted to first sheet)
+    write_lay_plan_sheet(wb, "Lay Plan", sizes, cutplan.markers, plan_max_ply,
+                         header_info=header_info)
 
-    for fabric_code in fabric_codes:
-        sheet_name = fabric_code[:31]
-        ws = wb.create_sheet(title=sheet_name)
-
-        fabric_color_demands = {}
-        fabric_seen_colors = set()
-        for line in fabric_lines.get(fabric_code, []):
-            if line.color_code in fabric_seen_colors:
-                continue
-            fabric_seen_colors.add(line.color_code)
-            color_demand = {}
-            for sq in line.size_quantities:
-                if sq.quantity > 0:
-                    color_demand[sq.size_code] = sq.quantity
-            if color_demand:
-                fabric_color_demands[line.color_code] = color_demand
-
-        fc_cost = fabric_cost_map.get(fabric_code, fabric_cost_per_yard)
-
-        perimeter_by_size = {}
-        if perimeter_all_materials and pattern:
-            fab = db.query(FabricModel).filter(
-                FabricModel.customer_id == current_user.customer_id,
-                FabricModel.code == fabric_code,
-            ).first()
-            if fab:
-                mapping = db.query(PatternFabricMapping).filter(
-                    PatternFabricMapping.pattern_id == pattern.id,
-                    PatternFabricMapping.fabric_id == fab.id,
-                ).first()
-                if mapping and mapping.material_name in perimeter_all_materials:
-                    perimeter_by_size = perimeter_all_materials[mapping.material_name]
-            if not perimeter_by_size and len(perimeter_all_materials) == 1:
-                perimeter_by_size = list(perimeter_all_materials.values())[0]
-
-        row = 1
-        ws.cell(row=row, column=1, value=f"Order: {order.order_number}").font = TITLE_FONT
-        row += 1
-        ws.cell(row=row, column=1, value=f"Fabric: {fabric_code}")
-        ws.cell(row=row, column=2, value=f"${fc_cost:.2f}/yd").font = XlFont(bold=True, size=11, color="006600")
-        row += 2
-
-        row = write_demand_table(ws, row, sizes, fabric_color_demands)
-
-        plan_label = cutplan.name or "Cutplan"
-        cell = ws.cell(row=row, column=1, value=f"CUTPLAN: {plan_label}")
-        cell.font = SUBTITLE_FONT
-        cell.fill = CUTPLAN_FILL
-        for ci in range(2, 2 + len(sizes) + 7):
-            ws.cell(row=row, column=ci).fill = CUTPLAN_FILL
-        row += 1
-        ws.cell(row=row, column=1, value=f"Status: {cutplan.status}")
-        row += 2
-
-        plan_max_ply = max_ply_height
-        if cutplan.solver_config and isinstance(cutplan.solver_config, dict):
-            plan_max_ply = cutplan.solver_config.get("max_ply_height", max_ply_height)
-
-        cost_params = {
-            "default_perimeter_cm": DEFAULT_PERIMETER_CM,
-            "fc_cost_per_yard": fc_cost,
-            "spreading_cost_per_yard": spreading_cost_per_yard,
-            "spreading_cost_per_ply": spreading_cost_per_ply,
-            "cutting_cost_per_cm": cutting_cost_per_cm,
-            "prep_cost_per_meter": prep_cost_per_meter,
-        }
-        row, cost_totals = write_marker_table(
-            ws, row, sizes, cutplan.markers,
-            perimeter_by_size, cost_params,
-            max_ply_height=plan_max_ply,
-        )
-        ws.cell(row=row, column=1, value=f"Total Yards: {cost_totals['total_fabric_yards']:.2f}").font = HEADER_FONT
-        row += 2
-        row, cost_data_start = write_cost_breakdown(ws, row, cost_totals, fc_cost)
-        write_cost_charts(ws, cost_data_start)
-
-        for col in ws.columns:
-            max_length = 0
-            col_letter = col[0].column_letter
-            for cell_obj in col:
-                if cell_obj.value:
-                    max_length = max(max_length, len(str(cell_obj.value)))
-            ws.column_dimensions[col_letter].width = min(max_length + 3, 20)
-
-        # Sheet 2: Lay plan
-        safe_fabric = re.sub(r'[\\/?*\[\]:]', '', fabric_code)[:10]
-        safe_plan = re.sub(r'[\\/?*\[\]:]', '', plan_label)[:10]
-        lay_name = f"Lay-{safe_fabric}-{safe_plan}"
-        write_lay_plan_sheet(wb, lay_name, sizes, cutplan.markers, plan_max_ply)
-
-    # Sheet 3: Roll Plan Summary
+    # Sheet 2: Roll Plan Summary (waste stats + docket overview)
     waste_data = {}
     if source == "ga":
         waste_data = {
@@ -826,12 +757,16 @@ async def export_rollplan_excel(
             "real_waste_yards": roll_plan.mc_real_waste_avg or 0,
         }
 
-    write_roll_plan_summary_sheet(wb, dockets, waste_data)
+    write_roll_plan_summary_sheet(wb, dockets, waste_data, header_info=header_info)
 
-    # Sheets 4+: Per-cut dockets
-    for d in dockets:
-        cut_num = d.get("cut_number", "?")
-        write_docket_sheet(wb, f"Docket {cut_num}", d)
+    # Sheets 3+: Docket batches (10 per tab)
+    BATCH_SIZE = 10
+    for batch_start in range(0, len(dockets), BATCH_SIZE):
+        batch = dockets[batch_start:batch_start + BATCH_SIZE]
+        first = batch[0].get("cut_number", batch_start + 1)
+        last = batch[-1].get("cut_number", batch_start + len(batch))
+        sheet_name = f"Dockets {first}-{last}"
+        write_docket_batch_sheet(wb, sheet_name, batch, header_info=header_info)
 
     # Serialize
     output = io.BytesIO()

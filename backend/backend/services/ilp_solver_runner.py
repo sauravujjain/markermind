@@ -18,9 +18,43 @@ MAX_PLIES_PER_CUT = 100
 # ILP solver time limit per strategy (seconds)
 ILP_TIME_LIMIT = 120  # 2 minutes max per strategy
 
-# Marker filtering: top % per bundle count (with floor)
-MARKER_RETENTION_PERCENT = 0.25  # Keep top 25%
-MARKER_RETENTION_FLOOR = 25     # Always keep at least 25 per bundle count
+# Solver backend: "cpsat" (default, best quality), "scipy" (fallback)
+ILP_SOLVER_BACKEND = "cpsat"
+
+# Total marker budget per solver — dynamically distributed across BCs.
+# Target: solver finds OPTIMAL (not just feasible) within ILP_TIME_LIMIT.
+# Benchmarked Apr 2026 on P5 (7 sizes, 55 BCs):
+#   cpsat:  2000 markers (4000 vars) → optimal in ~30s
+#   scipy:   800 markers (1600 vars) → optimal in ~30s
+SOLVER_MARKER_BUDGET = {
+    "cpsat": 2500,
+    "scipy": 800,
+}
+
+
+def compute_marker_cap_per_bc(markers_by_bc: dict, backend: str = None) -> int:
+    """Dynamically compute per-BC marker cap based on solver budget.
+
+    BC 1-2 always keep ALL markers (brute-forced, few ratios).
+    Remaining budget is distributed evenly across BC 3+ groups.
+
+    Returns: cap per BC for bc >= 3.
+    """
+    if backend is None:
+        backend = ILP_SOLVER_BACKEND
+    total_budget = SOLVER_MARKER_BUDGET.get(backend, 800)
+
+    # Count BC 1-2 markers (always kept in full)
+    bc12_count = sum(len(markers_by_bc.get(bc, [])) for bc in [1, 2])
+    remaining = max(total_budget - bc12_count, 100)
+
+    # Count BC 3+ groups that have markers
+    bc3plus = [bc for bc in markers_by_bc if bc >= 3 and markers_by_bc[bc]]
+    if not bc3plus:
+        return remaining
+
+    cap = max(10, remaining // len(bc3plus))
+    return cap
 
 # Minimum plies by bundle count (to avoid wasteful small-ply large markers)
 MIN_PLIES_BY_BUNDLE = {
@@ -103,9 +137,11 @@ class CutPlan:
 
     @property
     def weighted_efficiency(self) -> float:
-        if self.total_plies == 0:
+        """Efficiency weighted by garments cut (bundles × plies)."""
+        total_garments = sum(a.marker.bundle_count * a.plies for a in self.assignments)
+        if total_garments == 0:
             return 0.0
-        return sum(a.marker.efficiency * a.plies for a in self.assignments) / self.total_plies
+        return sum(a.marker.efficiency * a.marker.bundle_count * a.plies for a in self.assignments) / total_garments
 
     @property
     def total_yards(self) -> float:
@@ -234,24 +270,25 @@ def generate_all_1_2_bundle_markers(
 
 def filter_markers_for_ilp(
     markers: List['Marker'],
-    retention_pct: float = MARKER_RETENTION_PERCENT,
-    floor: int = MARKER_RETENTION_FLOOR,
+    cap_per_bc: int = None,
+    backend: str = None,
 ) -> List['Marker']:
     """
-    Filter markers to keep top % per bundle count for ILP solver performance.
+    Cap markers per bundle count for ILP solver performance.
 
-    - 1-2 bundle markers: ALL kept (small search space, needed for exact fulfillment)
-    - 3+ bundle markers: top retention_pct%, with a minimum floor per bundle count
+    The cap is dynamically computed from the solver's marker budget:
+      - CP-SAT: ~2500 markers total (finds optimal in ~60s)
+      - SciPy:  ~800 markers total (finds optimal in ~30s)
+    BC 1-2 always kept in full. Remaining budget split across BC 3+ groups.
 
     Args:
-        markers: List of Marker objects (should already be sorted by efficiency)
-        retention_pct: Fraction of markers to keep per bundle count (0.25 = 25%)
-        floor: Minimum markers to keep per bundle count
+        markers: List of Marker objects
+        cap_per_bc: Override per-BC cap (None = auto from solver budget)
+        backend: Solver backend name (None = use ILP_SOLVER_BACKEND)
 
     Returns:
         Filtered list of Marker objects
     """
-    # Group by bundle count
     by_bundle: Dict[int, List['Marker']] = {}
     for m in markers:
         bc = m.bundle_count
@@ -259,24 +296,27 @@ def filter_markers_for_ilp(
             by_bundle[bc] = []
         by_bundle[bc].append(m)
 
+    # Compute dynamic cap if not overridden
+    if cap_per_bc is None:
+        cap_per_bc = compute_marker_cap_per_bc(by_bundle, backend)
+
     filtered = []
     stats = {}
     for bc in sorted(by_bundle.keys()):
         group = sorted(by_bundle[bc], key=lambda m: -m.efficiency)
         if bc <= 2:
-            # Keep all 1-2 bundle markers
             filtered.extend(group)
             stats[bc] = (len(group), len(group))
         else:
-            keep = max(floor, int(len(group) * retention_pct))
-            kept = group[:keep]
+            kept = group[:cap_per_bc]
             filtered.extend(kept)
             stats[bc] = (len(kept), len(group))
 
     total_before = len(markers)
     total_after = len(filtered)
-    print(f"[ILP] Marker filtering: {total_before} → {total_after} markers "
-          f"({', '.join(f'{bc}-bndl: {k}/{t}' for bc, (k, t) in sorted(stats.items()))})")
+    if total_before != total_after:
+        print(f"[ILP] Marker filter ({backend or ILP_SOLVER_BACKEND}): "
+              f"{total_before} → {total_after} markers (cap={cap_per_bc}/BC)")
 
     return filtered
 
@@ -338,6 +378,86 @@ def markers_from_nesting_results(
     return markers
 
 
+# ─── ILP Solver Backends ─────────────────────────────────────────────
+
+def _solve_cpsat(c, A_eq, b_eq, A_ub, b_ub, num_vars, n_markers,
+                 objective, lb, ub, integrality, time_limit):
+    """Solve ILP using Google OR-Tools CP-SAT. Handles 1000+ markers easily."""
+    from ortools.sat.python import cp_model
+
+    model = cp_model.CpModel()
+    SCALE = 10000  # CP-SAT uses integers; scale float costs
+
+    # Variables
+    vars_ = []
+    for i in range(num_vars):
+        vars_.append(model.NewIntVar(int(lb[i]), int(ub[i]), f'x{i}'))
+
+    # Equality constraints: A_eq @ x = b_eq
+    for row_idx in range(len(b_eq)):
+        expr = sum(int(A_eq[row_idx, j]) * vars_[j] for j in range(num_vars)
+                   if A_eq[row_idx, j] != 0)
+        model.Add(expr == int(b_eq[row_idx]))
+
+    # Inequality constraints: A_ub @ x <= b_ub
+    for row_idx in range(len(b_ub)):
+        expr = sum(int(A_ub[row_idx, j]) * vars_[j] for j in range(num_vars)
+                   if A_ub[row_idx, j] != 0)
+        model.Add(expr <= int(b_ub[row_idx]))
+
+    # Objective: minimize c @ x (scale to integer)
+    obj_terms = []
+    for i in range(num_vars):
+        if c[i] != 0:
+            obj_terms.append(int(c[i] * SCALE) * vars_[i])
+    if obj_terms:
+        model.Minimize(sum(obj_terms))
+
+    solver = cp_model.CpSolver()
+    solver.parameters.max_time_in_seconds = time_limit
+    solver.parameters.num_workers = 0  # Use all cores
+
+    status = solver.Solve(model)
+
+    if status in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+        x = np.array([solver.Value(v) for v in vars_], dtype=float)
+        print(f"[ILP] CP-SAT: {'optimal' if status == cp_model.OPTIMAL else 'feasible'} "
+              f"in {solver.WallTime():.1f}s, obj={solver.ObjectiveValue()/SCALE:.4f}")
+        return x, True
+
+    print(f"[ILP] CP-SAT: infeasible or no solution (status={status})")
+    return None, False
+
+
+
+def _solve_scipy(c, A_eq, b_eq, A_ub, b_ub, num_vars,
+                 lb, ub, integrality, time_limit):
+    """Solve ILP using scipy.optimize.milp. Original backend."""
+    from scipy.optimize import milp as scipy_milp, LinearConstraint, Bounds
+
+    bounds = Bounds(lb=lb, ub=ub)
+    constraints = [
+        LinearConstraint(A_eq, b_eq, b_eq),
+    ]
+    if len(A_ub) > 0:
+        constraints.append(LinearConstraint(A_ub, -np.inf, b_ub))
+
+    options_dict = {"time_limit": time_limit, "disp": False}
+    result = scipy_milp(c, constraints=constraints, bounds=bounds,
+                        integrality=integrality, options=options_dict)
+
+    if result.success:
+        print(f"[ILP] SciPy: optimal, obj={result.fun:.4f}")
+        return result.x, True
+
+    if result.x is not None and "time limit" in str(result.message).lower():
+        print(f"[ILP] SciPy: time limit, using best feasible")
+        return result.x, True
+
+    print(f"[ILP] SciPy: {result.message}")
+    return None, False
+
+
 def solve_ilp(
     demand: Dict[str, int],
     all_markers: List[Marker],
@@ -348,16 +468,17 @@ def solve_ilp(
     max_ply_height: int = 100,
     min_plies_by_bundle: Optional[Dict[int, int]] = None,
     avg_roll_length_yards: Optional[float] = None,
+    cost_metric: str = "efficiency",
 ) -> Tuple[CutPlan, float]:
     """
     Unified ILP solver with different objective functions.
 
     Objectives:
-      - "max_efficiency": Minimize sum((1 - eff[m]) x plies[m])
+      - "max_efficiency": Minimize sum(cost[m] x plies[m])
       - "min_markers": Minimize number of unique markers (uses binary vars)
       - "min_plies": Minimize sum(plies[m]) - proxy for minimizing cuts
-      - "min_bundle_cuts": Minimize sum(bundles[m] x cuts[m]) - actual cutting work
-      - "balanced": Max efficiency + penalty for each marker used
+      - "min_bundle_cuts": Minimize sum(cost[m] x plies[m]) + cutting work
+      - "balanced": cost + penalty for each marker used
 
     Args:
         demand: Size -> quantity mapping
@@ -366,15 +487,11 @@ def solve_ilp(
         objective: Optimization objective
         marker_penalty: Penalty per marker used (for "balanced" objective)
         name: Name for the cutplan
+        cost_metric: "efficiency" (default) uses (1-eff), "length" uses length_yards
 
     Returns:
         Tuple of (CutPlan, solve_time_seconds)
     """
-    try:
-        from scipy.optimize import LinearConstraint, Bounds
-    except ImportError:
-        raise ImportError("scipy.optimize not available")
-
     t0 = time.time()
     n = len(all_markers)
 
@@ -387,41 +504,62 @@ def solve_ilp(
     # Get minimum plies for each marker (use custom if provided)
     min_plies = [get_min_plies(m.bundle_count, min_plies_by_bundle) for m in all_markers]
 
+    # Cost per marker: either (1-efficiency) or normalized length.
+    # Both metrics are in [0, 1] range so that strategy penalties (1, 5, 10)
+    # remain meaningful regardless of which metric is used.
+    if cost_metric == "length":
+        _max_len = max((m.length_yards for m in all_markers if m.length_yards > 0), default=1.0)
+        if _max_len <= 0:
+            _max_len = 1.0
+    else:
+        _max_len = 1.0
+
+    def _marker_cost(m: Marker) -> float:
+        if cost_metric == "length":
+            return (m.length_yards / _max_len) if m.length_yards > 0 else 1.0
+        return 1 - m.efficiency
+
     # Build objective function based on type
-    # All strategies now include efficiency weighting for better results:
-    #   A: max_efficiency  → eff_weight + penalty=1 (slight marker penalty)
-    #   B: min_markers     → eff_weight + penalty=10 (strongly favor fewer markers)
+    # All strategies use _marker_cost() which respects cost_metric switch:
+    #   A: max_efficiency  → cost + penalty=1 (slight marker penalty)
+    #   B: min_markers     → cost + penalty=10 (strongly favor fewer markers)
     #   C: min_end_cuts    → handled externally as two-stage
-    #   D: min_bundle_cuts → eff_weight + cutting_work_weight (3 variable model)
-    #   E: balanced        → eff_weight + penalty=5 (trade-off)
+    #   D: min_bundle_cuts → cost + cutting_work_weight (3 variable model)
+    #   E: balanced        → cost + penalty=5 (trade-off)
 
     if objective == "min_bundle_cuts":
         # Variables: [plies_0..n-1, used_0..n-1, cuts_0..n-1]
         num_vars = 3 * n
         c = np.zeros(num_vars)
         for i, m in enumerate(all_markers):
-            c[i] = 1 - m.efficiency       # Efficiency loss term
+            c[i] = _marker_cost(m)        # Cost term
             c[2*n + i] = 2 * m.bundle_count  # Cutting work term (weight=2)
     elif objective == "max_efficiency":
-        # Efficiency-focused with slight marker penalty (penalty=1)
+        # PURE efficiency: zero marker penalty
+        # This lets the solver use as many markers as needed for best utilization
+        # min_plies are respected (user-set limits still apply; infeasibility
+        # is handled by the fallback retry below)
         num_vars = 2 * n
         c = np.zeros(num_vars)
         for i, m in enumerate(all_markers):
-            c[i] = 1 - m.efficiency
-        c[n:2*n] = 1  # Light penalty per marker
+            c[i] = _marker_cost(m)
+        c[n:2*n] = 0  # No marker penalty — pure efficiency
     elif objective == "min_markers":
-        # Strongly favor fewer markers but still consider efficiency (penalty=10)
+        # PURE marker minimization: minimize marker count first
+        # Tiny efficiency tie-breaker so solver prefers better markers among
+        # equal-marker-count solutions, without expanding the search space
         num_vars = 2 * n
         c = np.zeros(num_vars)
         for i, m in enumerate(all_markers):
-            c[i] = 1 - m.efficiency
-        c[n:2*n] = 10  # Heavy penalty per marker
+            c[i] = _marker_cost(m) * 1e-6
+        c[n:2*n] = 1  # Marker count is the dominant objective
     elif objective == "balanced":
-        # Trade-off between efficiency and marker count (penalty=5)
+        # Trade-off: efficiency cost + penalty per marker
+        # marker_penalty (default 5) is used directly — user-tunable
         num_vars = 2 * n
         c = np.zeros(num_vars)
         for i, m in enumerate(all_markers):
-            c[i] = 1 - m.efficiency
+            c[i] = _marker_cost(m)
         c[n:2*n] = marker_penalty
     elif objective == "roll_optimized":
         # Penalize markers whose lengths produce large roll remainders
@@ -430,15 +568,15 @@ def solve_ilp(
         roll_len = avg_roll_length_yards or 100.0
         roll_penalty_weight = marker_penalty  # reuse penalty param
         for i, m in enumerate(all_markers):
-            # Base efficiency cost
-            eff_cost = 1 - m.efficiency
+            # Base cost
+            base_cost = _marker_cost(m)
             # Roll remainder penalty: how poorly marker length divides into roll
             if m.length_yards > 0 and roll_len > 0:
                 remainder = roll_len % m.length_yards
                 remainder_frac = remainder / roll_len
             else:
                 remainder_frac = 0.0
-            c[i] = eff_cost + roll_penalty_weight * remainder_frac
+            c[i] = base_cost + roll_penalty_weight * remainder_frac
         c[n:2*n] = marker_penalty
     else:
         raise ValueError(f"Unknown objective: {objective}")
@@ -487,31 +625,54 @@ def solve_ilp(
         ub = np.array([M] * n + [1] * n + [max_cuts] * n)
     else:
         ub = np.array([M] * n + [1] * n)
-    bounds = Bounds(lb=lb, ub=ub)
 
     # All integer
     integrality = np.ones(num_vars)
 
-    # Solve
-    constraints = [
-        LinearConstraint(np.array(A_eq), b_eq, b_eq),
-        LinearConstraint(np.array(A_ub), -np.inf, b_ub),
-    ]
-    from scipy.optimize import milp as scipy_milp
-    options_dict = {"time_limit": ILP_TIME_LIMIT, "disp": False}
-    result = scipy_milp(c, constraints=constraints, bounds=bounds, integrality=integrality, options=options_dict)
+    # ── Solve with selected backend ─────────────────────────────────
+    A_eq_np = np.array(A_eq)
+    A_ub_np = np.array(A_ub) if A_ub else np.empty((0, num_vars))
+    b_eq_np = np.array(b_eq)
+    b_ub_np = np.array(b_ub) if b_ub else np.empty(0)
+
+    backend = ILP_SOLVER_BACKEND
+    result_x = None
+    result_success = False
+
+    if backend == "cpsat":
+        result_x, result_success = _solve_cpsat(
+            c, A_eq_np, b_eq_np, A_ub_np, b_ub_np, num_vars, n,
+            objective, lb, ub, integrality, ILP_TIME_LIMIT)
+    else:  # "scipy" or any other fallback
+        result_x, result_success = _solve_scipy(
+            c, A_eq_np, b_eq_np, A_ub_np, b_ub_np, num_vars,
+            lb, ub, integrality, ILP_TIME_LIMIT)
+
     solve_time = time.time() - t0
 
-    if not result.success:
-        # If time limit reached but we have a feasible solution, use it
-        if result.x is not None and "time limit" in str(result.message).lower():
-            print(f"[ILP] {objective}: Time limit reached ({solve_time:.1f}s), using best feasible solution")
+    if not result_success or result_x is None:
+        if any(mp > 1 for mp in min_plies):
+            print(f"[ILP] {objective} ({backend}): Infeasible with min-ply constraints, "
+                  f"retrying with relaxed limits...")
+            relaxed = {bc: 1 for bc in range(1, 9)}
+            return solve_ilp(
+                demand=demand,
+                all_markers=all_markers,
+                sizes=sizes,
+                objective=objective,
+                marker_penalty=marker_penalty,
+                max_ply_height=max_ply_height,
+                min_plies_by_bundle=relaxed,
+                name=name + " (relaxed min-ply)",
+                avg_roll_length_yards=avg_roll_length_yards,
+                cost_metric=cost_metric,
+            )
         else:
-            raise RuntimeError(f"ILP failed ({solve_time:.1f}s): {result.message}")
+            raise RuntimeError(f"ILP failed ({backend}, {solve_time:.1f}s)")
 
     # Build plan
     plan = CutPlan(name=name, strategy=objective, sizes=sizes, max_ply_height=max_ply_height)
-    x = np.round(result.x).astype(int)
+    x = np.round(result_x).astype(int)
     plies_vals = x[:n]
 
     for i, plies in enumerate(plies_vals):
@@ -531,6 +692,7 @@ def _solve_min_end_cuts(
     max_ply_height: int = 100,
     min_plies_by_bundle: Optional[Dict[int, int]] = None,
     name: str = "Option C: Min End Cuts",
+    cost_metric: str = "efficiency",
 ) -> Tuple[CutPlan, float]:
     """
     Two-stage solver to minimize end cuts:
@@ -564,6 +726,7 @@ def _solve_min_end_cuts(
                 max_ply_height=max_ply_height,
                 min_plies_by_bundle=min_plies_by_bundle,
                 name=f"{name} (Stage 1)",
+                cost_metric=cost_metric,
             )
 
             # Compute what stage 1 produced
@@ -597,6 +760,7 @@ def _solve_min_end_cuts(
                 max_ply_height=max_ply_height,
                 min_plies_by_bundle=relaxed_min_plies,
                 name=f"{name} (Stage 2)",
+                cost_metric=cost_metric,
             )
 
             for a in plan_stage2.assignments:
@@ -621,6 +785,7 @@ def optimize_cutplan(
     max_ply_height: int = 100,
     min_plies_by_bundle_str: Optional[str] = None,
     avg_roll_length_yards: Optional[float] = None,
+    cost_metric: str = "efficiency",
 ) -> List[Dict]:
     """
     Run ILP optimization with multiple strategies.
@@ -663,25 +828,34 @@ def optimize_cutplan(
 
     print(f"[ILP] After adding 1-2 bundle completions: {len(marker_objects)} markers")
 
-    # Filter markers for solver performance (top 25% per bundle, floor 25)
+    # Cap markers per BC for solver performance. The MarkerBank is already
+    # pre-filtered by GPU nesting (top 25%, floor 25). This cap only triggers
+    # when brute-force produces many bc≥3 markers (e.g., 200+ for bc=6).
     marker_objects = filter_markers_for_ilp(marker_objects)
 
     # Sort by efficiency
     marker_objects.sort(key=lambda m: -m.efficiency)
 
+    # Log pool composition for diagnostics
+    _bc_counts = {}
+    for m in marker_objects:
+        _bc_counts[m.bundle_count] = _bc_counts.get(m.bundle_count, 0) + 1
     print(f"[ILP] Final marker pool: {len(marker_objects)} markers → "
-          f"{len(marker_objects) * 2} ILP variables")
+          f"{len(marker_objects) * 2} ILP variables "
+          f"({', '.join(f'bc{bc}:{ct}' for bc, ct in sorted(_bc_counts.items()))})")
 
     # Run each strategy
     cutplan_options = []
 
     strategy_names = {
         "max_efficiency": "Option A: Max Efficiency",
-        "min_markers": "Option B: Min Markers",
-        "min_end_cuts": "Option C: Min End Cuts",
-        "min_bundle_cuts": "Option D: Min Cutting Work",
-        "balanced": "Option E: Balanced",
-        "roll_optimized": "Option F: Roll Optimized",
+        "balanced": "Option B: Balanced",
+        "min_bundle_cuts": "Option C: Min Cutting Work",
+        "endbit_optimized": "Option D: EndBit Optimized",
+        # Legacy (kept for backward compat with existing cutplans):
+        "min_markers": "Option E: Min Markers",
+        "min_end_cuts": "Option F: Min End Cuts",
+        "roll_optimized": "Option G: Roll Optimized",
     }
 
     # Parse min_plies_by_bundle from custom string if provided
@@ -713,6 +887,7 @@ def optimize_cutplan(
                     max_ply_height=max_ply_height,
                     min_plies_by_bundle=custom_min_plies,
                     name=strategy_names[option],
+                    cost_metric=cost_metric,
                 )
             elif option == "min_plies":
                 # Legacy alias → redirect to min_end_cuts
@@ -724,6 +899,7 @@ def optimize_cutplan(
                     max_ply_height=max_ply_height,
                     min_plies_by_bundle=custom_min_plies,
                     name=strategy_names.get("min_end_cuts", "Option C: Min End Cuts"),
+                    cost_metric=cost_metric,
                 )
             else:
                 plan, solve_time = solve_ilp(
@@ -736,6 +912,7 @@ def optimize_cutplan(
                     min_plies_by_bundle=custom_min_plies,
                     name=strategy_names.get(option, f"Option: {option}"),
                     avg_roll_length_yards=avg_roll_length_yards,
+                    cost_metric=cost_metric,
                 )
             result = plan.to_dict()
             result["solve_time"] = solve_time
