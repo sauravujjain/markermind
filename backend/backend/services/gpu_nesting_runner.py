@@ -660,7 +660,7 @@ def load_pieces_for_material(
 
     # Route to correct parser based on file_type
     if file_type == "optitex_aama":
-        from nesting_engine.io.optitex_aama_parser import load_aama_pattern as load_optitex, AAMAGrader as OptitexGrader
+        from nesting_engine.io.optitex_kpr_parser import load_aama_pattern as load_optitex, AAMAGrader as OptitexGrader
         pieces, rules = load_optitex(dxf_path, rul_path)
         grader = OptitexGrader(pieces, rules)
     else:

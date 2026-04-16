@@ -380,7 +380,7 @@ def _load_pieces_optitex_aama_for_spyrrow(
     Uses the optitex_aama_parser which handles OptiTex's packed multi-pair
     delta lines in the RUL file.
     """
-    from nesting_engine.io.optitex_aama_parser import (
+    from nesting_engine.io.optitex_kpr_parser import (
         grade_material_to_nesting_pieces as optitex_grade,
         load_aama_pattern as optitex_load,
         clean_vertices_for_spyrrow as clean_optitex_vertices,

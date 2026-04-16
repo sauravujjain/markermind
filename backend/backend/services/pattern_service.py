@@ -77,7 +77,7 @@ class PatternService:
             if pattern.file_type == "gerber_aama":
                 from nesting_engine.io.gerber_aama_parser import parse_gerber_aama as load_aama_pattern, GerberAAMAGrader as AAMAGrader
             elif pattern.file_type == "optitex_aama":
-                from nesting_engine.io.optitex_aama_parser import load_aama_pattern, AAMAGrader
+                from nesting_engine.io.optitex_kpr_parser import load_aama_pattern, AAMAGrader
             else:
                 from nesting_engine.io.aama_parser import load_aama_pattern, AAMAGrader
 
