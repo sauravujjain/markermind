@@ -333,6 +333,7 @@ For in-depth algorithm documentation, see:
 | [`docs/multi_width_nesting.md`](docs/multi_width_nesting.md) | Multi-width GPU nesting: cross-width Ridge prediction, sampling strategy |
 | [`docs/endbit_optimized_solver.md`](docs/endbit_optimized_solver.md) | **EndBit Optimized cutplan**: two-phase strategy, floor MC, end-bit marker selection, validation |
 | [`docs/multilot_cutplan_solver.md`](docs/multilot_cutplan_solver.md) | **Multi-lot cutplan solver**: greedy+GA pipeline, lot grouping, area-model lengths, validated on 2 colors |
+| [`docs/gpu_batched_packer.md`](docs/gpu_batched_packer.md) | **GPU batched packer**: monolithic CUDA kernel for bulk ratio screening. 3.17x faster than per-ratio Python BLF, bit-identical lengths at `prefer_rot0=True` (default). Wired into `_evaluate_ratios_batch` for N >= 32. |
 
 **IMPORTANT: Keep docs in sync with code.** When modifying algorithm logic in any solver (especially `endbit_solver.py`, `ilp_solver_runner.py`, `rollplan_simulator.py`), update the corresponding doc in `docs/`. If branching an algorithm to handle a new scenario, document the variant in the same doc file with a clear section heading.
 
@@ -522,6 +523,22 @@ efficiency = total_vector_area_mm2 / (fabric_width_mm × gpu_length_mm)
 **NVIDIA library survey (Apr 2026):** cuOpt, cuSpatial, Warp, CUDA Graphs, Cooperative Groups, CUB — none help. 2D irregular strip packing is too niche. No open-source GPU irregular nesting exists.
 
 **The only viable path to 50+ markers/sec:** A monolithic CUDA kernel that runs the entire BLF loop (all pieces) in one launch, eliminating Python roundtrips. Significant CUDA engineering effort (weeks).
+
+### PROVEN: Monolithic Batched GPU BLF Kernel (Apr 2026)
+
+**The monolithic path flagged above was built and shipped.** `backend/backend/services/gpu_batched_packer.py` implements a single CUDA kernel where each CUDA block processes one full sequence (all pieces), threads cooperate via shared-memory `atomicMin` on a 64-bit packed `(score, x, y, rot)` word, then parallel-update the container. One kernel launch evaluates `batch_size` sequences simultaneously.
+
+**Measured on 126H010C / 461 ratios, bc=1..5, gpu_scale=0.15:**
+- **3.17x faster** than per-ratio Python BLF loop (20s vs 63s total).
+- **Bit-identical length output** to production Python BLF with `prefer_rot0=True` (default). Verified 461/461 ratios match to 0 mm.
+- Speedup scales with batch size: 2.0x at N=56, 3.1x at N=461.
+
+**Wired into production**: `_evaluate_ratios_batch` dispatches to the batched kernel when `N >= 32` and falls back to the Python loop below that threshold or on exception. Frontend workflows using `run_nesting_for_material` get the speedup automatically with zero API changes and zero regression risk.
+
+**When NOT to use it:** single-ratio eval (N=1 uses 1 of 30 SMs and is slower than the existing `evaluate_ratio`). The per-ratio path is still the right call for single-marker recomputation.
+
+**Doc:** [`docs/gpu_batched_packer.md`](docs/gpu_batched_packer.md)
+**Commits:** `74b4a9a` (add module), `0bf498a` (wire into default path).
 
 ### PROVEN: Lookahead BLF for GPU Nesting Quality
 
