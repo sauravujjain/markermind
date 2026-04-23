@@ -2667,7 +2667,7 @@ def _evaluate_ratios_batch_gpu_kernel(
         strat_primary = 'area_desc'  # batch API default
         dual = True  # match legacy: sort_strategy=None -> dual_sort
 
-    # Run the batch kernel (all ratios, prefer_rot0=True -> Python-match).
+    # Run the batch kernel — dual_rot=True tries both rot0/free and keeps shorter.
     batch_results = evaluate_ratios_batched(
         ratios=ratios,
         pieces_by_size=pieces_by_size,
@@ -2677,7 +2677,8 @@ def _evaluate_ratios_batch_gpu_kernel(
         sort_strategy=strat_primary,
         dual_sort=dual,
         batch_size=256,
-        prefer_rot0=True,
+        prefer_rot0=False,
+        dual_rot=True,
         verbose=False,
     )
 

@@ -389,6 +389,7 @@ def evaluate_ratios_batched(
     dual_sort: bool = False,
     batch_size: int = 256,
     prefer_rot0: bool = True,
+    dual_rot: bool = False,
     verbose: bool = False,
 ) -> List[Dict]:
     """
@@ -406,6 +407,12 @@ def evaluate_ratios_batched(
         batch_size:      Sequences per kernel launch. Ratios are grouped by piece
                          count and each group is chunked at this size.
         prefer_rot0:     True = matches production Python BLF bit-identically.
+                         Ignored when dual_rot=True (both are tried).
+        dual_rot:        If True, run each ratio with both prefer_rot0=True and
+                         prefer_rot0=False and keep the shorter result. Adds ~1x
+                         overhead on top of dual_sort. Recommended for non-directional
+                         fabrics where free rotation wins on average (+1.5%) but
+                         rot0 occasionally wins for heavy 2XL/XL combinations.
         verbose:         Print per-group timing info.
 
     Returns:
@@ -429,6 +436,9 @@ def evaluate_ratios_batched(
         alt = "width_desc" if sort_strategy == "area_desc" else "area_desc"
         strategies.append(alt)
 
+    # Rotation values to try per ratio
+    rot_values = [True, False] if dual_rot else [prefer_rot0]
+
     # Expand sequences per ratio per strategy
     per_strategy_seqs: Dict[str, List[List[int]]] = {}
     for strat in strategies:
@@ -437,13 +447,14 @@ def evaluate_ratios_batched(
             for r in ratios
         ]
 
-    # Group (seq_len, strategy) -> ratio indices
-    groups: Dict[Tuple[int, str], List[int]] = {}
+    # Group (seq_len, strategy, rot_val) -> ratio indices
+    groups: Dict[Tuple[int, str, bool], List[int]] = {}
     for strat, seqs in per_strategy_seqs.items():
-        for ri, seq in enumerate(seqs):
-            groups.setdefault((len(seq), strat), []).append(ri)
+        for rot_val in rot_values:
+            for ri, seq in enumerate(seqs):
+                groups.setdefault((len(seq), strat, rot_val), []).append(ri)
 
-    # Result slots (keep the shorter across strategies if dual_sort)
+    # Result slots (keep the shorter across all strategy+rotation variants)
     results: List[Dict] = [
         {
             "ratio": r,
@@ -460,9 +471,10 @@ def evaluate_ratios_batched(
 
     blf = BatchedBLF(pieces_list, strip_width_px, max_length_px)
 
-    for (n_pieces, strat), ratio_indices in groups.items():
+    for (n_pieces, strat, rot_val), ratio_indices in groups.items():
         if verbose:
-            print(f"  group n_pieces={n_pieces} strategy={strat}: {len(ratio_indices)} ratios")
+            print(f"  group n_pieces={n_pieces} strategy={strat} "
+                  f"rot0={rot_val}: {len(ratio_indices)} ratios")
 
         for chunk_start in range(0, len(ratio_indices), batch_size):
             chunk = ratio_indices[chunk_start: chunk_start + batch_size]
@@ -470,7 +482,7 @@ def evaluate_ratios_batched(
                 [per_strategy_seqs[strat][ri] for ri in chunk], dtype=np.int32,
             )
             t0 = time.time()
-            lengths, placements = blf.solve(batch_seqs, prefer_rot0=prefer_rot0)
+            lengths, placements = blf.solve(batch_seqs, prefer_rot0=rot_val)
             dt = time.time() - t0
             if verbose:
                 print(
@@ -482,7 +494,7 @@ def evaluate_ratios_batched(
                 L_px = int(lengths[i])
                 length_mm = L_px / gpu_scale
                 if length_mm >= results[ri]["length_mm"]:
-                    continue  # already have a shorter variant from a different sort
+                    continue  # already have a shorter variant from a different sort/rot
 
                 total_area = sum(
                     _polygon_area_mm2(pieces_list[idx]["vertices_mm"])
