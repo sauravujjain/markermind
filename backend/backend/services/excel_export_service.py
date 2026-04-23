@@ -37,6 +37,15 @@ RED_FILL = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="soli
 # Alternating row fill
 ALT_ROW_FILL = PatternFill(start_color="F2F2F2", end_color="F2F2F2", fill_type="solid")
 
+# Absorber row highlight (BC=1 markers in lay plan)
+ABSORBER_ROW_FILL = PatternFill(start_color="E2EFDA", end_color="E2EFDA", fill_type="solid")
+
+# Factory target callout (real material loss — prominent at top of summary)
+TARGET_FILL = PatternFill(start_color="FFF2CC", end_color="FFF2CC", fill_type="solid")
+
+# Untouched / returnable rolls highlight (roll plan summary)
+UNTOUCHED_ROLL_FILL = PatternFill(start_color="FCE4D6", end_color="FCE4D6", fill_type="solid")
+
 # Size column header
 SIZE_FILL = PatternFill(start_color="FFF2CC", end_color="FFF2CC", fill_type="solid")
 
@@ -366,9 +375,13 @@ def write_marker_table(
         # Always recalculate cuts from current max_ply_height (DB value may be stale)
         marker_cuts = (marker_plies + max_ply_height - 1) // max_ply_height if marker_plies > 0 else 0
 
-        # Zebra striping
-        is_alt = m_idx % 2 == 0
-        row_fill = ALT_ROW_FILL if is_alt else None
+        # BC=1 rows get the absorber highlight; otherwise zebra striping.
+        if bundles == 1:
+            row_fill = ABSORBER_ROW_FILL
+        elif m_idx % 2 == 0:
+            row_fill = ALT_ROW_FILL
+        else:
+            row_fill = None
 
         def _style(cell, fill_override=None):
             cell.border = THIN_BORDER
@@ -688,6 +701,76 @@ def write_marker_details(
 # ---------------------------------------------------------------------------
 # Write lay plan sheet
 # ---------------------------------------------------------------------------
+# Absorber interleave: positions (1-indexed) where multi-ply BC=1 cuts are
+# inserted into the cut sequence. The FINAL absorber is always placed last.
+ABSORBER_INTERLEAVE_GAPS = [5, 12, 20, 30, 42, 55]
+
+
+def _expand_marker_to_cuts(marker, max_ply_height: int) -> list:
+    """Expand one cutplan marker into per-cut stack records (≤ max_ply_height each)."""
+    ratios = marker.ratio_str.split("-")
+    bundles = sum(int(x) for x in ratios)
+    label = marker.marker_label or f"M-{marker.ratio_str}"
+    has_cpu = marker.layout is not None
+    length_yd = (
+        marker.layout.length_yards
+        if has_cpu and marker.layout.length_yards
+        else (marker.length_yards or 0)
+    )
+    plies_by_color = marker.plies_by_color or {"ALL": marker.total_plies or 0}
+    out = []
+    for color, color_plies in plies_by_color.items():
+        remaining = color_plies
+        while remaining > 0:
+            lay = min(remaining, max_ply_height)
+            remaining -= lay
+            out.append({
+                "marker_label": label, "color": color,
+                "ratio_str": marker.ratio_str, "ratios": ratios,
+                "bundles": bundles, "bc": bundles,
+                "length_yd": length_yd, "lay_plies": lay,
+            })
+    return out
+
+
+def _interleave_absorbers(cuts: list) -> list:
+    """Reorder cuts so BC=1 markers absorb end-bits from larger markers.
+
+    Rules (operational, not numerical — keeps the visible end-bit pile shallow):
+    - Multi-ply BC=1 absorber cuts: inserted at fixed positions
+      ABSORBER_INTERLEAVE_GAPS = [5, 12, 20, ...].
+    - The LAST BC=1 absorber cut is always placed at the very end to sweep
+      any trailing end-bits.
+    - Single-ply BC=1 trims: appended at the tail (position doesn't matter).
+    - Normal cuts: sorted biggest-marker-first (they generate EBs earliest,
+      so absorbers downstream have something to catch).
+    """
+    multi_abs = [c for c in cuts if c["bc"] == 1 and c["lay_plies"] > 1]
+    single_abs = [c for c in cuts if c["bc"] == 1 and c["lay_plies"] == 1]
+    normals = [c for c in cuts if c["bc"] != 1]
+
+    if not multi_abs and not single_abs:
+        return cuts
+
+    normals.sort(key=lambda c: (-c["length_yd"], -c["bc"]))
+
+    last_abs = multi_abs[-1] if multi_abs else None
+    to_interleave = multi_abs[:-1] if multi_abs else []
+    positions = ABSORBER_INTERLEAVE_GAPS[:len(to_interleave)]
+
+    result, ni = [], 0
+    for i, tp in enumerate(positions):
+        while len(result) < tp - 1 and ni < len(normals):
+            result.append(normals[ni]); ni += 1
+        result.append(to_interleave[i])
+    while ni < len(normals):
+        result.append(normals[ni]); ni += 1
+    result.extend(single_abs)
+    if last_abs is not None:
+        result.append(last_abs)
+    return result
+
+
 def write_lay_plan_sheet(
     wb,
     sheet_name: str,
@@ -695,10 +778,13 @@ def write_lay_plan_sheet(
     markers: list,
     max_ply_height: int = 100,
     header_info: Optional[Dict[str, str]] = None,
+    interleave_absorbers: bool = False,
 ) -> None:
-    """
-    Create a new sheet expanding markers into per-lay rows
-    based on max_ply_height.
+    """Expand markers into per-lay rows at max_ply_height.
+
+    interleave_absorbers: when True, BC=1 multi-ply markers are redistributed
+    across the cut sequence (see _interleave_absorbers). Off by default; enable
+    per-customer (e.g. VT) where floor operators prefer a shallow EB pile.
     """
     # Excel forbids these characters in sheet names: \ / ? * [ ] :
     safe_name = re.sub(r'[\\/?*\[\]:]', '-', sheet_name)[:31]
@@ -720,58 +806,44 @@ def write_lay_plan_sheet(
         cell.alignment = CENTER
 
     row += 1
-    cut_number = 0
 
+    cuts = []
     for marker in markers:
-        ratios = marker.ratio_str.split("-")
-        bundles = sum(int(x) for x in ratios)
-        ratio_display = marker.ratio_str
+        cuts.extend(_expand_marker_to_cuts(marker, max_ply_height))
+    if interleave_absorbers:
+        cuts = _interleave_absorbers(cuts)
 
-        has_cpu = marker.layout is not None
-        length_yd = (
-            marker.layout.length_yards
-            if has_cpu and marker.layout.length_yards
-            else (marker.length_yards or 0)
-        )
+    for cut_number, c in enumerate(cuts, 1):
+        # BC=1 rows get the absorber highlight; otherwise zebra striping.
+        if c["bc"] == 1:
+            row_fill = ABSORBER_ROW_FILL
+        elif cut_number % 2 == 0:
+            row_fill = ALT_ROW_FILL
+        else:
+            row_fill = None
 
-        label = marker.marker_label or f"M-{marker.ratio_str}"
-        plies_by_color = marker.plies_by_color or {}
+        def _s(cell):
+            cell.border = THIN_BORDER
+            cell.alignment = CENTER
+            if row_fill:
+                cell.fill = row_fill
 
-        if not plies_by_color:
-            plies_by_color = {"ALL": marker.total_plies or 0}
+        _s(ws.cell(row=row, column=1, value=cut_number))
+        _s(ws.cell(row=row, column=2, value=c["marker_label"]))
+        _s(ws.cell(row=row, column=3, value=c["color"]))
+        _s(ws.cell(row=row, column=4, value=c["ratio_str"]))
 
-        for color, color_plies in plies_by_color.items():
-            remaining = color_plies
-            while remaining > 0:
-                lay_plies = min(remaining, max_ply_height)
-                remaining -= lay_plies
-                cut_number += 1
+        for i, size in enumerate(sizes):
+            rv = int(c["ratios"][i]) if i < len(c["ratios"]) else 0
+            _s(ws.cell(row=row, column=5 + i, value=rv if rv else ""))
 
-                is_alt = cut_number % 2 == 0
-                row_fill = ALT_ROW_FILL if is_alt else None
+        col_off = 5 + len(sizes)
+        _s(ws.cell(row=row, column=col_off, value=c["bundles"]))
+        cell = ws.cell(row=row, column=col_off + 1, value=round(c["length_yd"], 3))
+        _s(cell)
+        _s(ws.cell(row=row, column=col_off + 2, value=c["lay_plies"]))
 
-                def _s(cell):
-                    cell.border = THIN_BORDER
-                    cell.alignment = CENTER
-                    if row_fill:
-                        cell.fill = row_fill
-
-                _s(ws.cell(row=row, column=1, value=cut_number))
-                _s(ws.cell(row=row, column=2, value=label))
-                _s(ws.cell(row=row, column=3, value=color))
-                _s(ws.cell(row=row, column=4, value=ratio_display))
-
-                for i, size in enumerate(sizes):
-                    rv = int(ratios[i]) if i < len(ratios) else 0
-                    _s(ws.cell(row=row, column=5 + i, value=rv if rv else ""))
-
-                col_off = 5 + len(sizes)
-                _s(ws.cell(row=row, column=col_off, value=bundles))
-                c = ws.cell(row=row, column=col_off + 1, value=round(length_yd, 3))
-                _s(c)
-                _s(ws.cell(row=row, column=col_off + 2, value=lay_plies))
-
-                row += 1
+        row += 1
 
     # Auto-fit columns
     for col in ws.columns:
@@ -791,15 +863,29 @@ def write_roll_plan_summary_sheet(
     dockets: List[Dict[str, Any]],
     waste_data: Dict[str, float],
     header_info: Optional[Dict[str, str]] = None,
+    plan_info: Optional[Dict[str, Any]] = None,
+    rolls: Optional[List[Any]] = None,
+    markers: Optional[List[Any]] = None,
+    max_ply_height: int = 100,
 ) -> None:
     """
-    Create a 'Roll Plan Summary' sheet with waste stats and docket overview.
-    waste_data keys: total_fabric_yards, unusable_yards, endbit_yards,
-                     returnable_yards, real_waste_yards
+    Create the 'Roll Plan Summary' sheet.
+
+    Core blocks (always rendered from waste_data + dockets):
+      - Factory Target — real material loss (T1+T2) highlighted at top
+      - Docket overview table
+
+    Optional enrichment (rendered when the extra params are supplied):
+      - plan_info: plan totals (plan_fabric_yd, total_plies, total_cuts,
+                    weighted_eff_pct, garments_produced, order_number)
+      - rolls: list with .roll_id / .length_yards — drives roll inventory
+               + an UNTOUCHED ROLLS list (highlighted) comparing rolls
+               seen in dockets vs the full inventory
+      - markers: list with .marker_label / .ratio_str / .length_yards /
+                  .total_plies — drives the per-marker summary block
     """
     ws = wb.create_sheet(title="Roll Plan Summary")
 
-    # Report header block
     if header_info:
         row = _write_report_header(ws, header_info, "ROLL PLAN SUMMARY")
     else:
@@ -807,25 +893,211 @@ def write_roll_plan_summary_sheet(
         ws.cell(row=row, column=1, value="ROLL PLAN SUMMARY").font = TITLE_FONT
         row += 2
 
-    # Waste stats block
-    total_fabric = waste_data.get("total_fabric_yards", 0)
-    unusable = waste_data.get("unusable_yards", 0)
-    endbit = waste_data.get("endbit_yards", 0)
-    returnable = waste_data.get("returnable_yards", 0)
-    real_waste = waste_data.get("real_waste_yards", 0)
-    waste_pct = (real_waste / total_fabric * 100) if total_fabric > 0 else 0
+    # ---- Pre-compute metrics ----
+    total_fabric = waste_data.get("total_fabric_yards", 0) or 0
+    t1 = waste_data.get("unusable_yards", 0) or 0
+    t2 = waste_data.get("endbit_yards", 0) or 0
+    t3 = waste_data.get("returnable_yards", 0) or 0
+    t1_count = waste_data.get("unusable_count", 0) or 0
+    t2_count = waste_data.get("endbit_count", 0) or 0
+    t3_count = waste_data.get("returnable_count", 0) or 0
+    real_waste = waste_data.get("real_waste_yards", t1 + t2)
+    plan_fab = (plan_info or {}).get("plan_fabric_yd") or total_fabric
+    real_waste_pct = (real_waste / plan_fab * 100) if plan_fab > 0 else 0
+    usable_eb_pct  = (t2 / (plan_fab + t1 + t2) * 100) if (plan_fab + t1 + t2) > 0 else 0
+    fresh_used     = plan_fab + t1 + t2
 
-    ws.cell(row=row, column=1, value="Total Fabric Required:").font = HEADER_FONT
-    ws.cell(row=row, column=2, value=f"{total_fabric:.2f} yd")
+    # ---- FACTORY TARGET (highlighted callout) ----
+    c = ws.cell(row=row, column=1, value="▶ FACTORY TARGET — REAL MATERIAL LOSS")
+    c.font = Font(bold=True, size=13, color="C00000")
     row += 1
-    ws.cell(row=row, column=1, value="Total Waste:").font = HEADER_FONT
-    ws.cell(row=row, column=2, value=f"{real_waste:.2f} yd ({waste_pct:.1f}%)")
+    ws.cell(row=row, column=1,
+            value="Sum of T1 (scrap) + T2 (lost end-bits). T3 is returned to stock.").font = Font(italic=True, size=9)
     row += 1
-    ws.cell(row=row, column=1, value="Breakdown:").font = HEADER_FONT
-    ws.cell(row=row, column=2, value=f"Unusable {unusable:.2f}  |  End-bit {endbit:.2f}  |  Returnable {returnable:.2f}")
-    row += 2
+    for i, h in enumerate(["Metric", "Value", "% of plan fabric"]):
+        c = ws.cell(row=row, column=1+i, value=h)
+        c.font = HEADER_FONT; c.fill = HEADER_FILL; c.border = THIN_BORDER; c.alignment = CENTER
+    row += 1
+    target_rows = [
+        ("Real waste (T1 + T2)", f"{real_waste:.2f} yd", f"{real_waste_pct:.2f}%", True),
+        ("T2 end-bits lost (usable material left on floor)",
+         f"{t2:.2f} yd", f"{usable_eb_pct:.2f}% of spent", False),
+        ("Fresh fabric consumed", f"{fresh_used:.2f} yd", "—", False),
+    ]
+    for label, val, pct, highlight in target_rows:
+        for ci, v in enumerate([label, val, pct]):
+            c = ws.cell(row=row, column=1+ci, value=v)
+            c.border = THIN_BORDER
+            if ci > 0:
+                c.alignment = CENTER
+            if highlight:
+                c.fill = TARGET_FILL
+                c.font = Font(bold=True, size=12)
+        row += 1
+    row += 1
 
-    # Docket overview table
+    # ---- PLAN DETAILS (optional) ----
+    if plan_info:
+        ws.cell(row=row, column=1, value="PLAN DETAILS").font = SUBTITLE_FONT
+        row += 1
+        entries = [
+            ("Order", plan_info.get("order_number", "")),
+            ("Markers", plan_info.get("total_markers", "")),
+            ("Plies total", plan_info.get("total_plies", "")),
+            ("Cuts total (@{} plies/cut)".format(max_ply_height), plan_info.get("total_cuts", "")),
+            ("Plan fabric (yd)", f"{plan_fab:.2f}"),
+            ("Weighted marker efficiency", f"{plan_info.get('weighted_eff_pct', 0):.2f}%"),
+            ("Garments produced", plan_info.get("garments_produced", "")),
+        ]
+        gmts = plan_info.get("garments_produced") or 0
+        if gmts:
+            entries.append(("Fabric / garment (yd)", f"{plan_fab/gmts:.4f}"))
+        for k, v in entries:
+            ws.cell(row=row, column=1, value=k).font = HEADER_FONT
+            ws.cell(row=row, column=2, value=v)
+            row += 1
+        row += 1
+
+    # ---- ROLL INVENTORY (optional) ----
+    def _rv(r, key, default=None):
+        if isinstance(r, dict):
+            return r.get(key, default)
+        return getattr(r, key, default)
+    if rolls:
+        roll_lens = sorted([_rv(r, "length_yards", 0) or 0 for r in rolls])
+        total_roll_yd = sum(roll_lens)
+        slack = total_roll_yd - plan_fab if plan_fab > 0 else 0
+        ws.cell(row=row, column=1, value="ROLL INVENTORY").font = SUBTITLE_FONT
+        row += 1
+        for k, v in [
+            ("Total rolls", f"{len(rolls)}"),
+            ("Total fabric available (yd)", f"{total_roll_yd:.2f}"),
+            ("Slack vs plan (yd / %)", f"{slack:.2f} yd ({(slack/plan_fab*100) if plan_fab>0 else 0:.2f}%)"),
+            ("Roll length min / mean / median / max",
+             f"{min(roll_lens):.1f} / {sum(roll_lens)/len(roll_lens):.1f} / "
+             f"{roll_lens[len(roll_lens)//2]:.1f} / {max(roll_lens):.1f} yd"),
+        ]:
+            ws.cell(row=row, column=1, value=k).font = HEADER_FONT
+            ws.cell(row=row, column=2, value=v)
+            row += 1
+        row += 1
+
+    # ---- ALLOCATION RESULTS ----
+    used_ids: set = set(); reuse_count = 0
+    for d in dockets:
+        for a in d.get("assigned_rolls", []):
+            rid = a.get("roll_id", "")
+            if rid in used_ids:
+                reuse_count += 1
+            used_ids.add(rid)
+    ws.cell(row=row, column=1, value="ALLOCATION RESULTS").font = SUBTITLE_FONT
+    row += 1
+    alloc = [
+        ("End-bit re-use events", f"{reuse_count}"),
+        ("Fresh fabric consumed", f"{fresh_used:.2f} yd"),
+        ("Fabric returned to stock (T3)", f"{t3:.2f} yd"),
+    ]
+    if rolls is not None:
+        n_rolls = len(rolls)
+        # Count rolls touched only among real inventory ids (ignore -bit derivatives)
+        real_ids = set()
+        for r in rolls:
+            rid = _rv(r, "roll_id", None)
+            if rid: real_ids.add(rid)
+        touched = sum(1 for rid in used_ids if rid.replace("-bit", "") in real_ids or rid in real_ids)
+        untouched_count = n_rolls - len(used_ids & real_ids)
+        alloc.insert(0, ("Rolls touched",
+                          f"{len(used_ids & real_ids)} of {n_rolls} "
+                          f"({(len(used_ids & real_ids)/n_rolls*100) if n_rolls>0 else 0:.1f}%)"))
+        alloc.insert(1, ("Rolls untouched", f"{untouched_count}"))
+    for k, v in alloc:
+        ws.cell(row=row, column=1, value=k).font = HEADER_FONT
+        ws.cell(row=row, column=2, value=v)
+        row += 1
+    row += 1
+
+    # ---- WASTE CLASSIFICATION ----
+    ws.cell(row=row, column=1, value="WASTE CLASSIFICATION").font = SUBTITLE_FONT
+    row += 1
+    for i, h in enumerate(["Type", "Description", "Yards", "Count", "% of plan"]):
+        c = ws.cell(row=row, column=1+i, value=h)
+        c.font = HEADER_FONT; c.fill = HEADER_FILL; c.border = THIN_BORDER; c.alignment = CENTER
+    row += 1
+    for label, desc, yards, cnt, pct in [
+        ("T1", "Unusable scrap (< 1 garment)",  t1, t1_count, (t1/plan_fab*100) if plan_fab > 0 else 0),
+        ("T2", "End-bit lost (recoverable)",     t2, t2_count, (t2/plan_fab*100) if plan_fab > 0 else 0),
+        ("T3", "Untouched roll (returnable)",   t3, t3_count, (t3/plan_fab*100) if plan_fab > 0 else 0),
+    ]:
+        for ci, v in enumerate([label, desc, f"{yards:.2f}", cnt, f"{pct:.2f}%"]):
+            c = ws.cell(row=row, column=1+ci, value=v); c.border = THIN_BORDER
+            if ci > 1: c.alignment = CENTER
+        row += 1
+    row += 1
+
+    # ---- UNTOUCHED ROLLS (optional, highlighted) ----
+    if rolls is not None:
+        untouched = []
+        for r in rolls:
+            rid = _rv(r, "roll_id", None)
+            ylen = _rv(r, "length_yards", 0) or 0
+            if rid and rid not in used_ids:
+                untouched.append((rid, ylen))
+        untouched.sort(key=lambda x: -x[1])
+        untouched_yd = sum(y for _, y in untouched)
+        ws.cell(row=row, column=1,
+                value=f"UNTOUCHED ROLLS — {len(untouched)} rolls / {untouched_yd:.2f} yd "
+                        "returnable to stock").font = SUBTITLE_FONT
+        row += 1
+        for i, h in enumerate(["Roll ID (Lot)", "Length (yd)"]):
+            c = ws.cell(row=row, column=1+i, value=h)
+            c.font = HEADER_FONT; c.fill = HEADER_FILL; c.border = THIN_BORDER; c.alignment = CENTER
+        row += 1
+        for rid, ylen in untouched:
+            c1 = ws.cell(row=row, column=1, value=rid)
+            c2 = ws.cell(row=row, column=2, value=round(ylen, 2))
+            for c in (c1, c2):
+                c.border = THIN_BORDER; c.fill = UNTOUCHED_ROLL_FILL
+            c2.alignment = CENTER
+            row += 1
+        c = ws.cell(row=row, column=1, value="TOTAL RETURNABLE")
+        c.font = Font(bold=True); c.fill = TOTAL_ROW_FILL; c.border = THIN_BORDER
+        c = ws.cell(row=row, column=2, value=round(untouched_yd, 2))
+        c.font = Font(bold=True); c.fill = TOTAL_ROW_FILL; c.border = THIN_BORDER; c.alignment = CENTER
+        row += 2
+
+    # ---- PER-MARKER SUMMARY (optional) ----
+    if markers:
+        ws.cell(row=row, column=1, value="PER-MARKER SUMMARY").font = SUBTITLE_FONT
+        row += 1
+        for i, h in enumerate(["Marker", "Ratio", "BC", "Length (yd)", "Plies", "Cuts", "Fabric (yd)"]):
+            c = ws.cell(row=row, column=1+i, value=h)
+            c.font = HEADER_FONT; c.fill = HEADER_FILL; c.border = THIN_BORDER; c.alignment = CENTER
+        row += 1
+        def _mv(m, key, default=None):
+            if isinstance(m, dict):
+                return m.get(key, default)
+            return getattr(m, key, default)
+        for m in markers:
+            label = _mv(m, "marker_label", "")
+            ratio = _mv(m, "ratio_str", "")
+            length_yd = _mv(m, "length_yards", 0) or 0
+            plies = _mv(m, "total_plies", None)
+            if plies is None:
+                plies = _mv(m, "plies", 0)
+            bc = sum(int(x) for x in ratio.split("-")) if ratio else 0
+            cuts_per = math.ceil(plies / max_ply_height) if plies else 0
+            fabric = (length_yd or 0) * (plies or 0)
+            row_fill = ABSORBER_ROW_FILL if bc == 1 else None
+            for ci, v in enumerate([label, ratio, bc, round(length_yd, 3), plies, cuts_per, round(fabric, 2)]):
+                c = ws.cell(row=row, column=1+ci, value=v)
+                c.border = THIN_BORDER; c.alignment = CENTER
+                if row_fill: c.fill = row_fill
+            row += 1
+        row += 1
+
+    # ---- Docket overview table (always, since dockets are the main data) ----
+    ws.cell(row=row, column=1, value="CUT OVERVIEW").font = SUBTITLE_FONT
+    row += 1
     headers = [
         "Cut #", "Marker", "Ratio", "Length (yd)", "Plies",
         "Planned", "Rolls", "Fabric (yd)", "End Bits (yd)",

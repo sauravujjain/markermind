@@ -961,9 +961,9 @@ def _optimal_allocation_ilp(
     Returns same tuple as _run_allocation, or None if solver unavailable/fails.
     """
     try:
-        from scipy.optimize import milp as scipy_milp, LinearConstraint, Bounds
-        from scipy.sparse import csc_matrix
         import numpy as np
+        from cuopt import linear_programming as clp
+        from scripts.cuopt_helpers import apply_tuned_settings
     except ImportError:
         return None
 
@@ -973,7 +973,7 @@ def _optimal_allocation_ilp(
         return None
 
     # Size guard: skip ILP for very large problems (GA fallback)
-    # 100K variables is the practical ceiling for sub-60s solve times.
+    # 100K variables is the practical ceiling.
     if n_rolls * n_markers > 100_000:
         return None
 
@@ -988,98 +988,94 @@ def _optimal_allocation_ilp(
     if progress_callback:
         progress_callback(5, "Solving ILP roll assignment...")
 
-    # --- Formulate ILP ---
+    # --- Formulate MIP (solved via cuOpt) ---
     # Variables:
     #   x[i * n_markers + j] = plies of marker j from roll i (integer)
     #   full[i] = 1 if roll i's remainder < piece_consumption (binary)
-    # The full[i] variables incentivize the ILP to push remainders into
-    # T1 range (< pc) rather than leaving them in T2 range [pc, max_ml).
+    # The full[i] variables incentivize pushing remainders into T1 range
+    # (< pc) rather than leaving them in T2 range [pc, max_ml).
     n_x = n_rolls * n_markers
-    n_full = n_rolls
-    n_vars = n_x + n_full
+    n_vars = n_x + n_rolls
 
-    # Objective: maximize Σ x[i][j] * (ml[j] + ply_bonus) + Σ full[i] * full_bonus
-    # ply_bonus: demand fulfillment always preferred over waste reduction.
-    # full_bonus: incentivize T1 remainders over T2.
+    # Objective: MAXIMIZE Σ x[i,j]*(ml[j] + ply_bonus) + Σ full[i]*full_bonus
     ply_bonus = max_L + 1.0
-    full_bonus = max_marker_length  # worth about one max-marker-length of waste savings
-    c = np.zeros(n_vars)
+    full_bonus = max_marker_length
+    obj = np.zeros(n_vars, dtype=np.float64)
     for i in range(n_rolls):
         for j in range(n_markers):
-            c[i * n_markers + j] = -(ml[j] + ply_bonus)
-        c[n_x + i] = -full_bonus
+            obj[i * n_markers + j] = ml[j] + ply_bonus
+        obj[n_x + i] = full_bonus
 
-    # Bounds: x[i][j] in [0, floor(L[i]/ml[j])], full[i] in [0, 1]
-    ub = np.zeros(n_vars)
+    # Bounds
+    var_lb = np.zeros(n_vars, dtype=np.float64)
+    var_ub = np.zeros(n_vars, dtype=np.float64)
     for i in range(n_rolls):
         for j in range(n_markers):
-            ub[i * n_markers + j] = float(int(L[i] / ml[j]))
-        ub[n_x + i] = 1.0
+            var_ub[i * n_markers + j] = float(int(L[i] / ml[j]))
+        var_ub[n_x + i] = 1.0
 
-    # Constraint 1: roll capacity — Σ_j x[i][j] * ml[j] <= L[i]
-    rows1, cols1, data1 = [], [], []
-    for i in range(n_rolls):
-        for j in range(n_markers):
-            if ub[i * n_markers + j] > 0:
-                rows1.append(i)
-                cols1.append(i * n_markers + j)
-                data1.append(ml[j])
-    A1 = csc_matrix((data1, (rows1, cols1)), shape=(n_rolls, n_vars))
-
-    # Constraint 2: demand — Σ_i x[i][j] <= demand[j]
-    rows2, cols2, data2 = [], [], []
-    for j in range(n_markers):
-        for i in range(n_rolls):
-            if ub[i * n_markers + j] > 0:
-                rows2.append(j)
-                cols2.append(i * n_markers + j)
-                data2.append(1.0)
-    A2 = csc_matrix((data2, (rows2, cols2)), shape=(n_markers, n_vars))
-
-    # Constraint 3: full-consumption linkage (big-M)
-    # full[i]=1 → Σ_j x[i][j]*ml[j] >= L[i] - pc + ε   (remainder < pc)
-    # Formulated as: Σ_j x[i][j]*ml[j] - M*full[i] >= L[i] - pc + ε - M
+    # Build constraints as COO triplets, then to CSR
+    # Row 0..n_rolls-1  : roll capacity  Σ_j x[i,j]*ml[j] <= L[i]
+    # Row n_rolls..n_rolls+n_markers-1 : demand Σ_i x[i,j] <= demand[j]
+    # Row n_rolls+n_markers..2*n_rolls+n_markers-1 : full linkage
+    #       Σ_j x[i,j]*ml[j] - M*full[i] >= L[i] - pc + eps - M
     M_big = max_L + 1.0
     eps = 0.001
-    rows3, cols3, data3 = [], [], []
-    lb3_vals = []
+    rows_triplets: List[List[Tuple[int, float]]] = [[] for _ in range(2 * n_rolls + n_markers)]
+    lb = np.full(2 * n_rolls + n_markers, -np.inf, dtype=np.float64)
+    ub = np.full(2 * n_rolls + n_markers,  np.inf, dtype=np.float64)
     for i in range(n_rolls):
+        ub[i] = float(L[i])
         for j in range(n_markers):
-            if ub[i * n_markers + j] > 0:
-                rows3.append(i)
-                cols3.append(i * n_markers + j)
-                data3.append(ml[j])
-        rows3.append(i)
-        cols3.append(n_x + i)
-        data3.append(-M_big)
-        lb3_vals.append(L[i] - piece_consumption + eps - M_big)
-    A3 = csc_matrix((data3, (rows3, cols3)), shape=(n_rolls, n_vars))
+            if var_ub[i * n_markers + j] > 0:
+                rows_triplets[i].append((i * n_markers + j, ml[j]))
+    for j in range(n_markers):
+        ub[n_rolls + j] = float(demand[j])
+        for i in range(n_rolls):
+            if var_ub[i * n_markers + j] > 0:
+                rows_triplets[n_rolls + j].append((i * n_markers + j, 1.0))
+    for i in range(n_rolls):
+        r = n_rolls + n_markers + i
+        for j in range(n_markers):
+            if var_ub[i * n_markers + j] > 0:
+                rows_triplets[r].append((i * n_markers + j, ml[j]))
+        rows_triplets[r].append((n_x + i, -M_big))
+        lb[r] = L[i] - piece_consumption + eps - M_big
 
-    constraints = [
-        LinearConstraint(A1, ub=np.array(L, dtype=float)),
-        LinearConstraint(A2, ub=np.array(demand, dtype=float)),
-        LinearConstraint(A3, lb=np.array(lb3_vals)),
-    ]
+    Av, Ai, Ao = [], [], [0]
+    for row in rows_triplets:
+        for col, coef in sorted(row, key=lambda t: t[0]):
+            Av.append(coef); Ai.append(col)
+        Ao.append(len(Av))
 
-    bounds = Bounds(lb=np.zeros(n_vars), ub=ub)
-    integrality = np.ones(n_vars)
+    dm = clp.DataModel()
+    dm.set_csr_constraint_matrix(
+        np.array(Av, np.float64), np.array(Ai, np.int32), np.array(Ao, np.int32))
+    dm.set_objective_coefficients(obj)
+    dm.set_variable_lower_bounds(var_lb)
+    dm.set_variable_upper_bounds(var_ub)
+    dm.set_variable_types(np.array(["I"] * n_vars, dtype="<U1"))
+    dm.set_constraint_lower_bounds(lb)
+    dm.set_constraint_upper_bounds(ub)
+    dm.set_maximize(True)
 
-    result = scipy_milp(
-        c, constraints=constraints,
-        integrality=integrality, bounds=bounds,
-        options={"time_limit": 60},
-    )
+    settings = clp.SolverSettings()
+    apply_tuned_settings(settings, 120)
 
-    if not result.success:
+    sol = clp.Solve(dm, settings)
+    x_sol = sol.get_primal_solution()
+    if x_sol is None:
         return None
 
     if progress_callback:
-        progress_callback(50, "ILP solved — building dockets...")
+        progress_callback(
+            50,
+            f"cuOpt solved (obj={sol.get_primal_objective():.2f}) — building dockets...",
+        )
 
-    # Parse solution into 2D matrix (first n_x variables are plies, rest are full[i])
-    x = [[int(round(result.x[i * n_markers + j])) for j in range(n_markers)]
+    x = [[int(round(x_sol[i * n_markers + j])) for j in range(n_markers)]
          for i in range(n_rolls)]
-    full_vals = [int(round(result.x[n_x + i])) for i in range(n_rolls)]
+    full_vals = [int(round(x_sol[n_x + i])) for i in range(n_rolls)]
 
     # --- T2 elimination: redistribute short-marker plies to T2 rolls ---
     # The ILP maximises fabric usage but doesn't distinguish T1 vs T2
